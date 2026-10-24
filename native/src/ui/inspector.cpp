@@ -33,6 +33,7 @@
 #include "core/timeline.h"
 #include "render/textrender.h"
 #include "ui/animpanel.h"
+#include "ui/plaintextinput.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -685,7 +686,8 @@ class TextPanel : public QWidget {
     auto* v = pageLayout(this);
     header_ = new PanelHeader(this);
     v->addWidget(header_);
-    edit_ = new QPlainTextEdit(this);
+    // 日本語を変換している途中も、案内の文字（プレースホルダー）をすぐに消す入力欄
+    edit_ = new PlainTextInput(this);
     edit_->setPlaceholderText(QStringLiteral("テキストを入力"));
     edit_->setFixedHeight(76);
     edit_->setAccessibleName(QStringLiteral("テキスト"));
@@ -903,24 +905,7 @@ class TextPanel : public QWidget {
   }
 
   /** 選んでいるテキストの見た目を、名前を付けてテンプレートにする */
-  void saveAsTemplate() {
-    const TextItem* t = editor().text(textId_);
-    if (!t) return;
-    bool ok = false;
-    const QString def = QStringLiteral("マイテンプレート %1").arg(textTemplates().list().size() + 1);
-    const QString name = QInputDialog::getText(this, QStringLiteral("テンプレートに保存"),
-                                               QStringLiteral("テンプレートの名前（見た目・登場のアニメーション・キーフレームを保存します。文字は保存しません）"),
-                                               QLineEdit::Normal, def, &ok);
-    if (!ok) return;
-    const QString id = textTemplates().add(name, *t);
-    if (id.isEmpty()) {
-      editor().toast(QStringLiteral("テンプレートを保存できませんでした"), ToastKind::Error);
-      return;
-    }
-    editor().toast(QStringLiteral("テンプレート「%1」を保存しました。左の「テキスト」の一覧からタイムラインへドラッグして使えます")
-                       .arg(TextTemplates::cleanName(name)),
-                   ToastKind::Success);
-  }
+  void saveAsTemplate() { saveTextAsTemplate(this, textId_); }
 
   /** フォントの一覧（組み込みの種類 → 同梱のフォント → 読み込んだフォント → 読み込む） */
   void fillFonts() {

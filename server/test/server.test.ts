@@ -268,6 +268,275 @@ describe('ユーザーとロール', () => {
   });
 });
 
+describe('ワークショップ', () => {
+  let hanakoToken = '';
+  let published = '';
+  const as = (token: string) => ({ authorization: `Bearer ${token}` });
+  const list = (token: string, query = '') => req('GET', `/api/workshop/templates${query}`, { headers: as(token) });
+  const publish = (token: string, body: Record<string, unknown>) => req('POST', '/api/workshop/templates', { body, headers: as(token) });
+  // アプリの textToJson と同じ形（文字・時間・段・グループ・一部のフォントも入っているが、サーバーは保存しない）
+  const appStyle = (extra: Record<string, unknown> = {}) => ({
+    id: '',
+    text: '秘密の文字',
+    start: 12,
+    track: 3,
+    group: 'g1',
+    fontSpans: [{ start: 0, length: 1, font: 'maru' }],
+    duration: 2.5,
+    x: 0.5,
+    y: 0.2,
+    font: 'maru',
+    fontFamily: 'M PLUS Rounded 1c',
+    size: 0.9,
+    bold: true,
+    color: '#FFE14D',
+    strokeColor: '#c2185b',
+    strokeWidth: 0.2,
+    boxColor: '#000000',
+    boxOpacity: 0,
+    shadow: false,
+    align: 'center',
+    letterSpacing: 8,
+    animation: 'slideUp',
+    scale: 1,
+    rotation: 0,
+    opacity: 1,
+    anim: { scale: [{ t: 0.5, value: 1, easing: 'easeOut' }, { t: 0, value: 0.2, easing: 'linear' }] },
+    ...extra,
+  });
+
+  test('つながるかの確認で、ワークショップを使えるかが分かる', async () => {
+    const h = await req('GET', '/api/health');
+    assert.equal(h.json.api, 3);
+    assert.equal(h.json.workshop, 'open');
+    assert.equal((await req('GET', '/api/workshop/templates')).status, 401);
+    hanakoToken = (await appLogin('hanako@example.com', 'blue-river-2026')).json.token;
+    assert.equal(typeof hanakoToken, 'string');
+  });
+
+  test('公開すると、見た目だけを整えて保存し、作った人は表示名で出る', async () => {
+    const res = await publish(userToken, { name: '  黄色の\nポップ  ', description: 'バラエティ番組風', style: appStyle() });
+    assert.equal(res.status, 201, JSON.stringify(res.json));
+    const t = res.json.template;
+    published = t.id;
+    assert.equal(t.name, '黄色の ポップ');
+    assert.equal(t.author, '太郎');
+    assert.equal(t.status, 'published');
+    assert.equal(t.mine, true);
+    // 文字・時間・段・グループ・一部のフォントは保存しない。範囲の外の値は収め、色は小文字にそろえ、キーフレームは時間の順
+    for (const key of ['id', 'text', 'start', 'track', 'group', 'fontSpans']) assert.equal(key in t.style, false, key);
+    assert.equal(t.style.size, 0.5);
+    assert.equal(t.style.color, '#ffe14d');
+    assert.equal(t.style.fontFamily, 'M PLUS Rounded 1c');
+    assert.equal(t.style.duration, 2.5);
+    assert.deepEqual(t.style.anim.scale.map((k: { t: number }) => k.t), [0, 0.5]);
+    const stored = await s.db.query('select style from workshop_templates where id = $1', [published]);
+    assert.ok(!JSON.stringify(stored.rows[0].style).includes('秘密の文字'));
+  });
+
+  test('正しくない見た目や名前は受け付けない', async () => {
+    const bad: Record<string, unknown>[] = [
+      { name: 'a', style: 'x' },
+      { name: 'a', style: appStyle({ color: 'red' }) },
+      { name: 'a', style: appStyle({ font: 'comic' }) },
+      { name: 'a', style: appStyle({ size: '0.1' }) },
+      { name: 'a', style: appStyle({ anim: { volume: [{ t: 0, value: 1 }] } }) },
+      { name: 'a', style: appStyle({ anim: { x: Array.from({ length: 101 }, (_, i) => ({ t: i, value: 0.5 })) } }) },
+      { name: 'a', style: appStyle({ anim: { x: [{ t: 0 }] } }) },
+      { name: 'a', style: appStyle({ fontFamily: 'f'.repeat(101) }) },
+      { name: '   ', style: appStyle() },
+      { name: 'あ'.repeat(31), style: appStyle() },
+      { name: 'a', description: 'い'.repeat(201), style: appStyle() },
+    ];
+    for (const body of bad) {
+      const res = await publish(userToken, body);
+      assert.equal(res.status, 400, JSON.stringify(body).slice(0, 120));
+    }
+    assert.equal((await s.db.query('select count(*) as n from workshop_templates')).rows[0].n, 1);
+  });
+
+  test('ほかの人は一覧で見つけて使え、使った人は 1 人 1 回だけ数える', async () => {
+    const res = await list(hanakoToken);
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.mode, 'open');
+    assert.equal(res.json.total, 1);
+    const t = res.json.templates[0];
+    assert.equal(t.id, published);
+    assert.equal(t.mine, false);
+    assert.equal(t.used, false);
+    assert.equal('email' in t, false);
+    // 名前・説明・作った人で探せる。% や _ は、ただの文字として探す
+    assert.equal((await list(hanakoToken, `?q=${encodeURIComponent('ポップ')}`)).json.total, 1);
+    assert.equal((await list(hanakoToken, `?q=${encodeURIComponent('太郎')}`)).json.total, 1);
+    assert.equal((await list(hanakoToken, `?q=${encodeURIComponent('%')}`)).json.total, 0);
+    assert.equal((await list(hanakoToken, '?q=none-such')).json.total, 0);
+    const use = () => req('POST', `/api/workshop/templates/${published}/use`, { headers: as(hanakoToken) });
+    assert.equal((await use()).json.uses, 1);
+    assert.equal((await use()).json.uses, 1);
+    const again = await list(hanakoToken, '?sort=popular');
+    assert.equal(again.json.templates[0].used, true);
+    assert.equal(again.json.templates[0].uses, 1);
+    // 自分が公開したものだけの一覧
+    assert.equal((await list(hanakoToken, '?mine=1')).json.total, 0);
+    assert.equal((await list(userToken, '?mine=1')).json.total, 1);
+  });
+
+  test('報告すると管理画面に出る（自分のものは報告できない）', async () => {
+    const report = (token: string, reason: string) => req('POST', `/api/workshop/templates/${published}/report`, { body: { reason }, headers: as(token) });
+    assert.equal((await report(hanakoToken, '名前が\nよくない')).status, 200);
+    assert.equal((await report(userToken, '自分')).status, 400);
+    const admin = await req('GET', '/api/admin/workshop?status=reported', { headers: adminHeaders(adminCookie, false) });
+    assert.equal(admin.status, 200, JSON.stringify(admin.json));
+    assert.equal(admin.json.templates.length, 1);
+    assert.equal(admin.json.templates[0].reports, 1);
+    assert.deepEqual(admin.json.templates[0].reasons, ['名前が よくない']);
+    assert.equal(admin.json.templates[0].email, 'taro@example.com');
+    const overview = await req('GET', '/api/admin/overview', { headers: adminHeaders(adminCookie, false) });
+    assert.equal(overview.json.workshop.reported, 1);
+    const cleared = await req('PATCH', `/api/admin/workshop/${published}`, { body: { clearReports: true }, headers: adminHeaders(adminCookie) });
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.json));
+    assert.equal(cleared.json.template.reports, 0);
+  });
+
+  test('管理者が確認してから公開する設定と、使えない設定', async () => {
+    const set = (mode: string) => req('PATCH', '/api/admin/settings', { body: { workshop: { mode } }, headers: adminHeaders(adminCookie) });
+    assert.equal((await set('maybe')).status, 400);
+    const approval = await set('approval');
+    assert.equal(approval.status, 200, JSON.stringify(approval.json));
+    assert.equal(approval.json.workshop.mode, 'approval');
+    // 新規登録の設定は、そのまま
+    assert.equal(approval.json.registration.mode, 'approval');
+    assert.equal((await req('GET', '/api/health')).json.workshop, 'approval');
+    const res = await publish(hanakoToken, { name: '花子の字幕', style: appStyle({ anim: undefined }) });
+    assert.equal(res.status, 201, JSON.stringify(res.json));
+    assert.equal(res.json.template.status, 'pending');
+    assert.match(res.json.message, /管理者が確認/);
+    const pending = res.json.template.id;
+    // 確認待ちのものは、みんなの一覧には出ない（自分の一覧には出る）
+    assert.equal((await list(userToken)).json.templates.some((t: { id: string }) => t.id === pending), false);
+    assert.equal((await list(hanakoToken, '?mine=1')).json.templates[0].status, 'pending');
+    assert.equal((await req('POST', `/api/workshop/templates/${pending}/use`, { headers: as(userToken) })).status, 404);
+    const approve = await req('PATCH', `/api/admin/workshop/${pending}`, { body: { status: 'published' }, headers: adminHeaders(adminCookie) });
+    assert.equal(approve.status, 200, JSON.stringify(approve.json));
+    assert.equal((await list(userToken)).json.templates.some((t: { id: string }) => t.id === pending), true);
+    const hide = await req('PATCH', `/api/admin/workshop/${pending}`, { body: { status: 'hidden' }, headers: adminHeaders(adminCookie) });
+    assert.equal(hide.json.template.status, 'hidden');
+    assert.equal((await list(userToken)).json.templates.some((t: { id: string }) => t.id === pending), false);
+    const del = await req('DELETE', `/api/admin/workshop/${pending}`, { headers: adminHeaders(adminCookie) });
+    assert.equal(del.status, 200);
+    assert.equal((await req('DELETE', `/api/admin/workshop/${pending}`, { headers: adminHeaders(adminCookie) })).status, 404);
+    // 使えない設定
+    assert.equal((await set('off')).status, 200);
+    const closed = await list(userToken);
+    assert.equal(closed.status, 403);
+    assert.equal(closed.json.code, 'workshop_closed');
+    assert.equal((await set('open')).status, 200);
+    const audit = await req('GET', '/api/admin/audit', { headers: adminHeaders(adminCookie, false) });
+    const actions = audit.json.rows.map((r: { action: string }) => r.action);
+    for (const a of ['workshop.approve', 'workshop.hide', 'workshop.delete', 'workshop.clear_reports']) assert.ok(actions.includes(a), a);
+  });
+
+  test('公開をやめられるのは公開した本人だけで、1 人が公開できる数には上限がある', async () => {
+    const remove = (token: string) => req('DELETE', `/api/workshop/templates/${published}`, { headers: as(token) });
+    assert.equal((await remove(hanakoToken)).status, 404);
+    assert.equal((await remove(userToken)).status, 200);
+    assert.equal((await list(hanakoToken)).json.total, 0);
+    // 上限（100 個）まで公開していると断る
+    const taro = (await s.db.query("select id from users where email = 'taro@example.com'")).rows[0].id;
+    await s.db.query(`insert into workshop_templates (user_id, name, style) select $1, 'x' || g, '{}'::jsonb from generate_series(1, 100) g`, [taro]);
+    const over = await publish(userToken, { name: '101 個目', style: appStyle() });
+    assert.equal(over.status, 409);
+    assert.equal(over.json.code, 'too_many_templates');
+    await s.db.query('delete from workshop_templates where user_id = $1', [taro]);
+  });
+});
+
+describe('ワークショップのオーディオ', () => {
+  let hanakoToken = '';
+  let audioId = '';
+  const as = (token: string) => ({ authorization: `Bearer ${token}` });
+  // ID3 のタグで始まる MP3 のふり（中身は確かめない。先頭の形だけを見る）
+  const mp3 = (size = 4096) => Buffer.concat([Buffer.from('ID3'), Buffer.alloc(size - 3, 1)]);
+  const upload = (token: string, data: Buffer, query: string) =>
+    s.app.inject({ method: 'POST', url: `/api/workshop/audio?${query}`, headers: { ...as(token), 'content-type': 'application/octet-stream' }, payload: data });
+  const q = (name: string, extra = '') => `name=${encodeURIComponent(name)}&fileName=${encodeURIComponent('効果音.mp3')}&duration=1.5${extra}`;
+
+  test('オーディオを公開すると、中身から形式を決めて保存する', async () => {
+    hanakoToken = (await appLogin('hanako@example.com', 'blue-river-2026')).json.token;
+    const res = await upload(userToken, mp3(), q('ピコーン', `&description=${encodeURIComponent('決定の音')}`));
+    assert.equal(res.statusCode, 201, res.body);
+    const t = res.json().template;
+    audioId = t.id;
+    assert.equal(t.kind, 'audio');
+    assert.equal(t.name, 'ピコーン');
+    assert.deepEqual(t.file, { type: 'mp3', size: 4096, duration: 1.5 });
+    assert.equal('style' in t, false);
+  });
+
+  test('オーディオではないもの・大きすぎるもの・長さの無いものは受け付けない', async () => {
+    assert.equal((await upload(userToken, Buffer.alloc(4096, 0x41), q('文字だけ'))).statusCode, 400);
+    assert.equal((await upload(userToken, mp3(100), q('小さすぎ'))).statusCode, 400);
+    assert.equal((await upload(userToken, mp3(), `name=x&fileName=a.mp3`)).statusCode, 400);
+    assert.equal((await upload(userToken, mp3(), q(''))).statusCode, 400);
+    assert.equal((await upload(userToken, mp3(20 * 1024 * 1024 + 10), q('大きすぎ'))).statusCode, 413);
+    const json = await req('POST', '/api/workshop/audio?name=x&duration=1', { body: { data: 'x' }, headers: as(userToken) });
+    assert.equal(json.status, 400);
+    // 中身で見分ける（拡張子が違っても、WAV なら WAV）
+    const wav = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVE'), Buffer.alloc(4000, 2)]);
+    const res = await upload(userToken, wav, `name=wav&fileName=sound.mp3&duration=2`);
+    assert.equal(res.statusCode, 201, res.body);
+    assert.equal(res.json().template.file.type, 'wav');
+    assert.equal((await req('DELETE', `/api/workshop/templates/${res.json().template.id}`, { headers: as(userToken) })).status, 200);
+  });
+
+  test('ほかの人は一覧で見つけて、中身を読み込める（テキストの一覧には出ない）', async () => {
+    const audio = await req('GET', '/api/workshop/templates?kind=audio', { headers: as(hanakoToken) });
+    assert.equal(audio.status, 200);
+    assert.equal(audio.json.kind, 'audio');
+    assert.equal(audio.json.total, 1);
+    assert.equal(audio.json.templates[0].author, '太郎');
+    // kind を送らない（古いアプリ）と、テキストのテンプレートだけ
+    const text = await req('GET', '/api/workshop/templates', { headers: as(hanakoToken) });
+    assert.equal(text.json.templates.some((t: { id: string }) => t.id === audioId), false);
+    const file = await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${audioId}/file`, headers: as(hanakoToken) });
+    assert.equal(file.statusCode, 200);
+    assert.equal(file.headers['content-type'], 'audio/mpeg');
+    assert.equal(file.headers['x-kantan-file-type'], 'mp3');
+    assert.ok(file.rawPayload.equals(mp3()));
+    assert.equal((await req('POST', `/api/workshop/templates/${audioId}/use`, { headers: as(hanakoToken) })).json.uses, 1);
+    // ログインしていなければ読めない
+    assert.equal((await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${audioId}/file` })).statusCode, 401);
+  });
+
+  test('非公開にしたものは、公開した本人のほかは読めない。管理画面では聞ける', async () => {
+    const hide = await req('PATCH', `/api/admin/workshop/${audioId}`, { body: { status: 'hidden' }, headers: adminHeaders(adminCookie) });
+    assert.equal(hide.status, 200, JSON.stringify(hide.json));
+    assert.equal((await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${audioId}/file`, headers: as(hanakoToken) })).statusCode, 404);
+    assert.equal((await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${audioId}/file`, headers: as(userToken) })).statusCode, 200);
+    const list = await req('GET', '/api/admin/workshop?kind=audio', { headers: adminHeaders(adminCookie, false) });
+    assert.equal(list.json.templates.length, 1);
+    assert.equal(list.json.templates[0].file.type, 'mp3');
+    const file = await s.app.inject({ method: 'GET', url: `/api/admin/workshop/${audioId}/file`, headers: adminHeaders(adminCookie, false) });
+    assert.equal(file.statusCode, 200);
+    assert.equal(file.headers['content-type'], 'audio/mpeg');
+    await req('PATCH', `/api/admin/workshop/${audioId}`, { body: { status: 'published' }, headers: adminHeaders(adminCookie) });
+  });
+
+  test('1 人が公開できるオーディオの大きさには上限があり、公開をやめると中身も消える', async () => {
+    const taro = (await s.db.query("select id from users where email = 'taro@example.com'")).rows[0].id;
+    await s.db.query(`insert into workshop_templates (user_id, kind, name, style, file_type, file_size, duration) values ($1, 'audio', '大きい', '{}', 'mp3', $2, 60)`, [
+      taro,
+      200 * 1024 * 1024,
+    ]);
+    const over = await upload(userToken, mp3(), q('入らない'));
+    assert.equal(over.statusCode, 409);
+    assert.equal(over.json().code, 'too_much_audio');
+    await s.db.query("delete from workshop_templates where name = '大きい'");
+    assert.equal((await req('DELETE', `/api/workshop/templates/${audioId}`, { headers: as(userToken) })).status, 200);
+    assert.equal((await s.db.query('select count(*) as n from workshop_files')).rows[0].n, 0);
+  });
+});
+
 describe('AI の中継', () => {
   const body = (effort: string, effortChoice = effort) => ({
     request: {

@@ -15,6 +15,23 @@ const ACTIONS = {
   'user.register': '新規登録',
   'user.approve': '登録を承認',
   'settings.update': '設定を変更',
+  'workshop.approve': 'ワークショップで公開（確認）',
+  'workshop.hide': 'ワークショップで非公開に',
+  'workshop.show': 'ワークショップで公開に戻す',
+  'workshop.delete': 'ワークショップから削除',
+  'workshop.clear_reports': 'ワークショップの報告を消す',
+};
+/** ワークショップの使い方 */
+const WORKSHOP = {
+  open: 'すぐに公開',
+  approval: '管理者が確認してから公開',
+  off: '使えない',
+};
+/** ワークショップのテンプレートの状態 */
+const TEMPLATE_STATUS = {
+  published: ['公開中', 'ok'],
+  pending: ['確認待ち', 'warn'],
+  hidden: ['非公開', 'off'],
 };
 /** 新規登録の受け付け方 */
 const REGISTRATION = {
@@ -239,6 +256,7 @@ const PAGES = [
   ['overview', '概要', viewOverview],
   ['users', 'ユーザー', viewUsers],
   ['signup', '新規登録', viewSignup],
+  ['workshop', 'ワークショップ', viewWorkshop],
   ['roles', 'ロール', viewRoles],
   ['usage', '使用履歴', viewUsage],
   ['audit', '操作の記録', viewAudit],
@@ -254,7 +272,8 @@ async function route() {
     }
   }
   if (me.user.mustChangePassword) return showForcedPassword();
-  const id = location.hash.replace(/^#\/?/, '') || 'overview';
+  // #/workshop?status=pending のような絞り込みは、ページの中で読む
+  const id = location.hash.replace(/^#\/?/, '').split('?')[0] || 'overview';
   const page = PAGES.find((p) => p[0] === id) ?? PAGES[0];
   const content = h('main', { class: 'content', id: 'content' });
   const nav = h(
@@ -302,6 +321,14 @@ async function viewOverview(root, month = thisMonth()) {
   if (!data.server.modelSupportsEffort) notices.push(`モデル ${data.server.model} は考える深さを変えられません。深さの設定は使われず、モデルの標準で動きます。`);
   const pending = Number(data.accounts.pending ?? 0);
   if (pending > 0) notices.push(h('span', {}, `承認待ちの新規登録が ${num(pending)} 人あります。`, h('a', { href: '#/signup' }, '新規登録の画面で承認する')));
+  const workshopPending = Number(data.workshop?.pending ?? 0);
+  const workshopReported = Number(data.workshop?.reported ?? 0);
+  if (workshopPending > 0 || workshopReported > 0) {
+    const parts = [];
+    if (workshopPending > 0) parts.push(`確認待ちのものが ${num(workshopPending)} 個`);
+    if (workshopReported > 0) parts.push(`報告のあるものが ${num(workshopReported)} 個`);
+    notices.push(h('span', {}, `ワークショップに${parts.join('、')}あります。`, h('a', { href: '#/workshop' }, 'ワークショップの画面で確かめる')));
+  }
   // グラフは月の 1 日から末日まで並べる（使わなかった日も 0 として並べる）
   const [year, mon] = data.month.split('-').map(Number);
   const byDay = new Map(data.daily.map((d) => [d.day, d]));
@@ -710,6 +737,177 @@ async function viewSignup(root) {
   );
 }
 
+// ---- ワークショップ --------------------------------------------------------------------
+
+/** フォントの種類（アプリの組み込みの種類）を、ブラウザーの近いフォントにする（見本用。同じ見た目にはならない） */
+const SAMPLE_FONTS = {
+  gothic: '"Yu Gothic UI", "Meiryo", sans-serif',
+  meiryo: '"Meiryo", sans-serif',
+  maru: '"HG丸ｺﾞｼｯｸM-PRO", "Yu Gothic UI", sans-serif',
+  ud: '"BIZ UDPGothic", "Yu Gothic UI", sans-serif',
+  mincho: '"Yu Mincho", "MS Mincho", serif',
+  kyokasho: '"UD Digi Kyokasho N-R", "Yu Mincho", serif',
+  impact: 'Impact, "Yu Gothic UI", sans-serif',
+};
+
+/** テンプレートの見た目のおおよその見本（色・縁取り・背景・フォントの種類だけ） */
+function templateSample(style) {
+  const s = style ?? {};
+  const decl = [`color:${s.color ?? '#ffffff'}`, `font-family:${SAMPLE_FONTS[s.font] ?? SAMPLE_FONTS.gothic}`, `font-weight:${s.bold === false ? 400 : 700}`];
+  if (s.strokeWidth > 0) decl.push(`-webkit-text-stroke:${Math.max(0.5, Math.min(3, s.strokeWidth * 12)).toFixed(1)}px ${s.strokeColor ?? '#000000'}`, 'paint-order:stroke fill');
+  if (s.boxOpacity > 0) {
+    const hex = String(s.boxColor ?? '#000000').replace('#', '');
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) || 0);
+    decl.push(`background:rgba(${r},${g},${b},${s.boxOpacity})`);
+  }
+  if (s.shadow) decl.push('text-shadow:1px 2px 3px rgba(0,0,0,0.8)');
+  const family = s.fontFamily ? h('div', { class: 'sub' }, `フォント: ${s.fontFamily}`) : null;
+  return h('td', {}, h('span', { class: 'sample', style: decl.join(';') }, 'サンプル'), family);
+}
+
+async function setTemplate(t, body, done) {
+  try {
+    await api('PATCH', `/api/admin/workshop/${t.id}`, body);
+    toast(done);
+    route();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function deleteTemplate(t) {
+  const what = t.kind === 'audio' ? ['オーディオ', 'ファイル'] : ['テンプレート', 'テンプレート'];
+  if (!confirm(`${what[0]}「${t.name}」を削除しますか？ 元には戻せません（すでに使っている人の手元の${what[1]}は、そのまま残ります）。`)) return;
+  try {
+    await api('DELETE', `/api/admin/workshop/${t.id}`);
+    toast('削除しました');
+    route();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+/** オーディオの見本（その場で聞ける。押すまで読み込まない） */
+function audioSample(t) {
+  const f = t.file ?? {};
+  const seconds = Number(f.duration ?? 0);
+  const length = seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒` : `${seconds.toFixed(1)} 秒`;
+  return h(
+    'td',
+    {},
+    h('audio', { controls: true, preload: 'none', src: `/api/admin/workshop/${encodeURIComponent(t.id)}/file`, 'aria-label': `${t.name} を聞く` }),
+    h('div', { class: 'sub' }, `${String(f.type ?? '').toUpperCase()}・${length}・${num(Math.round(Number(f.size ?? 0) / 1024))} KB`),
+  );
+}
+
+async function viewWorkshop(root) {
+  const params = new URLSearchParams(location.hash.split('?')[1] ?? '');
+  const filter = params.get('status') ?? 'all';
+  const kind = params.get('kind') ?? 'all';
+  const query = new URLSearchParams({ status: filter, ...(kind === 'all' ? {} : { kind }) });
+  const [{ workshop }, data] = await Promise.all([api('GET', '/api/admin/settings'), api('GET', `/api/admin/workshop?${query}`)]);
+  const error = h('p', { class: 'error', role: 'alert' });
+  const hints = {
+    open: '公開すると、すぐにみんなの一覧に出ます。問題のあるものは、下の一覧で非公開にするか削除します',
+    approval: '公開されたものは「確認待ち」になり、下の一覧で「公開する」を押すまで、みんなの一覧には出ません（管理者が公開したものは、そのまま公開）',
+    off: 'アプリのワークショップは使えなくなります（公開済みのものは残り、使えるようにすると、また出ます）',
+  };
+  const form = h(
+    'form',
+    {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        error.textContent = '';
+        try {
+          await api('PATCH', '/api/admin/settings', { workshop: { mode: new FormData(form).get('mode') } });
+          toast('保存しました');
+          route();
+        } catch (err) {
+          error.textContent = err.message;
+        }
+      },
+    },
+    h(
+      'fieldset',
+      { class: 'field' },
+      h('legend', {}, '使い方'),
+      ['open', 'approval', 'off'].map((m) =>
+        h(
+          'label',
+          { class: 'choice' },
+          h('input', { type: 'radio', name: 'mode', value: m, checked: workshop.mode === m }),
+          h('span', {}, h('span', {}, WORKSHOP[m]), h('span', { class: 'hint' }, hints[m])),
+        ),
+      ),
+    ),
+    error,
+    h('button', { type: 'submit', class: 'primary' }, '保存'),
+  );
+  const filters = [
+    ['all', 'すべて'],
+    ['pending', '確認待ち'],
+    ['reported', '報告あり'],
+    ['published', '公開中'],
+    ['hidden', '非公開'],
+  ];
+  // 絞り込みは #/workshop?status=…&kind=… に入れる（読み直しても同じ絞り込みのまま）
+  const go = (next) => {
+    const p = new URLSearchParams();
+    if (next.status !== 'all') p.set('status', next.status);
+    if (next.kind !== 'all') p.set('kind', next.kind);
+    location.hash = p.toString() ? `#/workshop?${p}` : '#/workshop';
+  };
+  const select = h(
+    'select',
+    { 'aria-label': '絞り込み', onchange: (e) => go({ status: e.target.value, kind }) },
+    filters.map(([v, label]) => h('option', { value: v, selected: v === filter }, label)),
+  );
+  const kindSelect = h(
+    'select',
+    { 'aria-label': '種類', onchange: (e) => go({ status: filter, kind: e.target.value }) },
+    [
+      ['all', 'テキストとオーディオ'],
+      ['text', 'テキストのテンプレート'],
+      ['audio', 'オーディオ'],
+    ].map(([v, label]) => h('option', { value: v, selected: v === kind }, label)),
+  );
+  const actions = (t) => {
+    const out = [];
+    if (t.status === 'pending') out.push(h('button', { type: 'button', class: 'link', onclick: () => setTemplate(t, { status: 'published' }, '公開しました') }, '公開する'));
+    if (t.status === 'published') out.push(h('button', { type: 'button', class: 'link', onclick: () => setTemplate(t, { status: 'hidden' }, '非公開にしました') }, '非公開にする'));
+    if (t.status === 'hidden') out.push(h('button', { type: 'button', class: 'link', onclick: () => setTemplate(t, { status: 'published' }, '公開に戻しました') }, '公開に戻す'));
+    if (t.reports > 0) out.push(h('button', { type: 'button', class: 'link', onclick: () => setTemplate(t, { clearReports: true }, '報告を消しました') }, '報告を消す'));
+    out.push(h('button', { type: 'button', class: 'link danger', onclick: () => deleteTemplate(t) }, '削除'));
+    return h('td', {}, out);
+  };
+  put(
+    root,
+    h('div', { class: 'toolbar' }, h('h2', { class: 'grow' }, 'ワークショップ')),
+    h(
+      'p',
+      { class: 'hint' },
+      'アプリで作ったテキストのテンプレート（フォント・色・大きさ・登場のアニメーションなどの見た目。文字そのものは公開されません）と、オーディオ（BGM・効果音など）を公開して、ほかの人が使えるようにします。オーディオは、公開する人が「自分で作った・公開してよい音」だと確かめてから公開します。',
+    ),
+    h('div', { class: 'box narrow' }, h('h2', {}, 'ワークショップの使い方'), form),
+    h('div', { class: 'toolbar' }, h('h2', { class: 'grow' }, `公開されたもの（${num(data.templates.length)} 個${data.templates.length >= 200 ? '、新しい 200 個まで' : ''}）`), kindSelect, select),
+    table(
+      ['名前', '見本', '作った人', '状態', ['使った人', 'num'], ['報告', 'num'], '公開した日時', ''],
+      data.templates.map((t) => [
+        h('td', { class: 'wrap' }, h('span', { class: 'tag' }, t.kind === 'audio' ? 'オーディオ' : 'テキスト'), ' ', t.name, t.description ? h('div', { class: 'sub' }, t.description) : null),
+        t.kind === 'audio' ? audioSample(t) : templateSample(t.style),
+        cellUser(t.author, t.email),
+        h('td', {}, h('span', { class: `tag ${TEMPLATE_STATUS[t.status]?.[1] ?? ''}` }, TEMPLATE_STATUS[t.status]?.[0] ?? t.status)),
+        [num(t.uses), 'num'],
+        // 理由があるときだけ折り返しの幅を取る（無いときは数だけなので、表を狭くする）
+        h('td', { class: t.reasons.length ? 'num wrap' : 'num' }, num(t.reports), t.reasons.map((r) => h('div', { class: 'sub' }, r))),
+        when(t.createdAt),
+        actions(t),
+      ]),
+      filter === 'all' && kind === 'all' ? 'まだ何も公開されていません' : 'この条件のものはありません',
+    ),
+  );
+}
+
 async function viewRoles(root) {
   const { roles } = await api('GET', '/api/admin/roles');
   put(
@@ -874,12 +1072,16 @@ const FIELD_NAMES = {
   note: 'メモ',
   registration: '受け付け方',
   pending: '承認待ち',
+  workshop: '使い方',
+  reports: '報告',
+  author: '作った人',
 };
 
 function fieldValue(key, value) {
   if (value === null) return key === 'monthly_tokens' ? '無制限' : key.endsWith('_effort') ? 'ロールのまま' : '—';
   if (typeof value === 'boolean') return value ? 'はい' : 'いいえ';
   if (key === 'registration') return REGISTRATION[value] ?? String(value);
+  if (key === 'workshop') return WORKSHOP[value] ?? String(value);
   if (key.endsWith('_effort')) return EFFORT[value] ?? String(value);
   if (typeof value === 'number') return num(value);
   return String(value);

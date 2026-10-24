@@ -222,8 +222,10 @@ QToolButton* makeTextPresetButton(const TextPreset& preset, QSize cardSize, QWid
  * クリックしただけではドラッグにならない（ドラッグ後は clicked も出ない）。ドロップ先の処理は受け取る側が行う
  */
 void makeTextPresetDraggable(QToolButton* button, const TextPreset& preset);
-/** 自分で保存したテキストのテンプレートの右クリックメニュー（名前を変更・削除） */
+/** 自分で保存したテキストのテンプレートの右クリックメニュー（名前を変更・削除・ワークショップに公開・公開をやめる） */
 void execTemplateMenu(QWidget* parent, const QString& templateId, const QPoint& globalPos);
+/** テキスト textId の見た目を、名前を聞いてマイテンプレートに保存する（右の設定欄と、右クリックのメニューから） */
+void saveTextAsTemplate(QWidget* parent, const QString& textId);
 /** ホイールでは値を変えない。ホイールは親に渡すので、パネルはそのままスクロールできる */
 void disableWheel(QWidget* w);
 

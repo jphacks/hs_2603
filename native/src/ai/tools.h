@@ -11,6 +11,7 @@
 #include <optional>
 #include <vector>
 
+#include "ai/workshop.h"
 #include "core/model.h"
 
 namespace kv::ai {
@@ -38,9 +39,14 @@ struct Choice {
   std::vector<QByteArray> previews;
   /** 何をするか（1 行ずつ） */
   QStringList log;
+  /**
+   * propose_audio の候補のときの、ワークショップのオーディオ（ChoiceSet::audio のときだけ）。
+   * label はその名前（ほかの人が付けたものなので、画面に出すだけで、AI への知らせには入れない）
+   */
+  WorkshopTemplate audio;
 };
 
-/** propose_choices で見せる、見比べて選ぶ案のまとまり */
+/** propose_choices・propose_audio で見せる、選ぶ案のまとまり */
 struct ChoiceSet {
   QString id;
   /** ユーザーへの問いかけ（空なら決まり文句） */
@@ -50,6 +56,11 @@ struct ChoiceSet {
   std::vector<Choice> choices;
   /** 案を作った編集場所（ほかのタブには当てはめない） */
   int workspaceUid = -1;
+  /**
+   * ワークショップのオーディオの候補（propose_audio）。プレビューの画像の代わりに試聴して選ぶ。
+   * 選ぶと、ファイルを手元に置いてメディア一覧に入れてから、案の編集（add_workshop_audio）を当てはめる
+   */
+  bool audio = false;
 };
 
 /** 案を、今の編集場所に当てはめた結果 */
@@ -59,9 +70,10 @@ struct ChoiceApplied {
   QString error;
   /** 何をしたか（1 行ずつ） */
   QStringList log;
-  /** 変えたテキスト（なければクリップ）の ID。選んで見せるのに使う */
+  /** 変えたテキスト（なければクリップ、オーディオ）の ID。選んで見せるのに使う */
   QString focusText;
   QString focusClip;
+  QString focusAudio;
 };
 
 struct ToolResult {
@@ -81,9 +93,11 @@ struct ToolResult {
   bool hasIdeas = false;
   QString ideasKind;  // title / telop
   std::vector<TextIdea> ideas;
-  /** propose_choices の案 */
+  /** propose_choices・propose_audio の案 */
   bool hasChoices = false;
   ChoiceSet choiceSet;
+  /** この編集で使ったワークショップのもの（ID。本当に当てはめたときに、使った人の数を増やす） */
+  QStringList workshopUsed;
 };
 
 /** Converse API の toolConfig.tools */
@@ -108,5 +122,9 @@ QStringList addIdeas(const std::vector<TextIdea>& ideas, const QString& kind);
 ChoiceApplied applyChoice(const Choice& choice, const QString& merge, const ProjectData* start = nullptr);
 /** 案の記号（0 → A） */
 QString choiceLetter(int index);
+/** AI に見せるワークショップのものの ID（"workshop:12"） */
+QString workshopRef(const QString& id);
+/** ワークショップのオーディオ id を手元に置いたファイルが、今の編集場所のメディア一覧にあれば、その素材の ID（無ければ空） */
+QString workshopAudioAsset(const QString& id);
 
 }  // namespace kv::ai

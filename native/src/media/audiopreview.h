@@ -21,6 +21,11 @@ class AudioPreview : public QObject {
   const QString& playingAsset() const { return assetId_; }
   /** 試聴中の素材なら止める。そうでなければ、別の素材を試聴中でもそれを止めて、この素材を頭から鳴らす */
   void toggle(const QString& assetId);
+  /**
+   * 一覧に入っていないファイルを試聴する（ワークショップのオーディオなど）。key で見分ける（playingAsset() に入る）。
+   * 同じ key を試聴中なら止める。duration はファイルの長さ（秒）
+   */
+  void toggleFile(const QString& key, const QString& path, double duration);
   void stop();
 
  signals:
@@ -30,9 +35,12 @@ class AudioPreview : public QObject {
  private:
   AudioPreview();
   void tick();
+  void play(const QString& key, const QString& path, double duration, bool asset);
 
   std::unique_ptr<AudioEngine> engine_;  // 初めて試聴するときに作る（起動を重くしない）
   QString assetId_;
+  /** 鳴らしているのが一覧の素材か（一覧から消えたら止める） */
+  bool asset_ = false;
   double duration_ = 0;
   QTimer timer_;
   QElapsedTimer sinceStart_;

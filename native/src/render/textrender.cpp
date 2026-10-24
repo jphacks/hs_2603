@@ -409,7 +409,10 @@ QPixmap renderTextPresetCard(const TextPreset& preset, QSize cardSize, qreal dpr
   p.setBrush(QColor(0x2a, 0x2a, 0x2a));
   p.drawRoundedRect(QRectF(0.5, 0.5, cardSize.width() - 1, cardSize.height() - 1), 4, 4);
 
-  TextItem item = makeText(preset.id, 0, presetSampleText());
+  // ID で探し直さず、渡された見た目で描く（ワークショップのテンプレートのように、まだ手元に無いものも描けるように）
+  TextItem item = preset.style;
+  item.text = presetSampleText();
+  item.fontSpans.clear();
   item.x = 0.5;
   item.y = 0.5;
   item.size = 0.36;  // スタイル本来の大きさは使わず、全カードで同じ大きさから始める

@@ -1,4 +1,4 @@
-// サーバーの設定（settings テーブル）。今は新規登録の受け付け方だけ。
+// サーバーの設定（settings テーブル）。新規登録の受け付け方と、ワークショップの使い方。
 import type { Db, Tx } from './db.ts';
 
 export const REGISTRATION_MODES = ['off', 'approval', 'open'] as const;
@@ -34,4 +34,30 @@ export async function registrationRole(db: Db | Tx, reg: Registration): Promise<
   if (reg.mode === 'off' || reg.roleId === null) return null;
   const { rows } = await db.query<{ id: number; is_admin: boolean }>('select id, is_admin from roles where id = $1', [reg.roleId]);
   return rows[0] && !rows[0].is_admin ? rows[0].id : null;
+}
+
+// ---- ワークショップ（テキストのテンプレートの公開） ----
+
+/** off: 使えない / approval: 管理者が確認してから公開 / open: すぐに公開 */
+export const WORKSHOP_MODES = ['off', 'approval', 'open'] as const;
+export type WorkshopMode = (typeof WORKSHOP_MODES)[number];
+
+export function isWorkshopMode(v: unknown): v is WorkshopMode {
+  return typeof v === 'string' && (WORKSHOP_MODES as readonly string[]).includes(v);
+}
+
+export type WorkshopSettings = { mode: WorkshopMode };
+
+export async function readWorkshop(db: Db | Tx): Promise<WorkshopSettings> {
+  const { rows } = await db.query<{ value: Record<string, unknown> }>("select value from settings where key = 'workshop'");
+  const v = rows[0]?.value ?? {};
+  return { mode: isWorkshopMode(v.mode) ? v.mode : 'off' };
+}
+
+export async function writeWorkshop(db: Db | Tx, settings: WorkshopSettings): Promise<void> {
+  await db.query(
+    `insert into settings (key, value, updated_at) values ('workshop', $1, now())
+     on conflict (key) do update set value = excluded.value, updated_at = now()`,
+    [JSON.stringify(settings)],
+  );
 }

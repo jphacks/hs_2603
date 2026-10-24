@@ -23,10 +23,13 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ai/workshop.h"
+#include "core/editor.h"
 #include "core/textstyles.h"
 #include "core/texttemplates.h"
 #include "render/textrender.h"
 #include "ui/theme.h"
+#include "ui/workshopdialog.h"
 
 namespace kv {
 
@@ -143,10 +146,26 @@ void execTemplateMenu(QWidget* parent, const QString& templateId, const QPoint& 
   const TextPreset* t = textTemplates().find(templateId);
   if (!t) return;
   const QString label = t->label;
+  const TemplateWorkshopInfo info = textTemplates().workshopInfo(templateId);
   QMenu menu(parent);
   QAction* rename = menu.addAction(QStringLiteral("名前を変更…"));
   QAction* remove = menu.addAction(theme::icon(QStringLiteral("trash")), QStringLiteral("削除"));
+  // ワークショップ（AI サーバーで、みんなにテンプレートを公開する）
+  QAction* publish = nullptr;
+  QAction* unpublish = nullptr;
+  if (ai::workshopVisible()) {
+    menu.addSeparator();
+    if (!info.sourceId.isEmpty()) {
+      // ほかの人が作ったもの（公開はできない）
+      menu.addAction(QStringLiteral("ワークショップから追加（作った人: %1）").arg(info.author))->setEnabled(false);
+    } else if (!info.publishedId.isEmpty()) {
+      unpublish = menu.addAction(QStringLiteral("ワークショップへの公開をやめる…"));
+    } else {
+      publish = menu.addAction(theme::icon(QStringLiteral("upload")), QStringLiteral("ワークショップに公開…"));
+    }
+  }
   QAction* chosen = menu.exec(globalPos);
+  if (!chosen) return;
   // メニューを閉じたあとは、テンプレートの一覧が作り直されて parent が消えることがあるので、ダイアログはウィンドウに出す
   QWidget* owner = parent ? parent->window() : nullptr;
   if (chosen == rename) {
@@ -156,12 +175,37 @@ void execTemplateMenu(QWidget* parent, const QString& templateId, const QPoint& 
       QMessageBox::warning(owner, QStringLiteral("テンプレート"), QStringLiteral("名前を変更できませんでした"));
     }
   } else if (chosen == remove) {
-    if (QMessageBox::question(owner, QStringLiteral("テンプレートを削除"),
-                              QStringLiteral("テンプレート「%1」を削除しますか？\n（このテンプレートで作った文字は、そのまま残ります）").arg(label)) != QMessageBox::Yes) {
-      return;
+    QString question = QStringLiteral("テンプレート「%1」を削除しますか？\n（このテンプレートで作った文字は、そのまま残ります）").arg(label);
+    if (!info.publishedId.isEmpty()) {
+      question += QStringLiteral("\nワークショップに公開したものは、公開されたまま残ります（やめるときは、先に「ワークショップへの公開をやめる」を選んでください）");
     }
+    if (QMessageBox::question(owner, QStringLiteral("テンプレートを削除"), question) != QMessageBox::Yes) return;
     if (!textTemplates().remove(templateId)) QMessageBox::warning(owner, QStringLiteral("テンプレート"), QStringLiteral("削除できませんでした"));
+  } else if (chosen == publish) {
+    publishTemplate(owner, templateId);
+  } else if (chosen == unpublish) {
+    unpublishTemplate(owner, templateId);
   }
+}
+
+void saveTextAsTemplate(QWidget* parent, const QString& textId) {
+  const TextItem* t = editor().text(textId);
+  if (!t) return;
+  const TextItem item = *t;
+  bool ok = false;
+  const QString def = QStringLiteral("マイテンプレート %1").arg(textTemplates().list().size() + 1);
+  const QString name = QInputDialog::getText(parent ? parent->window() : nullptr, QStringLiteral("テンプレートに保存"),
+                                             QStringLiteral("テンプレートの名前（見た目・登場のアニメーション・キーフレームを保存します。文字は保存しません）"),
+                                             QLineEdit::Normal, def, &ok);
+  if (!ok) return;
+  const QString id = textTemplates().add(name, item);
+  if (id.isEmpty()) {
+    editor().toast(QStringLiteral("テンプレートを保存できませんでした"), ToastKind::Error);
+    return;
+  }
+  editor().toast(QStringLiteral("テンプレート「%1」を保存しました。左の「テキスト」の一覧からタイムラインへドラッグして使えます")
+                     .arg(TextTemplates::cleanName(name)),
+                 ToastKind::Success);
 }
 
 namespace {

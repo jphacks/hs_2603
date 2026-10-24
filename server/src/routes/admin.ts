@@ -9,8 +9,12 @@ import { tx } from '../db.ts';
 import { ApiError, authenticate, check, requireAdminHeader } from '../http.ts';
 import type { Choice, Level, PolicyFields, UserRow } from '../policy.ts';
 import { allowanceOf, effectivePolicy, isChoice, isLevel, monthRange } from '../policy.ts';
-import type { Registration } from '../settings.ts';
-import { isRegistrationMode, readRegistration, writeRegistration } from '../settings.ts';
+import type { Registration, WorkshopSettings } from '../settings.ts';
+import { isRegistrationMode, isWorkshopMode, readRegistration, readWorkshop, writeRegistration, writeWorkshop } from '../settings.ts';
+import type { AudioType } from '../workshop.ts';
+import { AUDIO_TYPES } from '../workshop.ts';
+import type { TemplateRow } from './workshop.ts';
+import { AUTHOR_SQL, TEMPLATE_COLUMNS, templateJson } from './workshop.ts';
 
 type Body = Record<string, unknown>;
 
@@ -210,6 +214,12 @@ export function adminRoutes(app: FastifyInstance, ctx: AppContext): void {
               count(*) filter (where r.is_admin and not u.disabled) as admins
          from users u join roles r on r.id = u.role_id`,
     );
+    // ワークショップ: 確認待ちと、報告のあるテンプレートの数（概要に知らせを出す）
+    const workshop = await db.query<{ templates: number; pending: number; reported: number }>(
+      `select count(*) as templates, count(*) filter (where status = 'pending') as pending,
+              count(*) filter (where status <> 'hidden' and exists (select 1 from workshop_reports r where r.template_id = t.id)) as reported
+         from workshop_templates t`,
+    );
     const t = totals.rows[0];
     return {
       month: range.month,
@@ -222,6 +232,7 @@ export function adminRoutes(app: FastifyInstance, ctx: AppContext): void {
       },
       totals: { ...t, total: Number(t.input) + Number(t.output) },
       accounts: counts.rows[0],
+      workshop: workshop.rows[0],
       daily: daily.rows,
       topUsers: top.rows.map((r) => ({ email: r.email, displayName: r.display_name, tokens: r.tokens, requests: r.requests })),
     };
@@ -439,28 +450,48 @@ export function adminRoutes(app: FastifyInstance, ctx: AppContext): void {
     return listRoles();
   });
 
-  // ---- 新規登録 ----------------------------------------------------------------------
+  // ---- 新規登録・ワークショップの設定 ---------------------------------------------------
   app.get('/api/admin/settings', async (req) => {
     await admin(req);
-    return { registration: await readRegistration(db) };
+    return { registration: await readRegistration(db), workshop: await readWorkshop(db) };
   });
 
+  // 新規登録（registration）とワークショップ（workshop）の設定。送ったものだけを変える
   app.patch('/api/admin/settings', async (req) => {
     const me = await admin(req, true);
     const b = (req.body ?? {}) as Body;
-    const r = (b.registration ?? {}) as Body;
-    if (!isRegistrationMode(r.mode)) throw new ApiError(400, 'invalid', '新規登録の受け付け方は off・approval・open のどれかにしてください');
-    const roleId = check.id(r.roleId, '登録した人のロール');
+    if (b.registration === undefined && b.workshop === undefined) throw new ApiError(400, 'invalid', '変える設定がありません');
+    let registration: { mode: Registration['mode']; roleId: number } | null = null;
+    if (b.registration !== undefined) {
+      const r = (b.registration ?? {}) as Body;
+      if (!isRegistrationMode(r.mode)) throw new ApiError(400, 'invalid', '新規登録の受け付け方は off・approval・open のどれかにしてください');
+      registration = { mode: r.mode, roleId: check.id(r.roleId, '登録した人のロール') };
+    }
+    let workshop: WorkshopSettings | null = null;
+    if (b.workshop !== undefined) {
+      const w = (b.workshop ?? {}) as Body;
+      if (!isWorkshopMode(w.mode)) throw new ApiError(400, 'invalid', 'ワークショップの使い方は off・approval・open のどれかにしてください');
+      workshop = { mode: w.mode };
+    }
     await tx(db, async (c) => {
-      const { rows } = await c.query<{ name: string; is_admin: boolean }>('select name, is_admin from roles where id = $1', [roleId]);
-      if (!rows[0]) throw new ApiError(400, 'invalid', 'ロールが見つかりません');
-      // 自分で登録した人が、管理画面を使えるようにはしない
-      if (rows[0].is_admin) throw new ApiError(400, 'invalid', '管理者のロールは選べません。管理画面を使えないロールを選んでください');
-      const before = await readRegistration(c);
-      await writeRegistration(c, { mode: r.mode as Registration['mode'], roleId });
-      if (before.mode !== r.mode || before.roleId !== roleId) await audit(c, me, 'settings.update', '新規登録', { registration: r.mode, role: rows[0].name });
+      if (registration) {
+        const { rows } = await c.query<{ name: string; is_admin: boolean }>('select name, is_admin from roles where id = $1', [registration.roleId]);
+        if (!rows[0]) throw new ApiError(400, 'invalid', 'ロールが見つかりません');
+        // 自分で登録した人が、管理画面を使えるようにはしない
+        if (rows[0].is_admin) throw new ApiError(400, 'invalid', '管理者のロールは選べません。管理画面を使えないロールを選んでください');
+        const before = await readRegistration(c);
+        await writeRegistration(c, registration);
+        if (before.mode !== registration.mode || before.roleId !== registration.roleId) {
+          await audit(c, me, 'settings.update', '新規登録', { registration: registration.mode, role: rows[0].name });
+        }
+      }
+      if (workshop) {
+        const before = await readWorkshop(c);
+        await writeWorkshop(c, workshop);
+        if (before.mode !== workshop.mode) await audit(c, me, 'settings.update', 'ワークショップ', { workshop: workshop.mode });
+      }
     });
-    return { registration: await readRegistration(db) };
+    return { registration: await readRegistration(db), workshop: await readWorkshop(db) };
   });
 
   // 承認待ちの人を承認する（断るときは、ユーザーを削除する）
@@ -532,6 +563,97 @@ export function adminRoutes(app: FastifyInstance, ctx: AppContext): void {
     reply.header('Content-Disposition', `attachment; filename="usage-${range.month}.csv"`);
     // Excel で文字化けしないよう、先頭に BOM を付ける
     return `\uFEFF${lines.join('\r\n')}\r\n`;
+  });
+
+  // ---- ワークショップ（テキストのテンプレート） ------------------------------------------------
+  /** 管理画面の一覧の 1 行（作った人のメールアドレスと、報告も出す） */
+  async function workshopRows(where: string, params: unknown[]) {
+    const { rows } = await db.query<TemplateRow & { email: string; reports: number; reasons: string[] | null }>(
+      `select ${TEMPLATE_COLUMNS}, ${AUTHOR_SQL} as author, u.email,
+              (select count(*) from workshop_reports r where r.template_id = t.id) as reports,
+              (select array_agg(r.reason order by r.created_at desc) from (select reason, created_at from workshop_reports
+                  where template_id = t.id and reason <> '' order by created_at desc limit 5) r) as reasons
+         from workshop_templates t join users u on u.id = t.user_id
+        where ${where}
+        order by (t.status = 'pending') desc, t.created_at desc, t.id desc
+        limit 200`,
+      params,
+    );
+    return rows.map((r) => ({ ...templateJson(r, 0), mine: undefined, used: undefined, email: r.email, reports: r.reports, reasons: r.reasons ?? [] }));
+  }
+
+  app.get('/api/admin/workshop', async (req) => {
+    await admin(req);
+    const q = req.query as Record<string, string | undefined>;
+    const params: unknown[] = [];
+    const where: string[] = [];
+    if (q.status === 'published' || q.status === 'pending' || q.status === 'hidden') {
+      params.push(q.status);
+      where.push(`t.status = $${params.length}`);
+    } else if (q.status === 'reported') {
+      where.push('exists (select 1 from workshop_reports r where r.template_id = t.id)');
+    }
+    // テキストのテンプレートか、オーディオか（送らなければ両方）
+    if (q.kind === 'text' || q.kind === 'audio') {
+      params.push(q.kind);
+      where.push(`t.kind = $${params.length}`);
+    }
+    return { workshop: await readWorkshop(db), templates: await workshopRows(where.length ? where.join(' and ') : 'true', params) };
+  });
+
+  // オーディオの中身（管理画面で聞いて確かめる）
+  app.get('/api/admin/workshop/:id/file', async (req, reply) => {
+    await admin(req);
+    const id = check.id((req.params as Body).id, 'オーディオ');
+    const { rows } = await db.query<{ file_type: AudioType; data: Buffer }>(
+      `select t.file_type, f.data from workshop_templates t join workshop_files f on f.template_id = t.id where t.id = $1`,
+      [id],
+    );
+    if (!rows[0]) throw new ApiError(404, 'not_found', 'オーディオが見つかりません');
+    reply.header('Content-Type', AUDIO_TYPES[rows[0].file_type] ?? 'application/octet-stream');
+    return rows[0].data;
+  });
+
+  // 公開する（確認待ちの承認・非公開から戻す）・非公開にする。clearReports で報告を消す
+  app.patch('/api/admin/workshop/:id', async (req) => {
+    const me = await admin(req, true);
+    const id = check.id((req.params as Body).id, 'テンプレート');
+    const b = (req.body ?? {}) as Body;
+    const status = b.status;
+    if (status !== undefined && status !== 'published' && status !== 'hidden') {
+      throw new ApiError(400, 'invalid', 'status は published（公開）か hidden（非公開）にしてください');
+    }
+    const clearReports = b.clearReports === true;
+    if (status === undefined && !clearReports) throw new ApiError(400, 'invalid', '変える項目がありません');
+    await tx(db, async (c) => {
+      const { rows } = await c.query<{ name: string; status: string }>('select name, status from workshop_templates where id = $1 for update', [id]);
+      if (!rows[0]) throw new ApiError(404, 'not_found', '見つかりません（もう削除されたのかもしれません）');
+      if (status !== undefined && status !== rows[0].status) {
+        await c.query('update workshop_templates set status = $2, updated_at = now() where id = $1', [id, status]);
+        const action = status === 'hidden' ? 'workshop.hide' : rows[0].status === 'pending' ? 'workshop.approve' : 'workshop.show';
+        await audit(c, me, action, rows[0].name);
+      }
+      if (clearReports) {
+        const cleared = await c.query('delete from workshop_reports where template_id = $1', [id]);
+        if (cleared.rowCount) await audit(c, me, 'workshop.clear_reports', rows[0].name, { reports: cleared.rowCount });
+      }
+    });
+    const [row] = await workshopRows('t.id = $1', [id]);
+    return { template: row };
+  });
+
+  app.delete('/api/admin/workshop/:id', async (req) => {
+    const me = await admin(req, true);
+    const id = check.id((req.params as Body).id, 'テンプレート');
+    await tx(db, async (c) => {
+      const { rows } = await c.query<{ name: string; email: string }>(
+        'delete from workshop_templates t using users u where t.id = $1 and u.id = t.user_id returning t.name, u.email',
+        [id],
+      );
+      if (!rows[0]) throw new ApiError(404, 'not_found', '見つかりません（もう削除されたのかもしれません）');
+      await audit(c, me, 'workshop.delete', rows[0].name, { author: rows[0].email });
+    });
+    return { ok: true };
   });
 
   // ---- 操作の記録 ----------------------------------------------------------------------

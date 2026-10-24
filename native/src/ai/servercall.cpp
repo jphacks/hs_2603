@@ -59,6 +59,12 @@ ServerCall* ServerCall::post(const QNetworkRequest& request, const QByteArray& b
   return call;
 }
 
+ServerCall* ServerCall::custom(const QNetworkRequest& request, const QByteArray& method, const QByteArray& body, QObject* parent) {
+  auto* call = new ServerCall(request, method.toUpper(), body, parent);
+  call->send();
+  return call;
+}
+
 ServerCall::ServerCall(const QNetworkRequest& request, const QByteArray& method, const QByteArray& body, QObject* parent)
     : QObject(parent), request_(request), method_(method), body_(body), wait_(new QTimer(this)) {
   wait_->setSingleShot(true);
@@ -77,7 +83,9 @@ void ServerCall::send() {
   sent_ = false;
   certificateProblem_ = false;
   QNetworkAccessManager* nam = serverNetwork();
-  QNetworkReply* r = method_ == "GET" ? nam->get(request_) : nam->post(request_, body_);
+  QNetworkReply* r = method_ == "GET"    ? nam->get(request_)
+                     : method_ == "POST" ? nam->post(request_, body_)
+                                         : nam->sendCustomRequest(request_, method_, body_);
   // 呼び出しが消えたら、通信もやめる
   r->setParent(this);
   reply_ = r;

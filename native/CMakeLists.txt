@@ -49,6 +49,7 @@ set(SOURCES
   src/export/exporter.h src/export/exporter.cpp
   src/ui/theme.h src/ui/theme.cpp
   src/ui/widgets.h src/ui/widgets.cpp
+  src/ui/plaintextinput.h src/ui/plaintextinput.cpp
   src/ui/librarypanel.h src/ui/librarypanel.cpp
   src/ui/previewwidget.h src/ui/previewwidget.cpp
   src/ui/timelinewidget.h src/ui/timelinewidget.cpp
@@ -67,7 +68,9 @@ set(SOURCES
   src/ai/assistant.h src/ai/assistant.cpp
   src/ai/servercall.h src/ai/servercall.cpp
   src/ai/account.h src/ai/account.cpp
+  src/ai/workshop.h src/ai/workshop.cpp
   src/ui/accountdialog.h src/ui/accountdialog.cpp
+  src/ui/workshopdialog.h src/ui/workshopdialog.cpp
   src/ui/serverstatus.h src/ui/serverstatus.cpp
   src/ui/aipanel.h src/ui/aipanel.cpp
   src/ui/mainwindow.h src/ui/mainwindow.cpp

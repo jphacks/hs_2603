@@ -57,6 +57,7 @@
 #include "ui/theme.h"
 #include "ui/timelinewidget.h"
 #include "ui/widgets.h"
+#include "ui/workshopdialog.h"
 #include "ui/workspacebar.h"
 
 namespace kv {
@@ -369,6 +370,15 @@ void MainWindow::buildMenus() {
     const int n = editor().workspaceCount();
     editor().switchWorkspace((editor().workspaceIndex() + n - 1) % n);
   }));
+
+  // ワークショップ（みんなが公開したテキストのテンプレート・オーディオを探して追加する窓）。AI サーバーで使えるときだけ出す
+  auto* workshop = menuBar()->addMenu(QStringLiteral("ワークショップ(&W)"));
+  workshop->addAction(QStringLiteral("テキストのテンプレートを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Text); });
+  workshop->addAction(QStringLiteral("オーディオを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Audio); });
+  auto syncWorkshop = [workshop] { workshop->menuAction()->setVisible(ai::workshopVisible()); };
+  syncWorkshop();
+  connect(&ai::account(), &ai::Account::changed, workshop, syncWorkshop);
+  connect(&ai::account(), &ai::Account::linkChanged, workshop, syncWorkshop);
 
   auto* help = menuBar()->addMenu(QStringLiteral("ヘルプ(&H)"));
   bindCommand(QStringLiteral("help.shortcuts"), help->addAction(QStringLiteral("キーボードショートカット"), this, &MainWindow::showShortcuts));

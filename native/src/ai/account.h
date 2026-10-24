@@ -89,6 +89,11 @@ class Account : public QObject {
   QString linkDetail() const { return linkDetail_; }
   /** 新規登録の受け付け方（off / approval / open。分からなければ空） */
   QString registration() const { return registration_; }
+  /**
+   * ワークショップ（テキストのテンプレートの公開）の使い方（off / approval / open）。
+   * まだ分からない・古いサーバーで使えないときは空。つながらない間は、前に分かったもののまま
+   */
+  QString workshop() const { return workshop_; }
   /** サーバーに Bedrock の API キーがあるか（無いと AI は動かない） */
   bool aiReady() const { return aiReady_; }
   /** 今のサーバーにつながるか、すぐに確かめる */
@@ -146,6 +151,7 @@ class Account : public QObject {
   Link link_ = Link::None;
   QString linkDetail_;
   QString registration_;
+  QString workshop_;
   bool aiReady_ = true;
   QTimer poll_;
   QElapsedTimer lastCheck_;

@@ -22,7 +22,7 @@ AudioPreview::AudioPreview() {
   // 別のタブに切り替えた・素材を一覧から消したときも止める
   connect(&ed, &Editor::workspaceChanged, this, [this] { stop(); });
   connect(&ed, &Editor::assetsChanged, this, [this] {
-    if (!assetId_.isEmpty() && !editor().asset(assetId_)) stop();
+    if (asset_ && !assetId_.isEmpty() && !editor().asset(assetId_)) stop();
   });
 }
 
@@ -36,6 +36,18 @@ void AudioPreview::toggle(const QString& assetId) {
     editor().toast(QStringLiteral("この音声は再生できません（ファイルが見つからないか、読み込めません）"), ToastKind::Error);
     return;
   }
+  play(assetId, a->path, a->duration, true);
+}
+
+void AudioPreview::toggleFile(const QString& key, const QString& path, double duration) {
+  if (assetId_ == key) {
+    stop();
+    return;
+  }
+  play(key, path, duration, false);
+}
+
+void AudioPreview::play(const QString& key, const QString& path, double duration, bool asset) {
   // 別の素材を試聴中なら止めて、タイムラインの再生も止める
   stop();
   editor().pause();
@@ -47,18 +59,19 @@ void AudioPreview::toggle(const QString& assetId) {
   auto snap = std::make_shared<MixSnapshot>();
   MixSource s;
   s.key = QStringLiteral("preview");
-  s.path = a->path;
+  s.path = path;
   s.start = 0;
-  s.duration = a->duration;
+  s.duration = duration;
   s.in = 0;
   s.speed = 1;
   s.volume = 1;
   snap->sources.push_back(s);
-  snap->end = a->duration;
+  snap->end = duration;
   engine_->setSnapshot(snap);
   engine_->start(0);
-  assetId_ = assetId;
-  duration_ = a->duration;
+  assetId_ = key;
+  asset_ = asset;
+  duration_ = duration;
   sinceStart_.start();
   timer_.start();
   emit changed();

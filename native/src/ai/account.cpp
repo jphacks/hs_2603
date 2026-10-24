@@ -124,8 +124,9 @@ static QString errorText(int status, const QJsonObject& json) {
 
 /** /api/health の返事を読む */
 static Account::Link readHealth(int status, QNetworkReply::NetworkError error, const QString& errorString, int gaveUpAfter, const QJsonObject& json,
-                                QString& detail, QString& registration, bool& aiReady) {
+                                QString& detail, QString& registration, QString& workshop, bool& aiReady) {
   registration.clear();
+  workshop.clear();
   aiReady = true;
   if (status == 0) {
     detail = networkProblem(error, errorString, gaveUpAfter);
@@ -143,6 +144,8 @@ static Account::Link readHealth(int status, QNetworkReply::NetworkError error, c
     return Account::Link::Wrong;
   }
   registration = json.value(QStringLiteral("registration")).toString(QStringLiteral("off"));
+  // ワークショップ（古いサーバーには無い。そのときは空）
+  workshop = json.value(QStringLiteral("workshop")).toString();
   aiReady = json.value(QStringLiteral("bedrockConfigured")).toBool(true);
   if (!json.value(QStringLiteral("ok")).toBool()) {
     detail = QStringLiteral("AI サーバーは動いていますが、データベース（PostgreSQL）につながっていません。サーバーの管理者に知らせてください");
@@ -203,6 +206,7 @@ void Account::reloadServer() {
     old->abort();
   }
   registration_.clear();
+  workshop_.clear();
   aiReady_ = true;
   setLink(server_.isEmpty() ? Link::None : Link::Checking, QString());
   // 今のサーバーの印が保存してあれば使う
@@ -244,15 +248,19 @@ void Account::checkLink() {
     const QJsonObject json = QJsonDocument::fromJson(r->readAll()).object();
     QString detail;
     QString registration;
+    QString workshop;
     bool aiReady = true;
     // Qt の説明にアドレスが入っていることがあるので伏せる（アドレスは画面に出さない）
     const int gaveUpAfter = call->gaveUp() ? call->retries() : 0;
-    const Link link = readHealth(status, r->error(), hideServer(r->errorString(), target), gaveUpAfter, json, detail, registration, aiReady);
-    // 新規登録の受け付け方や API キーの有無だけが変わったときも、画面を直す
-    const bool same = link == link_ && detail == linkDetail_ && registration == registration_ && aiReady == aiReady_;
+    const Link link = readHealth(status, r->error(), hideServer(r->errorString(), target), gaveUpAfter, json, detail, registration, workshop, aiReady);
+    // つながらないときは、前に分かったワークショップの使い方のままにする（一時的に切れても、ボタンが消えないように）
+    if (link == Link::Offline) workshop = workshop_;
+    // 新規登録の受け付け方・ワークショップの使い方・API キーの有無だけが変わったときも、画面を直す
+    const bool same = link == link_ && detail == linkDetail_ && registration == registration_ && workshop == workshop_ && aiReady == aiReady_;
     link_ = link;
     linkDetail_ = detail;
     registration_ = registration;
+    workshop_ = workshop;
     aiReady_ = aiReady;
     if (!same) emit linkChanged();
     emit linkChecked();

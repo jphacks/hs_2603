@@ -16,6 +16,8 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include "ai/account.h"
+#include "ai/workshop.h"
 #include "core/editor.h"
 #include "core/textstyles.h"
 #include "core/texttemplates.h"
@@ -24,6 +26,7 @@
 #include "render/textrender.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
+#include "ui/workshopdialog.h"
 
 namespace kv {
 
@@ -314,12 +317,24 @@ void AssetList::contextMenuEvent(QContextMenuEvent* e) {
     overlay->setEnabled(usable);
   }
   QAction* remove = menu.addAction(QStringLiteral("一覧から削除"));
+  // オーディオは、ワークショップに公開できる（AI サーバーで使えるときだけ。ワークショップから追加したものは、作った人のものなので出さない）
+  QAction* publish = nullptr;
+  if (kind_ == Kind::Audio && ai::workshopVisible()) {
+    menu.addSeparator();
+    if (a && ai::isWorkshopAudio(a->path)) {
+      menu.addAction(QStringLiteral("ワークショップから追加したオーディオ"))->setEnabled(false);
+    } else {
+      publish = menu.addAction(theme::icon(QStringLiteral("upload")), QStringLiteral("ワークショップに公開…"));
+      publish->setEnabled(usable);
+    }
+  }
   QAction* chosen = menu.exec(e->globalPos());
   if (!chosen) return;
   if (chosen == play) audioPreview().toggle(id);
   else if (chosen == add) editor().addToTimeline({id});
   else if (overlay && chosen == overlay) editor().addOverlays({id});
   else if (chosen == remove) removeFromList(id);
+  else if (publish && chosen == publish) publishAudioAsset(this, id);
 }
 
 void AssetList::mousePressEvent(QMouseEvent* e) {
@@ -395,8 +410,16 @@ static QToolButton* makeTextCard(const TextPreset& preset, QWidget* parent, QBut
   auto* b = makeTextPresetButton(preset, presetSize, parent);
   const bool user = TextTemplates::isUserId(preset.id);
   b->setAccessibleName(QStringLiteral("テキストスタイル: %1（タイムラインへドラッグして追加）").arg(preset.label));
-  b->setToolTip(user ? QStringLiteral("%1（マイテンプレート）\nタイムラインへドラッグして追加。右クリックで名前の変更・削除").arg(preset.label)
-                     : QStringLiteral("%1\nタイムラインへドラッグして追加").arg(preset.label));
+  if (user) {
+    // ワークショップから追加したもの・公開したものは、そのことも出す
+    const TemplateWorkshopInfo info = textTemplates().workshopInfo(preset.id);
+    QString origin;
+    if (!info.sourceId.isEmpty()) origin = QStringLiteral("\nワークショップから追加（作った人: %1）").arg(info.author);
+    else if (!info.publishedId.isEmpty()) origin = QStringLiteral("\nワークショップに公開中");
+    b->setToolTip(QStringLiteral("%1（マイテンプレート）%2\nタイムラインへドラッグして追加。右クリックで名前の変更・削除・ワークショップへの公開").arg(preset.label, origin));
+  } else {
+    b->setToolTip(QStringLiteral("%1\nタイムラインへドラッグして追加").arg(preset.label));
+  }
   // クリックでは追加しない。選んだスタイルの枠を強調して確認できるようにするだけ
   b->setCheckable(true);
   group->addButton(b);
@@ -434,9 +457,25 @@ QWidget* LibraryPanel::createTextView(QWidget* parent) {
     ++i;
   }
   v->addLayout(grid);
-  // 自分で保存したテンプレート（右の設定欄の「テンプレートに保存」で増える）
+  // 自分で保存したテンプレート（右の設定欄の「テンプレートに保存」・テキストの右クリックで増える）
   v->addWidget(makeSeparator(textPage));
-  v->addWidget(makeLabel(QStringLiteral("マイテンプレート"), "muted", textPage));
+  auto* userHead = new QHBoxLayout();
+  userHead->setSpacing(6);
+  userHead->addWidget(makeLabel(QStringLiteral("マイテンプレート"), "muted", textPage));
+  userHead->addStretch(1);
+  // ワークショップ（みんなが公開したテンプレートを探す・自分のものを公開する）。AI サーバーで使えるときだけ出す
+  auto* workshopButton = new QPushButton(theme::icon(QStringLiteral("download")), QStringLiteral("ワークショップ"), textPage);
+  workshopButton->setObjectName(QStringLiteral("WorkshopButton"));
+  workshopButton->setToolTip(QStringLiteral("みんなが公開したテキストのテンプレートを探して、マイテンプレートに追加します\n"
+                                            "自分のテンプレートは、右クリックの「ワークショップに公開」で公開できます"));
+  workshopButton->setFocusPolicy(Qt::TabFocus);
+  userHead->addWidget(workshopButton);
+  v->addLayout(userHead);
+  QObject::connect(workshopButton, &QPushButton::clicked, workshopButton, [workshopButton] { openWorkshop(workshopButton, ai::WorkshopKind::Text); });
+  auto syncWorkshop = [workshopButton] { workshopButton->setVisible(ai::workshopVisible()); };
+  syncWorkshop();
+  QObject::connect(&ai::account(), &ai::Account::changed, workshopButton, syncWorkshop);
+  QObject::connect(&ai::account(), &ai::Account::linkChanged, workshopButton, syncWorkshop);
   auto* userBox = new QWidget(textPage);
   auto* userGrid = new QGridLayout(userBox);
   userGrid->setContentsMargins(0, 0, 0, 0);

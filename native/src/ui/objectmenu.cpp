@@ -7,6 +7,7 @@
 
 #include "core/timeline.h"
 #include "ui/keymap.h"
+#include "ui/widgets.h"
 
 namespace kv {
 
@@ -86,6 +87,11 @@ void execObjectMenu(QWidget* parent, const Selection& sel, const QPoint& globalP
     split->setEnabled(t > start + 1e-6 && t < start + duration - 1e-6);
   }
   if (sel.type == Selection::Text && !timeline && editText) menu.addAction(QStringLiteral("文字を編集"), parent, editText);
+  // 見た目をマイテンプレートにする（右の設定欄の「今の見た目をテンプレートに保存」と同じ）
+  if (sel.type == Selection::Text) {
+    const QString textId = sel.id;
+    menu.addAction(QStringLiteral("見た目をテンプレートに保存…"), parent, [parent, textId] { saveTextAsTemplate(parent, textId); });
+  }
   const QString suffix = many > 1 ? QStringLiteral("（%1 個まとめて）").arg(many) : QString();
   menu.addAction(withKeys(QStringLiteral("複製") + suffix, QStringLiteral("edit.duplicate")), parent, [] { editor().duplicateSelection(); });
   menu.addAction(withKeys(QStringLiteral("削除") + suffix, QStringLiteral("edit.delete")), parent, [] { editor().deleteSelection(); });

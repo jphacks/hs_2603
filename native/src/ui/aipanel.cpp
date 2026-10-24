@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QImage>
 #include <QJsonObject>
 #include <QKeyEvent>
@@ -34,10 +35,14 @@
 #include "ai/account.h"
 #include "ai/aiconfig.h"
 #include "ai/assistant.h"
+#include "ai/workshop.h"
 #include "core/editor.h"
 #include "core/projectio.h"
 #include "core/timeline.h"
+#include "media/audiopreview.h"
+#include "media/mediamanager.h"
 #include "ui/accountdialog.h"
+#include "ui/plaintextinput.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -59,6 +64,13 @@ struct AiChoiceCard {
   QJsonObject baseJson;
   /** それぞれの案を base に当てはめた直後の編集データ（空なら、まだ当てはめていない）。元に戻す・やり直しを見分ける */
   std::vector<QJsonObject> after;
+  // ---- ワークショップのオーディオの候補（set.audio のときだけ） ----
+  /** 試聴のボタン（候補と同じ順） */
+  std::vector<QPointer<QPushButton>> playButtons;
+  /** 試聴のために、ファイルを読み込んでいる候補 */
+  QList<int> fetching;
+  /** 選んで、ファイルを読み込んでいる候補（なければ -1）。読み込み終わると当てはめる */
+  int preparing = -1;
 };
 
 namespace {
@@ -228,8 +240,13 @@ struct PickState {
 PickState pickState(const AiChoiceCard& card, int index, bool here, bool busy) {
   PickState s;
   s.chosen = card.applied == index;
-  s.text = s.chosen ? QStringLiteral("選択中") : card.applied >= 0 ? QStringLiteral("こちらにする") : QStringLiteral("これにする");
-  s.enabled = here && !busy && !s.chosen;
+  s.text = s.chosen                  ? QStringLiteral("選択中")
+           : card.preparing == index ? QStringLiteral("読み込んでいます…")
+           : card.applied >= 0       ? QStringLiteral("こちらにする")
+           : card.set.audio          ? QStringLiteral("これを使う")
+                                     : QStringLiteral("これにする");
+  // オーディオの候補は、読み込んでいる間はほかの候補も選べない
+  s.enabled = here && !busy && !s.chosen && card.preparing < 0;
   s.tip = !here   ? QStringLiteral("この案を作ったタブに切り替えると選べます")
           : busy  ? QStringLiteral("AI の返事が終わると選べます")
           : s.chosen ? QStringLiteral("Ctrl+Z で戻せます")
@@ -299,6 +316,17 @@ QString effortName(const QString& id) {
 /** トークンの数（3 桁ごとにカンマ） */
 QString tokenCount(qint64 n) {
   return QLocale(QLocale::Japanese, QLocale::Japan).toString(n);
+}
+
+/** オーディオの長さ（「1 分 5 秒」「12.3 秒」。ワークショップの窓と同じ書き方） */
+QString audioLength(double seconds) {
+  if (seconds >= 60) return QStringLiteral("%1 分 %2 秒").arg(int(seconds / 60)).arg(int(std::round(std::fmod(seconds, 60.0))));
+  return QStringLiteral("%1 秒").arg(seconds, 0, 'f', 1);
+}
+
+/** ワークショップのオーディオの試聴の印（ワークショップの窓と同じ。どちらで鳴らしても、両方のボタンが合う） */
+QString previewKeyOf(const ai::WorkshopTemplate& t) {
+  return QStringLiteral("workshop:") + t.id;
 }
 
 }  // namespace
@@ -477,7 +505,8 @@ AiPanel::AiPanel(QWidget* parent) : QWidget(parent), assistant_(new ai::Assistan
   usage_->hide();
   effortRow->addWidget(usage_);
   bv->addLayout(effortRow);
-  input_ = new QPlainTextEdit(bottom);
+  // 日本語を変換している途中も、案内の文字（プレースホルダー）をすぐに消す入力欄
+  input_ = new PlainTextInput(bottom);
   input_->setPlaceholderText(QStringLiteral("頼みたいことを入力（Enter で送信、Shift+Enter で改行）"));
   input_->setTabChangesFocus(true);
   input_->setFixedHeight(input_->fontMetrics().lineSpacing() * 3 + 18);
@@ -536,6 +565,8 @@ AiPanel::AiPanel(QWidget* parent) : QWidget(parent), assistant_(new ai::Assistan
   connect(assistant_, &ai::Assistant::failed, this, &AiPanel::addError);
   connect(&editor(), &Editor::projectChanged, this, &AiPanel::trackChoices);
   connect(&editor(), &Editor::workspaceChanged, this, &AiPanel::refreshChoices);
+  // オーディオの候補の「試聴」「試聴を止める」を、鳴らしている状態に合わせる
+  connect(&audioPreview(), &AudioPreview::changed, this, &AiPanel::refreshChoices);
   refreshAccount();
 }
 
@@ -820,6 +851,7 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
   auto* box = new QFrame(this);
   box->setObjectName(QStringLiteral("AiChoices"));
   box->setProperty("choiceSetId", set.id);
+  box->setProperty("audioChoices", set.audio);
   box->setStyleSheet(QStringLiteral("#AiChoices{background:#202020;border:1px solid #2e2e2e;border-radius:6px;}"
                                     "#AiChoice{background:#262626;border:1px solid #333333;border-radius:6px;}"
                                     "#AiChoice[chosen=\"true\"]{border:1px solid #2680eb;}"));
@@ -828,6 +860,66 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
   v->setSpacing(8);
   card->box = box;
   v->addWidget(wrapLabel(set.question.isEmpty() ? QStringLiteral("どれにしますか？") : set.question, "title", box));
+  if (set.audio) {
+    // ワークショップのオーディオの候補: 画像の代わりに試聴して選ぶ（AI は音を聞けないので、名前と説明で選んだもの）
+    v->addWidget(wrapLabel(QStringLiteral("ワークショップのオーディオです。「試聴」で聞いて、「これを使う」を押したものだけが入ります"
+                                          "（オーディオの一覧にも入ります）。選んだあとでも、ほかの候補に切り替えられます。"),
+                           "dim", box));
+    for (size_t i = 0; i < set.choices.size(); ++i) {
+      const ai::Choice& c = set.choices[i];
+      const QString letter = ai::choiceLetter(int(i));
+      auto* f = new QFrame(box);
+      f->setObjectName(QStringLiteral("AiChoice"));
+      auto* fv = new QVBoxLayout(f);
+      fv->setContentsMargins(8, 8, 8, 8);
+      fv->setSpacing(4);
+      auto* head = new QHBoxLayout();
+      head->setSpacing(8);
+      head->addWidget(choiceBadge(letter, f), 0, Qt::AlignTop);
+      // 名前・説明・作った人は、ほかの人が書いた文なので、文字のまま出す（wrapLabel は PlainText）
+      head->addWidget(wrapLabel(c.label, "title", f), 1);
+      fv->addLayout(head);
+      const QString author = c.audio.author.isEmpty() ? QStringLiteral("名前なし") : c.audio.author;
+      fv->addWidget(wrapLabel(QStringLiteral("%1・%2・%3 人が使用").arg(author, audioLength(c.audio.duration)).arg(c.audio.uses), "dim", f));
+      if (!c.description.isEmpty()) fv->addWidget(wrapLabel(c.description, "muted", f));
+      if (!c.audio.description.isEmpty()) fv->addWidget(wrapLabel(c.audio.description, "dim", f));
+      auto* row = new QHBoxLayout();
+      row->setSpacing(6);
+      auto* play = new QPushButton(theme::icon(QStringLiteral("play")), QStringLiteral("試聴"), f);
+      play->setObjectName(QStringLiteral("AiAudioPlay"));
+      play->setFocusPolicy(Qt::TabFocus);
+      play->setAccessibleName(QStringLiteral("候補 %1「%2」を試聴").arg(letter, c.label));
+      row->addWidget(play);
+      row->addStretch(1);
+      auto* pick = new QPushButton(QStringLiteral("これを使う"), f);
+      pick->setObjectName(QStringLiteral("AiChoiceButton"));
+      pick->setProperty("choiceIndex", int(i));
+      pick->setFocusPolicy(Qt::TabFocus);
+      pick->setAccessibleName(QStringLiteral("候補 %1「%2」を使う").arg(letter, c.label));
+      row->addWidget(pick);
+      fv->addLayout(row);
+      connect(play, &QPushButton::clicked, this, [this, card, i] { previewAudio(card, int(i)); });
+      connect(pick, &QPushButton::clicked, this, [this, card, i] { chooseAudio(card, int(i)); });
+      card->buttons.push_back(pick);
+      card->frames.push_back(f);
+      card->playButtons.push_back(play);
+      v->addWidget(f);
+    }
+    choiceCards_.push_back(card);
+    if (QFrame* old = turnAudio_; old && items_->indexOf(old) >= 0) {
+      // 同じ回の出し直し。前の候補の欄と、その場で入れ替える
+      const int at = items_->indexOf(old);
+      items_->removeWidget(old);
+      old->hide();
+      old->deleteLater();
+      items_->insertWidget(at, box);
+    } else {
+      addItem(box);
+    }
+    turnAudio_ = box;
+    refreshChoices();
+    return;
+  }
   v->addWidget(wrapLabel(QStringLiteral("「これにする」を押した案だけが入ります。選んだあとでも、ほかの案に切り替えられます。"), "dim", box));
   // 欄が広ければ案を横に並べ、狭ければ縦に重ねる
   auto* tiles = new QWidget(box);
@@ -1017,13 +1109,108 @@ void AiPanel::chooseOption(const std::shared_ptr<AiChoiceCard>& card, int index)
   }
   card->after[size_t(index)] = projectToJson(ed.project());
   card->applied = index;
-  addAction(QStringLiteral("案 %1「%2」にしました").arg(letter, choice.label));
-  assistant_->noteChoice(card->set.id, QStringLiteral("%1「%2」").arg(letter, choice.label));
-  // 変えたところを選び、プレビューと同じ時間を表示する
+  if (card->set.audio) {
+    addAction(QStringLiteral("候補 %1「%2」を入れました").arg(letter, choice.label));
+    // オーディオの名前は、ほかの人が付けたものなので、AI には ID で知らせる（名前が、アプリからの知らせの続きに見えないように）
+    assistant_->noteChoice(card->set.id, QStringLiteral("%1（%2）").arg(letter, ai::workshopRef(choice.audio.id)));
+  } else {
+    addAction(QStringLiteral("案 %1「%2」にしました").arg(letter, choice.label));
+    assistant_->noteChoice(card->set.id, QStringLiteral("%1「%2」").arg(letter, choice.label));
+  }
+  // 変えたところを選び、プレビューと同じ時間（オーディオは入れた時間）を表示する
   if (!res.focusText.isEmpty()) ed.select({Selection::Text, res.focusText});
   else if (!res.focusClip.isEmpty()) ed.select({Selection::Clip, res.focusClip});
+  else if (!res.focusAudio.isEmpty()) ed.select({Selection::Audio, res.focusAudio});
   if (!card->set.times.empty()) ed.seek(card->set.times.front());
+  else if (const AudioItem* a = res.focusAudio.isEmpty() ? nullptr : ed.audio(res.focusAudio)) ed.seek(a->start);
   refreshChoices();
+}
+
+void AiPanel::previewAudio(const std::shared_ptr<AiChoiceCard>& card, int index) {
+  if (index < 0 || index >= int(card->set.choices.size())) return;
+  const ai::WorkshopTemplate t = card->set.choices[size_t(index)].audio;
+  const QString key = previewKeyOf(t);
+  if (audioPreview().playingAsset() == key) {
+    audioPreview().stop();
+    return;
+  }
+  if (card->fetching.contains(index)) return;
+  card->fetching << index;
+  refreshChoices();
+  // 試聴も、追加と同じファイルで鳴らす（はじめて聞くときだけ読み込む）
+  ai::workshop().fetchAudio(t, this, [this, card, index, key, t](const QString& error, const QString& file) {
+    card->fetching.removeAll(index);
+    refreshChoices();
+    if (!card->box) return;  // 会話を消した
+    if (!error.isEmpty()) {
+      addError(error);
+      return;
+    }
+    previewKey_ = key;
+    audioPreview().toggleFile(key, file, t.duration);
+  });
+}
+
+void AiPanel::chooseAudio(const std::shared_ptr<AiChoiceCard>& card, int index) {
+  Editor& ed = editor();
+  if (assistant_->busy() || card->preparing >= 0 || index < 0 || index >= int(card->set.choices.size()) || card->applied == index) return;
+  if (ed.workspaceUid(ed.workspaceIndex()) != card->set.workspaceUid) {
+    addError(QStringLiteral("この候補は、候補を出したときのタブのものです。そのタブに切り替えてから選んでください。"));
+    return;
+  }
+  const ai::WorkshopTemplate t = card->set.choices[size_t(index)].audio;
+  // もうメディア一覧にあれば、そのまま入れる
+  if (!ai::workshopAudioAsset(t.id).isEmpty()) {
+    chooseOption(card, index);
+    return;
+  }
+  card->preparing = index;
+  refreshChoices();
+  auto stop = [this, card](const QString& error) {
+    card->preparing = -1;
+    refreshChoices();
+    if (card->box && !error.isEmpty()) addError(error);
+  };
+  // 手元に置いてから、候補を出したタブのメディア一覧に入れる（読み込みは別のスレッド）。入ったら当てはめる
+  ai::workshop().fetchAudio(t, this, [this, card, index, t, stop](const QString& error, const QString& file) {
+    if (!card->box) return stop(QString());
+    if (!error.isEmpty()) return stop(error);
+    const int uid = card->set.workspaceUid;
+    if (editor().workspaceUid(editor().workspaceIndex()) != uid) {
+      return stop(QStringLiteral("タブが切り替わったので、入れませんでした。候補を出したときのタブで、もう一度押してください。"));
+    }
+    media().importPaths({file}, false);
+    auto* timer = new QTimer(this);
+    auto waited = std::make_shared<QElapsedTimer>();
+    waited->start();
+    timer->setInterval(100);
+    connect(timer, &QTimer::timeout, this, [this, timer, waited, card, index, t, uid, stop] {
+      const bool here = editor().workspaceUid(editor().workspaceIndex()) == uid;
+      const bool ready = here && !ai::workshopAudioAsset(t.id).isEmpty();
+      if (!ready && here && card->box && waited->elapsed() < 20000) return;
+      timer->stop();
+      timer->deleteLater();
+      if (!card->box) return stop(QString());
+      if (!here) return stop(QStringLiteral("タブが切り替わったので、入れませんでした。候補を出したときのタブで、もう一度押してください。"));
+      if (!ready) return stop(QStringLiteral("オーディオを読み込めませんでした。もう一度押してください。"));
+      card->preparing = -1;
+      chooseOption(card, index);
+      refreshChoices();
+    });
+    timer->start();
+  });
+}
+
+void AiPanel::stopPanelPreview() {
+  // この欄で鳴らした試聴だけを止める（ワークショップの窓で鳴らしているものは止めない）
+  if (!previewKey_.isEmpty() && audioPreview().playingAsset() == previewKey_) audioPreview().stop();
+  previewKey_.clear();
+}
+
+void AiPanel::hideEvent(QHideEvent* e) {
+  QWidget::hideEvent(e);
+  // 欄を閉じたら、試聴も止める（止めるボタンが見えなくなるため）。ウィンドウを最小化しただけのときは、そのまま
+  if (!e->spontaneous()) stopPanelPreview();
 }
 
 void AiPanel::trackChoices() {
@@ -1065,6 +1252,16 @@ void AiPanel::refreshChoices() {
     }
     ++it;
     const bool here = card->set.workspaceUid == uid;
+    // オーディオの候補の試聴ボタン（鳴らしている候補は「試聴を止める」）
+    for (size_t i = 0; i < card->playButtons.size() && i < card->set.choices.size(); ++i) {
+      QPushButton* b = card->playButtons[i];
+      if (!b) continue;
+      const bool fetching = card->fetching.contains(int(i));
+      const bool playing = audioPreview().playingAsset() == previewKeyOf(card->set.choices[i].audio);
+      b->setText(fetching ? QStringLiteral("読み込んでいます…") : playing ? QStringLiteral("試聴を止める") : QStringLiteral("試聴"));
+      b->setIcon(theme::icon(playing ? QStringLiteral("stop") : QStringLiteral("play")));
+      b->setEnabled(!fetching);
+    }
     for (size_t i = 0; i < card->buttons.size(); ++i) {
       const PickState s = pickState(*card, int(i), here, busy);
       if (QPushButton* b = card->buttons[i]) applyPickState(b, s);
@@ -1088,6 +1285,7 @@ void AiPanel::setBusy(bool busy) {
   if (busy) {
     // 新しい依頼では、前の回の案の欄は置き換えない
     turnChoices_ = nullptr;
+    turnAudio_ = nullptr;
     busyClock_.start();
     statusTimer_.start();
   } else {
@@ -1125,6 +1323,7 @@ void AiPanel::sendInput() {
 
 void AiPanel::clearConversation() {
   assistant_->reset();
+  stopPanelPreview();
   // はじめの説明と最後の伸縮だけを残す
   while (items_->count() > 2) {
     QLayoutItem* it = items_->takeAt(1);

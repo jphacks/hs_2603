@@ -11,8 +11,9 @@ import { ApiError } from './http.ts';
 import { adminRoutes } from './routes/admin.ts';
 import { aiRoutes } from './routes/ai.ts';
 import { authRoutes } from './routes/auth.ts';
-import type { RegistrationMode } from './settings.ts';
-import { readRegistration, registrationRole } from './settings.ts';
+import { workshopRoutes } from './routes/workshop.ts';
+import type { RegistrationMode, WorkshopMode } from './settings.ts';
+import { readRegistration, readWorkshop, registrationRole } from './settings.ts';
 
 export type AppContext = {
   config: Config;
@@ -73,21 +74,33 @@ export async function buildApp(ctx: AppContext, options: { logger?: FastifyServe
   app.setNotFoundHandler((req, reply) => reply.status(404).send({ error: '見つかりません', code: 'not_found' }));
 
   // アプリが、つながっているかを確かめる（ログインしていなくても使える）。
-  // service でこのサーバーだと分かり、registration で新規登録を受け付けているかが分かる
+  // service でこのサーバーだと分かり、registration で新規登録を受け付けているか、workshop でワークショップを使えるかが分かる
   app.get('/api/health', async () => {
     let db = true;
     let registration: RegistrationMode = 'off';
+    let workshop: WorkshopMode = 'off';
     try {
       const reg = await readRegistration(ctx.db);
       if ((await registrationRole(ctx.db, reg)) !== null) registration = reg.mode;
+      workshop = (await readWorkshop(ctx.db)).mode;
     } catch {
       db = false;
     }
-    return { ok: db, db, service: 'kantan-ai-server', api: 2, registration, bedrockConfigured: Boolean(ctx.config.bedrockKey), model: ctx.config.model };
+    return {
+      ok: db,
+      db,
+      service: 'kantan-ai-server',
+      api: 3,
+      registration,
+      workshop,
+      bedrockConfigured: Boolean(ctx.config.bedrockKey),
+      model: ctx.config.model,
+    };
   });
 
   authRoutes(app, ctx);
   aiRoutes(app, ctx);
+  workshopRoutes(app, ctx);
   adminRoutes(app, ctx);
 
   // 管理画面（ファイルは 3 つだけなので、決まった名前だけを返す）

@@ -137,3 +137,7 @@ dialog .actions .left { margin-right: auto; display: flex; gap: 8px; flex-wrap: 
   .side { border-right: none; border-bottom: 1px solid var(--border); }
   .content { padding: 16px; }
 }
+/* ワークショップのテンプレートのおおよその見本（白い字も黒い字も見えるよう、中くらいの灰色の上に出す） */
+.sample { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 18px; line-height: 1.35; background: #5c636e; }
+/* オーディオの見本（ブラウザーの再生の部品。そのままだと幅 300px で、表が横にはみ出して「削除」などが隠れるので小さくする） */
+td audio { display: block; width: 210px; height: 36px; }

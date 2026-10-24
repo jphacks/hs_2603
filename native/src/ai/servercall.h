@@ -28,6 +28,8 @@ class ServerCall : public QObject {
   /** 送り始める。parent が消えると、通信もやめる */
   static ServerCall* get(const QNetworkRequest& request, QObject* parent);
   static ServerCall* post(const QNetworkRequest& request, const QByteArray& body, QObject* parent);
+  /** GET・POST 以外（DELETE など）も送る。送り直しは POST と同じく、サーバーに届く前に切られたときだけ */
+  static ServerCall* custom(const QNetworkRequest& request, const QByteArray& method, const QByteArray& body, QObject* parent);
   ~ServerCall() override;
 
   /** やめる（つなぎ直しも止める）。finished は出さない。このあと消える */
