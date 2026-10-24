@@ -86,8 +86,10 @@ void ServerStatus::refresh() {
         << QStringLiteral("%1 に KANTAN_AI_SERVER=（AI サーバーのアドレス）を書くと、AI アシスタントを使えます").arg(envHintPath());
   } else if (!a.linkDetail().isEmpty()) {
     tip << a.linkDetail();
-    // アドレスの書き方の問題なら、どのファイルを直せばよいかだけ出す
-    if (a.link() == ai::Account::Link::Wrong) tip << QStringLiteral("設定のファイル: %1").arg(ai::envFile());
+    // アドレスの書き方の問題なら、どのファイルを直せばよいかだけ出す（組み込んだアドレスなら、使う人には直せないので出さない）
+    if (a.link() == ai::Account::Link::Wrong && ai::serverSource() == ai::ServerSource::EnvFile) {
+      tip << QStringLiteral("設定のファイル: %1").arg(ai::envFile());
+    }
   }
   if (a.loggedIn()) tip << ai::accountLabel(a.info()) << ai::quotaSummary(a.info());
   tip << (a.server().isEmpty() ? QStringLiteral("押すと、.env の場所が出ます")

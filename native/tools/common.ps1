@@ -91,3 +91,92 @@ function Invoke-Tool([string]$Exe, [string[]]$Arguments, [string]$What) {
   }
   if ($code -ne 0) { throw "$What に失敗しました（終了コード $code）" }
 }
+
+# ---- 配る exe に組み込む AI サーバーのアドレス（native\release.env の KANTAN_AI_SERVER） ----
+
+# release.env の KANTAN_AI_SERVER の値（ファイルが無い・書いていなければ空）。読み方はアプリの .env と同じ
+# （# で始まる行は無視、値の前後の引用符を外す、値のあとの「 #」からはコメント。UTF-8 でも UTF-16 でもよい）
+function Read-KantanReleaseServer([string]$File) {
+  if (-not (Test-Path -LiteralPath $File)) { return '' }
+  $value = ''
+  foreach ($raw in ([System.IO.File]::ReadAllText($File) -split "`n")) {
+    $line = $raw.Trim()
+    if (-not $line -or $line.StartsWith('#')) { continue }
+    if ($line -notmatch '^(?:export\s+)?KANTAN_AI_SERVER\s*=(.*)$') { continue }
+    $v = $Matches[1].Trim()
+    if ($v.Length -ge 2 -and (($v[0] -eq '"' -and $v[-1] -eq '"') -or ($v[0] -eq "'" -and $v[-1] -eq "'"))) {
+      $v = $v.Substring(1, $v.Length - 2)
+    } else {
+      $i = $v.IndexOf(' #')
+      if ($i -ge 0) { $v = $v.Substring(0, $i) }
+    }
+    $value = $v.Trim()
+  }
+  return $value
+}
+
+# 家の中（この PC・家のネットワーク・.local・Tailscale の 100.64.0.0/10）のアドレスか（アプリの privateHost と同じ決まり）
+function Test-KantanPrivateHost([string]$HostName) {
+  $h = $HostName.ToLowerInvariant().Trim('[', ']')
+  if ($h -eq 'localhost' -or $h.EndsWith('.local')) { return $true }
+  $ip = $null
+  if (-not [System.Net.IPAddress]::TryParse($h, [ref]$ip)) { return $false }
+  if ([System.Net.IPAddress]::IsLoopback($ip)) { return $true }
+  $b = $ip.GetAddressBytes()
+  if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+    return $ip.IsIPv6LinkLocal -or (($b[0] -band 0xFE) -eq 0xFC)
+  }
+  return ($b[0] -eq 10) -or ($b[0] -eq 172 -and $b[1] -ge 16 -and $b[1] -le 31) -or ($b[0] -eq 192 -and $b[1] -eq 168) -or
+    ($b[0] -eq 169 -and $b[1] -eq 254) -or ($b[0] -eq 100 -and ($b[1] -band 0xC0) -eq 64)
+}
+
+# 組み込むアドレスを確かめる（だめなら止める。配ったあとでは、使う人には直せないため）。アドレスそのものは表示しない
+function Assert-KantanReleaseServer([string]$Value, [string]$File) {
+  $hasScheme = $Value -match '^[A-Za-z][A-Za-z0-9+.-]*://'
+  $probe = if ($hasScheme) { $Value } else { 'http://' + $Value }
+  $u = $null
+  if (-not [Uri]::TryCreate($probe, [UriKind]::Absolute, [ref]$u) -or -not $u.Host) {
+    throw "$File の KANTAN_AI_SERVER の書き方が正しくありません（例: https://ai.example.com）"
+  }
+  $scheme = if ($hasScheme) { $u.Scheme } elseif (Test-KantanPrivateHost $u.Host) { 'http' } else { 'https' }
+  if ($scheme -ne 'http' -and $scheme -ne 'https') {
+    throw "$File の KANTAN_AI_SERVER は http:// か https:// のアドレスにしてください"
+  }
+  if ($u.UserInfo -or $u.Query -or $u.Fragment) {
+    throw "$File の KANTAN_AI_SERVER には、サーバーのアドレスだけを書いてください（例: https://ai.example.com）"
+  }
+  if ($scheme -eq 'http' -and -not (Test-KantanPrivateHost $u.Host)) {
+    throw "$File の KANTAN_AI_SERVER が、HTTP で家の外のアドレスになっています。パスワードが読まれないよう、https:// にしてください"
+  }
+}
+
+# 組み込むアドレスを、ビルドのフォルダーの generated\kv_embedded_server.h に書く（aiconfig.cpp が読む）。
+# exe を文字で眺めても見えないよう、毎回作る鍵と混ぜたバイトの並びにする。空なら、組み込まない形にする。
+# 中身が前と同じなら書き換えない（書き換えると aiconfig.cpp をコンパイルし直すため）
+function Write-KantanEmbeddedServer([string]$Value, [string]$Dir) {
+  New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+  $header = Join-Path $Dir 'kv_embedded_server.h'
+  $stampFile = Join-Path $Dir 'kv_embedded_server.stamp'
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $stamp = -join ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes('kv-embed-v1:' + $Value)) | ForEach-Object { $_.ToString('x2') })
+  if ((Test-Path -LiteralPath $header) -and (Test-Path -LiteralPath $stampFile) -and ([System.IO.File]::ReadAllText($stampFile) -eq $stamp)) { return }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+  $n = $bytes.Length
+  $key = New-Object byte[] ([Math]::Max(1, $n))
+  [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($key)
+  $data = New-Object byte[] ([Math]::Max(1, $n))
+  for ($i = 0; $i -lt $n; $i++) { $data[$i] = $bytes[$i] -bxor $key[$i] -bxor (($i * 0x9D + 0x5B) -band 0xFF) }
+  $hex = { param($a) ($a | ForEach-Object { '0x{0:x2}' -f $_ }) -join ',' }
+  $text = @(
+    '// build.ps1 makes this file from native/release.env. Do not edit. Not in git.',
+    '#pragma once',
+    'namespace kv::ai::embedded {',
+    "inline constexpr int kSize = $n;",
+    "inline constexpr unsigned char kKey[] = {$(& $hex $key)};",
+    "inline constexpr unsigned char kData[] = {$(& $hex $data)};",
+    '}  // namespace kv::ai::embedded',
+    ''
+  ) -join "`n"
+  [System.IO.File]::WriteAllText($header, $text, (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($stampFile, $stamp)
+}

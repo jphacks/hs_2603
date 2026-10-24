@@ -49,6 +49,17 @@ if (-not (Test-Path -LiteralPath (Join-Path $build 'build.ninja'))) {
   Invoke-Tool $KantanTools.CMake $configure 'CMake の設定'
   [System.IO.File]::WriteAllText($stamp, $signature)
 }
+# 配る exe に組み込む AI サーバーのアドレス（native\release.env。git には入らない）。
+# 無ければ組み込まず、これまでどおり .env にアドレスを書いた人だけが AI を使える exe になる
+$releaseEnv = Join-Path $here 'release.env'
+$embedServer = Read-KantanReleaseServer $releaseEnv
+if ($embedServer) {
+  Assert-KantanReleaseServer $embedServer $releaseEnv
+  Write-Host 'AI サーバーのアドレスを exe に組み込みます（native\release.env）'
+} elseif (Test-Path -LiteralPath $releaseEnv) {
+  Write-Host 'native\release.env に KANTAN_AI_SERVER の値が無いので、AI サーバーのアドレスは組み込みません'
+}
+Write-KantanEmbeddedServer $embedServer (Join-Path $build 'generated')
 Invoke-Tool $KantanTools.CMake @('--build', $build) 'ビルド'
 if ($NoDeploy) { return }
 # アプリに同梱する文字のフォント（無ければ、ここでダウンロードする。初回だけ）

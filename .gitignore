@@ -4,6 +4,8 @@
 .env
 .env.*
 !.env.example
+# 配る exe に組み込む AI サーバーのアドレス（native/release.env）。見本は native/release.env.example
+release.env
 node_modules/
 # ---- ビルドの出力 ----
 # native/build.ps1 は native/build/ と native/dist/ に出力する。

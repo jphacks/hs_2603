@@ -121,7 +121,7 @@ MainWindow::MainWindow() {
   setCentralWidget(central);
 
   buildMenus();
-  // AI サーバーのアドレス（.env の KANTAN_AI_SERVER）が無ければ、AI アシスタントは出さない。
+  // AI サーバーのアドレス（.env の KANTAN_AI_SERVER か、exe に組み込んだもの）が無ければ、AI アシスタントは出さない。
   // .env を書き換えてアプリに戻ってきたら、Account が読み直して changed を出す（起動し直さなくてよい）
   refreshAiAvailability();
   connect(&ai::account(), &ai::Account::changed, this, &MainWindow::refreshAiAvailability);

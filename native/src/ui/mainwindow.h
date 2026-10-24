@@ -70,7 +70,7 @@ class MainWindow : public QMainWindow {
   void closeWorkspace(int index);
   /** AI アシスタントの欄を出す・しまう（ログインしていなければ、欄にログインの案内が出る） */
   void setAiVisible(bool on);
-  /** AI サーバーのアドレス（.env の KANTAN_AI_SERVER）が決まっていなければ、AI アシスタントを隠す */
+  /** AI サーバーのアドレス（.env の KANTAN_AI_SERVER か、exe に組み込んだもの）が決まっていなければ、AI アシスタントを隠す */
   void refreshAiAvailability();
 
   PreviewEngine* engine_;

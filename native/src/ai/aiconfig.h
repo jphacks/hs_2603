@@ -1,8 +1,9 @@
 #pragma once
 // AI 機能の設定。AI は、いつも AI サーバー（リポジトリの server フォルダー）を通して使う（アプリに Bedrock のキーは要らない）。
-// AI サーバーのアドレスは .env の KANTAN_AI_SERVER に書く（アプリの中では決めず、画面にも出さない。書いていなければ、AI アシスタントは出さない）。
-// .env は、アプリの exe のフォルダー → リポジトリの一番上（開発中だけ）→ アプリのデータフォルダー
-// （%LOCALAPPDATA%\JPHACKS\kantan-video-editor）の順に探し、KANTAN_AI_SERVER に値が書いてある最初の 1 つを使う（環境変数は使わない）。
+// AI サーバーのアドレスは、次の順に決める（画面には出さない。どれも無ければ、AI アシスタントは出さない）。
+//   1. .env の KANTAN_AI_SERVER（管理者が、別のサーバーで試すとき）。.env は、アプリの exe のフォルダー → リポジトリの一番上（開発中だけ）→
+//      アプリのデータフォルダー（%LOCALAPPDATA%\JPHACKS\kantan-video-editor）の順に探し、値が書いてある最初の 1 つを使う（環境変数は使わない）
+//   2. 配る exe に組み込んだアドレス（build.ps1 が native\release.env から、そのままの文字では見えない形で埋め込む）
 // .env を書き換えたら、アプリに戻ってくるだけで読み直す（起動し直さなくてよい）。
 // 考える深さは AI の欄で選び、データフォルダーの settings.ini に覚えておく（レジストリは使わない）。
 
@@ -29,11 +30,28 @@ struct Config {
   int timeoutMs() const;
 };
 
-/** 今の .env のアドレスで作る（ログイン中の印などは、送る直前に入れる） */
+/** 今のアドレスで作る（ログイン中の印などは、送る直前に入れる） */
 Config loadConfig();
 
-/** .env の KANTAN_AI_SERVER（整えたもの）。.env が無い・書いていなければ空。呼ぶたびに .env を読み直す */
+/** AI サーバーのアドレスをどこで決めたか */
+enum class ServerSource {
+  /** どこにも無い（AI は使わない） */
+  None,
+  /** .env の KANTAN_AI_SERVER */
+  EnvFile,
+  /** exe に組み込んだアドレス */
+  BuiltIn,
+};
+
+/**
+ * 使う AI サーバーのアドレス（整えたもの）。.env の KANTAN_AI_SERVER があればそれ、無ければ exe に組み込んだもの、
+ * どちらも無ければ空。呼ぶたびに .env を読み直す
+ */
 QString configuredServer();
+/** configuredServer() のアドレスを、どこで決めたか（呼ぶたびに .env を読み直す） */
+ServerSource serverSource();
+/** exe にアドレスを組み込んであるか */
+bool hasBuiltInServer();
 /** KANTAN_AI_SERVER を読んだ .env の場所（どの .env にも書いていなければ空） */
 QString envFile();
 /** .env を探すフォルダー（探す順） */
@@ -51,9 +69,14 @@ QString suggestedEnvPath();
 QString normalizeServer(const QString& text);
 /**
  * アドレスの問題（なければ空。画面に出す文なので、アドレスそのものは入れない）。パスワードを読まれないよう、
- * HTTP にできるのは家の中のアドレス（この PC・家のネットワーク・.local・Tailscale の 100.64.0.0/10）だけ
+ * HTTP にできるのは家の中のアドレス（この PC・家のネットワーク・.local・Tailscale の 100.64.0.0/10）だけ。
+ * 組み込んだアドレスの問題なら、.env ではなく、アプリを配った人に知らせてもらう文にする
  */
 QString serverProblem(const QString& url);
+/**
+ * AI サーバーではないところにつながったときの文（直してもらう場所は、アドレスをどこで決めたかで変える）
+ */
+QString wrongServerText();
 /** 画面に出す文（Qt の通信の失敗の説明など）から、サーバーのアドレスを伏せる（アドレスは画面に出さない） */
 QString hideServer(QString text, const QString& server);
 

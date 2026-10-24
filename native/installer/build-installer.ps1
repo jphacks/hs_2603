@@ -8,6 +8,10 @@ $native = Split-Path -Parent $here
 . (Join-Path $native 'tools\common.ps1')
 
 & (Join-Path $native 'build.ps1')
+# 配る exe に AI サーバーのアドレスが入っていないと、使う人は .env を書かないと AI を使えない
+if (-not (Read-KantanReleaseServer (Join-Path $native 'release.env'))) {
+  Write-Warning 'native\release.env に KANTAN_AI_SERVER が無いので、AI サーバーのアドレスを組み込まずに作ります（使う人は .env を書かないと AI を使えません）'
+}
 if (-not $MakeNsis) {
   if (-not (Test-KantanTool 'NSIS')) { & (Join-Path $native 'tools\setup.ps1') }
   $MakeNsis = $KantanTools.NSIS

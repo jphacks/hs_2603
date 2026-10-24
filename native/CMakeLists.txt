@@ -75,7 +75,8 @@ set(SOURCES
 )
 
 qt_add_executable(kantan-video-editor WIN32 ${SOURCES} resources/app.qrc resources/app.rc)
-target_include_directories(kantan-video-editor PRIVATE src)
+# generated: build.ps1 が作るファイル（配る exe に組み込む AI サーバーのアドレス。native/release.env から作る）
+target_include_directories(kantan-video-editor PRIVATE src "${CMAKE_BINARY_DIR}/generated")
 target_compile_definitions(kantan-video-editor PRIVATE UNICODE _UNICODE NOMINMAX
   KV_VERSION="${PROJECT_VERSION}")
 if(MSVC)

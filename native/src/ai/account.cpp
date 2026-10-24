@@ -139,7 +139,7 @@ static Account::Link readHealth(int status, QNetworkReply::NetworkError error, c
   // 古いサーバーは service を返さないが、bedrockConfigured は返す
   const bool kantan = json.value(QStringLiteral("service")).toString() == u"kantan-ai-server" || json.contains(QStringLiteral("bedrockConfigured"));
   if (status != 200 || !kantan) {
-    detail = QStringLiteral(".env の KANTAN_AI_SERVER が、AI サーバーではないところを指しているようです。アドレスとポート番号を確かめてください");
+    detail = wrongServerText();
     return Account::Link::Wrong;
   }
   registration = json.value(QStringLiteral("registration")).toString(QStringLiteral("off"));

@@ -9,7 +9,17 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
+#include <cstdint>
 #include <map>
+
+// 配る exe に組み込む AI サーバーのアドレス（build.ps1 が native\release.env から、ビルドのフォルダーの generated に作る）。
+// IDE などで build.ps1 を通さずにビルドしたときは無いので、組み込まない
+#if defined(__has_include)
+#if __has_include("kv_embedded_server.h")
+#include "kv_embedded_server.h"
+#define KV_HAS_EMBEDDED_SERVER 1
+#endif
+#endif
 
 namespace kv::ai {
 
@@ -206,22 +216,67 @@ QString normalizeServer(const QString& text) {
   return s;
 }
 
+/**
+ * exe に組み込んだアドレスを戻す（無ければ空）。exe の中には、そのままの文字ではなく、鍵と混ぜたバイトの並びで入っている
+ * （exe を文字で眺めても見えないようにするだけ。通信を見れば接続先は分かるので、秘密にはならない）
+ */
+static QString decodeEmbeddedServer() {
+#ifdef KV_HAS_EMBEDDED_SERVER
+  QByteArray bytes(embedded::kSize, Qt::Uninitialized);
+  // volatile で読み、コンパイラーが戻したあとの文字を exe に入れてしまわないようにする
+  const volatile unsigned char* key = embedded::kKey;
+  const volatile unsigned char* data = embedded::kData;
+  for (int i = 0; i < embedded::kSize; ++i) bytes[i] = char(data[i] ^ key[i] ^ std::uint8_t(i * 0x9D + 0x5B));
+  return QString::fromUtf8(bytes);
+#else
+  return {};
+#endif
+}
+
+/** exe に組み込んだアドレス（整えたもの。無ければ空） */
+static const QString& embeddedServer() {
+  static const QString server = normalizeServer(decodeEmbeddedServer());
+  return server;
+}
+
+bool hasBuiltInServer() {
+  return !embeddedServer().isEmpty();
+}
+
+ServerSource serverSource() {
+  if (!findEnv(serverKey()).first.isEmpty()) return ServerSource::EnvFile;
+  return hasBuiltInServer() ? ServerSource::BuiltIn : ServerSource::None;
+}
+
 QString configuredServer() {
-  return normalizeServer(findEnv(serverKey()).second);
+  // 管理者が別のサーバーで試せるよう、.env を先に見る
+  const QString env = normalizeServer(findEnv(serverKey()).second);
+  return env.isEmpty() ? embeddedServer() : env;
+}
+
+QString wrongServerText() {
+  if (serverSource() == ServerSource::BuiltIn) {
+    return QStringLiteral("AI サーバーではないところにつながりました。アプリを配った人（管理者）に知らせてください");
+  }
+  return QStringLiteral(".env の KANTAN_AI_SERVER が、AI サーバーではないところを指しているようです。アドレスとポート番号を確かめてください");
 }
 
 QString serverProblem(const QString& url) {
   // 画面に出す文なので、アドレスそのものは入れない（直す人は .env を開けば分かる）
   if (url.isEmpty()) return QStringLiteral("AI サーバーのアドレスが決まっていません。.env に KANTAN_AI_SERVER=（アドレス）を書いてください");
+  // 組み込んだアドレスは build.ps1 が確かめているので、ふつうは問題にならない。なっても、使う人には直せない
+  const bool builtIn = serverSource() == ServerSource::BuiltIn;
+  const QString builtInProblem = QStringLiteral("アプリに組み込まれた AI サーバーのアドレスが正しくありません。アプリを配った人（管理者）に知らせてください");
   const QUrl u(url, QUrl::StrictMode);
   if (!u.isValid() || u.host().isEmpty() || (u.scheme() != u"http" && u.scheme() != u"https")) {
-    return QStringLiteral(".env の KANTAN_AI_SERVER の書き方が正しくありません（例: https://ai.example.com）");
+    return builtIn ? builtInProblem : QStringLiteral(".env の KANTAN_AI_SERVER の書き方が正しくありません（例: https://ai.example.com）");
   }
   if (!u.userInfo().isEmpty() || u.hasQuery() || u.hasFragment()) {
-    return QStringLiteral(".env の KANTAN_AI_SERVER には、サーバーのアドレスだけを書いてください（例: https://ai.example.com）");
+    return builtIn ? builtInProblem : QStringLiteral(".env の KANTAN_AI_SERVER には、サーバーのアドレスだけを書いてください（例: https://ai.example.com）");
   }
   if (u.scheme() == u"http" && !privateHost(u.host())) {
-    return QStringLiteral(".env の KANTAN_AI_SERVER が、HTTP で家の外のアドレスになっています。パスワードが読まれないよう、https:// にしてください");
+    return builtIn ? builtInProblem
+                   : QStringLiteral(".env の KANTAN_AI_SERVER が、HTTP で家の外のアドレスになっています。パスワードが読まれないよう、https:// にしてください");
   }
   return {};
 }
