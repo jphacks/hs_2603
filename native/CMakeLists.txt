@@ -54,6 +54,8 @@ set(SOURCES
   src/ui/inspector.h src/ui/inspector.cpp
   src/ui/exportdialog.h src/ui/exportdialog.cpp
   src/ui/workspacebar.h src/ui/workspacebar.cpp
+  src/ui/keymap.h src/ui/keymap.cpp
+  src/ui/shortcutsdialog.h src/ui/shortcutsdialog.cpp
   src/ai/aiconfig.h src/ai/aiconfig.cpp
   src/ai/bedrock.h src/ai/bedrock.cpp
   src/ai/framegrab.h src/ai/framegrab.cpp

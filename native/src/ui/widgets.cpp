@@ -523,6 +523,10 @@ void SliderRow::setLabelVisible(bool v) {
   label_->setVisible(v);
 }
 
+void SliderRow::setValueVisible(bool v) {
+  valueLabel_->setVisible(v);
+}
+
 void SliderRow::updateText() {
   valueLabel_->setText(format_ ? format_(value()) : QString::number(value(), 'f', 2));
 }

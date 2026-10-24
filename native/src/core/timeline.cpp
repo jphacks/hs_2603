@@ -173,6 +173,7 @@ PropLimits propLimits(AnimProp p) {
     case AnimProp::Scale: return {0.05, 4.0, 1.0};
     case AnimProp::Rotation: return {-3600.0, 3600.0, 0.0};
     case AnimProp::Opacity: return {0.0, 1.0, 1.0};
+    case AnimProp::LetterSpacing: return {kMinLetterSpacing, kMaxLetterSpacing, 0.0};
   }
   return {0, 1, 0};
 }
@@ -190,6 +191,7 @@ QString propLabel(AnimProp p) {
     case AnimProp::Scale: return QStringLiteral("拡大率");
     case AnimProp::Rotation: return QStringLiteral("回転");
     case AnimProp::Opacity: return QStringLiteral("不透明度");
+    case AnimProp::LetterSpacing: return QStringLiteral("字間");
   }
   return {};
 }
@@ -235,6 +237,7 @@ double baseProp(const VideoClip& c, AnimProp p) {
     case AnimProp::Scale: return c.scale;
     case AnimProp::Rotation: return c.rotation;
     case AnimProp::Opacity: return c.opacity;
+    case AnimProp::LetterSpacing: return 0;  // 字間は文字だけの項目
   }
   return 0;
 }
@@ -246,6 +249,7 @@ double baseProp(const TextItem& t, AnimProp p) {
     case AnimProp::Scale: return t.scale;
     case AnimProp::Rotation: return t.rotation;
     case AnimProp::Opacity: return t.opacity;
+    case AnimProp::LetterSpacing: return t.letterSpacing;
   }
   return 0;
 }
@@ -258,6 +262,7 @@ void setBaseProp(VideoClip& c, AnimProp p, double v) {
     case AnimProp::Scale: c.scale = v; break;
     case AnimProp::Rotation: c.rotation = v; break;
     case AnimProp::Opacity: c.opacity = v; break;
+    case AnimProp::LetterSpacing: break;  // 映像には字間が無い
   }
 }
 
@@ -269,6 +274,7 @@ void setBaseProp(TextItem& t, AnimProp p, double v) {
     case AnimProp::Scale: t.scale = v; break;
     case AnimProp::Rotation: t.rotation = v; break;
     case AnimProp::Opacity: t.opacity = v; break;
+    case AnimProp::LetterSpacing: t.letterSpacing = v; break;
   }
 }
 
@@ -288,7 +294,9 @@ LayerState layerStateAt(const VideoClip& c, double local) {
 }
 
 LayerState layerStateAt(const TextItem& t, double local) {
-  return layerStateOf(t, local);
+  LayerState s = layerStateOf(t, local);
+  s.letterSpacing = clampProp(AnimProp::LetterSpacing, animValueAt(t.anim.keys(AnimProp::LetterSpacing), t.letterSpacing, local));
+  return s;
 }
 
 bool layerIsPlain(const VideoClip& c) {

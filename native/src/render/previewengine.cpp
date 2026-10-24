@@ -59,6 +59,23 @@ void PreviewEngine::setCanvasSize(QSize size) {
   dirty_ = true;
 }
 
+void PreviewEngine::setTextOverride(const QString& id, const QString& text) {
+  if (textOverrideId_ == id && textOverride_ == text) return;
+  textOverrideId_ = id;
+  textOverride_ = id.isEmpty() ? QString() : text;
+  dirty_ = true;
+}
+
+void PreviewEngine::refreshNow() {
+  Editor& ed = editor();
+  if (ed.playing()) {
+    dirty_ = true;
+    return;
+  }
+  dirty_ = false;
+  compose(ed.currentTime(), false);
+}
+
 void PreviewEngine::updateAudioSnapshot() {
   const Editor& ed = editor();
   auto snap = std::make_shared<MixSnapshot>();
@@ -210,12 +227,17 @@ void PreviewEngine::compose(double t, bool playing) {
   QPainter p(&canvas);
   std::set<QString> live;
   for (const auto& item : ed.project().texts) {
-    if (!isTextVisible(item, t) || item.text.isEmpty()) continue;
+    // 編集中の文字は、確定前の内容（変換中の文字を含む）で描く
+    const QString& shownText = item.id == textOverrideId_ ? textOverride_ : item.text;
+    if (!isTextVisible(item, t) || shownText.isEmpty()) continue;
     live.insert(item.id);
     // 動かしていない文字は、位置まで描いた画像をそのまま重ねる。動かす文字は、画面の中央に置いた画像を
     // 位置・拡大率・回転・不透明度で動かす（動かしても描き直さない）
     const bool plain = layerIsPlain(item);
+    const LayerState ls = layerStateAt(item, t - item.start);
     TextItem drawItem = item;
+    drawItem.text = shownText;
+    drawItem.letterSpacing = ls.letterSpacing;  // 字間のキーフレームも含めた、この時間の字間で描く
     if (!plain) {
       drawItem.x = 0.5;
       drawItem.y = 0.5;
@@ -233,7 +255,6 @@ void PreviewEngine::compose(double t, bool playing) {
       p.drawImage(it->second.pos + QPointF(0, st.offsetY * canvas_.height()), it->second.image);
       continue;
     }
-    const LayerState ls = layerStateAt(item, t - item.start);
     if (st.alpha * ls.opacity <= 0.001) continue;
     p.save();
     p.setOpacity(st.alpha * ls.opacity);

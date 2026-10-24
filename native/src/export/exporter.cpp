@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -68,6 +69,42 @@ static QString summarizeError(const QString& stderrText) {
   }
   const QStringList& pick = important.isEmpty() ? lines : important;
   return pick.mid(std::max<qsizetype>(0, pick.size() - 4)).join(QLatin1Char('\n'));
+}
+
+/**
+ * 字間が時間で変わる文字の、1 フレームごとの画像（連番）を書く。pattern は text-N-%05d.png の形で、0 番から並べる。
+ * 各フレームの字間は、プレビューと同じ layerStateAt() で求め、同じ描き方（textrender）で描く。
+ * 字間が前のフレームと同じなら、描き直さずに前の画像を写す。書けたら true
+ */
+static bool writeSpacingSequence(const ExportRequest& req, const TextItem& t, TextItem centered, QSize design, QSize out, const QString& pattern) {
+  const double duration = std::min(t.duration, req.duration - t.start);
+  const int frames = exportTextFrames(req, t.start, duration);
+  if (frames <= 0) return false;
+  const int fps = exportFps(req);
+  QString prevFile;
+  long long prevKey = 0;
+  QElapsedTimer pump;
+  pump.start();
+  for (int f = 0; f < frames; ++f) {
+    const double spacing = layerStateAt(t, double(f) / fps).letterSpacing;
+    const long long key = std::llround(spacing * 1000);
+    QString file = pattern;
+    file.replace(QStringLiteral("%05d"), QStringLiteral("%1").arg(f, 5, 10, QLatin1Char('0')));
+    if (f > 0 && key == prevKey) {
+      if (!QFile::copy(prevFile, file)) return false;
+    } else {
+      centered.letterSpacing = spacing;
+      if (!renderTextFrame(centered, design, out).save(file, "PNG", 90)) return false;
+    }
+    prevFile = file;
+    prevKey = key;
+    // 枚数が多いと時間がかかるので、ときどき画面を描き直して、固まっているように見せない（操作は受け付けない）
+    if (pump.elapsed() > 100) {
+      QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+      pump.restart();
+    }
+  }
+  return true;
 }
 
 Exporter::Exporter(QObject* parent) : QObject(parent) {}
@@ -172,7 +209,16 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
       TextItem centered = t;
       centered.x = 0.5;
       centered.y = 0.5;
-      if (!renderTextFrame(centered, design, out).save(png, "PNG")) continue;
+      if (!t.anim.keys(AnimProp::LetterSpacing).empty()) {
+        // 字間が時間で変わる文字: 字間は文字の形そのものを変えるので、ffmpeg の式では表せない。
+        // プレビューと同じ描き方（textrender）で、1 フレームごとの画像（連番）を作る
+        const QString pattern = work_->filePath(QStringLiteral("text-%1-%2.png").arg(i - 1).arg(QStringLiteral("%05d")));
+        if (!writeSpacingSequence(req, t, centered, design, out, pattern)) continue;
+        pt.sequence = true;
+        pt.path = QDir::toNativeSeparators(pattern);
+      } else if (!renderTextFrame(centered, design, out).save(png, "PNG")) {
+        continue;
+      }
       pt.layer.transformed = true;
       pt.layer.x = t.x;
       pt.layer.y = t.y;
@@ -181,7 +227,7 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
       pt.layer.opacity = t.opacity;
       pt.layer.anim = t.anim;
     }
-    pt.path = QDir::toNativeSeparators(png);
+    if (!pt.sequence) pt.path = QDir::toNativeSeparators(png);
     pt.start = t.start;
     pt.duration = std::min(t.duration, layout.total - t.start);
     pt.animation = t.animation;

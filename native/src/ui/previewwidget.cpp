@@ -1,13 +1,26 @@
 #include "ui/previewwidget.h"
 
+#include <QClipboard>
+#include <QCloseEvent>
 #include <QDragEnterEvent>
+#include <QGuiApplication>
+#include <QInputMethod>
+#include <QFrame>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QScreen>
+#include <QSignalBlocker>
+#include <QSlider>
+#include <QTextBoundaryFinder>
+#include <QTextCharFormat>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include "core/editor.h"
 #include "core/timeline.h"
@@ -30,11 +43,44 @@ PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(par
   Editor& ed = editor();
   connect(&ed, &Editor::projectChanged, this, [this] {
     const bool isEmpty = editor().project().clips.empty() && editor().project().texts.empty();
-    empty_->setVisible(isEmpty);
+    empty_->setVisible(isEmpty && !fullScreen_);
     updateCanvasSize();
+    if (isEditingText() && !applying_) {
+      // 編集中の文字が、ほかの操作（元に戻す、設定欄での入力など）で変わった / 消えた
+      const TextItem* t = editor().text(editId_);
+      if (!t) {
+        endTextEdit(true);
+      } else {
+        caret_ = std::min(caret_, int(t->text.size()));
+        anchor_ = std::min(anchor_, int(t->text.size()));
+        syncEngine();
+        updateInputMethod();
+      }
+    }
     update();
   });
-  connect(&ed, &Editor::selectionChanged, this, qOverload<>(&QWidget::update));
+  connect(&ed, &Editor::selectionChanged, this, [this] {
+    // 別のものを選んだら、編集は確定する
+    const Selection& s = editor().selection();
+    if (isEditingText() && !(s.type == Selection::Text && s.id == editId_)) endTextEdit(true);
+    update();
+  });
+  // 再生を始めたとき・編集場所（タブ）を切り替えるとき・文字が今の再生位置から外れたときは、編集を確定して終える
+  connect(&ed, &Editor::playingChanged, this, [this] {
+    if (editor().playing()) endTextEdit(true);
+  });
+  connect(&ed, &Editor::workspaceAboutToChange, this, [this] { endTextEdit(true); });
+  connect(&ed, &Editor::timeChanged, this, [this] {
+    if (!isEditingText()) return;
+    const TextItem* t = editor().text(editId_);
+    if (!t || !isTextVisible(*t, editor().currentTime())) endTextEdit(true);
+  });
+  blink_ = new QTimer(this);
+  blink_->setInterval(530);
+  connect(blink_, &QTimer::timeout, this, [this] {
+    blinkOn_ = !blinkOn_;
+    update();
+  });
 
   // 何も無いときの案内
   empty_ = new QWidget(this);
@@ -52,9 +98,27 @@ PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(par
   empty_->setVisible(ed.project().clips.empty() && ed.project().texts.empty());
 }
 
+void PreviewStage::setFullScreenMode(bool on) {
+  if (fullScreen_ == on) return;
+  if (on) endTextEdit(true);  // 全画面では、編集用の表示も操作も出さない
+  fullScreen_ = on;
+  // 全画面では、編集用の操作（枠・ハンドル・ガイド・ドロップ・案内）はすべて止める。映像の描画は通常のままで、同じ処理を使う
+  grab_ = Grab::None;
+  guideV_ = guideH_ = false;
+  dropHover_ = false;
+  setAcceptDrops(!on);
+  unsetCursor();
+  const bool isEmpty = editor().project().clips.empty() && editor().project().texts.empty();
+  empty_->setVisible(isEmpty && !on);
+  updateCanvasSize();
+  update();
+}
+
 QRectF PreviewStage::stageRect() const {
   const double ratio = aspectValue(editor().project().settings.aspect);
-  const QRectF area = QRectF(rect()).adjusted(12, 12, -12, -12);
+  // 全画面では余白なし。映像は比率を保って画面に収め、余った所は黒
+  const double margin = fullScreen_ ? 0 : 12;
+  const QRectF area = QRectF(rect()).adjusted(margin, margin, -margin, -margin);
   double w = area.width();
   double h = w / ratio;
   if (h > area.height()) {
@@ -66,11 +130,11 @@ QRectF PreviewStage::stageRect() const {
 
 void PreviewStage::updateCanvasSize() {
   const QRectF r = stageRect();
-  // 高解像度の画面でも重くならないよう、長い辺は 1600px までにする
+  // 高解像度の画面でも重くならないよう、長い辺は 1600px までにする（全画面は、書き出しに近い見た目にするため 2560px まで）
   const qreal dpr = devicePixelRatioF();
   double w = r.width() * dpr;
   double h = r.height() * dpr;
-  const double k = std::min(1.0, 1600.0 / std::max({w, h, 1.0}));
+  const double k = std::min(1.0, (fullScreen_ ? 2560.0 : 1600.0) / std::max({w, h, 1.0}));
   engine_->setCanvasSize(QSize(std::max(16, int(w * k)), std::max(16, int(h * k))));
   empty_->setGeometry(r.toRect());
 }
@@ -81,7 +145,7 @@ void PreviewStage::resizeEvent(QResizeEvent*) {
 
 void PreviewStage::paintEvent(QPaintEvent*) {
   QPainter p(this);
-  p.fillRect(rect(), QColor(0x0d, 0x0d, 0x0d));
+  p.fillRect(rect(), fullScreen_ ? QColor(Qt::black) : QColor(0x0d, 0x0d, 0x0d));
   const QRectF r = stageRect();
   const QImage& frame = engine_->frame();
   if (!frame.isNull()) {
@@ -90,11 +154,15 @@ void PreviewStage::paintEvent(QPaintEvent*) {
   } else {
     p.fillRect(r, Qt::black);
   }
+  if (fullScreen_) return;  // 全画面では、選択枠・ハンドル・ガイド線などの編集用の表示は出さない
   const Editor& ed = editor();
   if (empty_->isVisible()) p.fillRect(r, QColor(0x16, 0x16, 0x16));
   // 選んでいる映像・テキストの操作用の枠（ドラッグで移動、四隅で拡大・縮小、上の丸で回転）
   QPolygonF quad;
-  if (!ed.playing() && selectedQuad(&quad)) {
+  if (isEditingText()) {
+    // 文字を直接編集している間は、移動・拡大・回転のハンドルは出さず、編集用の枠・選択範囲・入力位置を出す
+    paintTextEdit(p);
+  } else if (!ed.playing() && selectedQuad(&quad)) {
     QPolygonF w;
     for (const QPointF& q : quad) w << toWidget(q);
     p.setRenderHint(QPainter::Antialiasing);
@@ -147,11 +215,12 @@ QPointF PreviewStage::toDesign(QPointF widget) const {
 
 /** 文字の枠（基準解像度の座標）。pad は枠の余白（基準座標） */
 static QPolygonF textQuad(const TextItem& item, double t, QSize d, const QString& editingId, double pad) {
+  const LayerState ls = layerStateAt(item, t - item.start);
   TextItem centered = item;
   centered.x = 0.5;
   centered.y = 0.5;
+  centered.letterSpacing = ls.letterSpacing;  // 字間が変わると文字の幅も変わるので、枠も今の字間で求める
   const QRectF b = layoutText(centered, d.width(), d.height()).bounds.adjusted(-pad, -pad, pad, pad);
-  const LayerState ls = layerStateAt(item, t - item.start);
   const AnimState st = previewTextState(item, t, editingId);
   const QTransform m = layerMatrix(ls, d, QPointF(0, st.offsetY * d.height()));
   QPolygonF poly;
@@ -175,7 +244,7 @@ bool PreviewStage::selectedQuad(QPolygonF* quad) const {
   if (s.type == Selection::Text) {
     const TextItem* item = ed.text(s.id);
     if (!item || !isTextVisible(*item, t)) return false;
-    *quad = textQuad(*item, t, d, s.id, 4 / k);
+    *quad = textQuad(isEditingText() && s.id == editId_ ? editedItem() : *item, t, d, s.id, 4 / k);
     return true;
   }
   if (s.type == Selection::Clip) {
@@ -230,7 +299,23 @@ QString PreviewStage::hitText(QPointF pos) const {
 }
 
 void PreviewStage::mousePressEvent(QMouseEvent* e) {
+  if (fullScreen_) {
+    emit activity();  // 全画面では編集しない（選択も変えない）。マウスが動いたことだけ知らせる
+    return;
+  }
   if (e->button() != Qt::LeftButton) return;
+  if (isEditingText()) {
+    // 文字の編集中: 文字の上のクリック・ドラッグは入力位置と範囲選択（オブジェクトは動かさない）。外側のクリックは編集を確定する
+    if (insideEditedText(e->position())) {
+      commitPreedit();
+      bool up = false;
+      const int idx = editIndexAt(e->position(), &up);
+      moveCaret(idx, e->modifiers() & Qt::ShiftModifier, up);
+      grab_ = Grab::Select;
+      return;
+    }
+    endTextEdit(true);  // そのまま、ふつうのクリック（ほかのものを選ぶなど）として扱う
+  }
   Editor& ed = editor();
   grab_ = Grab::None;
   // 選んでいるものの枠を掴んだとき: 拡大・縮小 / 回転 / 移動
@@ -283,6 +368,20 @@ void PreviewStage::beginGrab(Grab g, QPointF pos) {
 }
 
 void PreviewStage::mouseMoveEvent(QMouseEvent* e) {
+  if (fullScreen_) {
+    emit activity();  // 再生コントロールを出す合図
+    return;
+  }
+  if (isEditingText()) {
+    if (grab_ == Grab::Select && (e->buttons() & Qt::LeftButton)) {
+      bool up = false;
+      const int idx = editIndexAt(e->position(), &up);
+      if (idx != caret_ || up != upstream_) moveCaret(idx, true, up);  // ドラッグで範囲を選ぶ
+      return;
+    }
+    setCursor(insideEditedText(e->position()) ? Qt::IBeamCursor : Qt::ArrowCursor);
+    return;
+  }
   Editor& ed = editor();
   if (grab_ == Grab::None) {
     // 枠の上では、できる操作に合わせたカーソルにする
@@ -330,6 +429,12 @@ void PreviewStage::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void PreviewStage::mouseReleaseEvent(QMouseEvent*) {
+  if (fullScreen_) return;
+  if (isEditingText()) {
+    // 文字の編集中は、変更の記録（元に戻す履歴のまとまり）を区切らない
+    if (grab_ == Grab::Select) grab_ = Grab::None;
+    return;
+  }
   grab_ = Grab::None;
   guideV_ = guideH_ = false;
   editor().endMerge();
@@ -337,7 +442,34 @@ void PreviewStage::mouseReleaseEvent(QMouseEvent*) {
 }
 
 void PreviewStage::mouseDoubleClickEvent(QMouseEvent* e) {
-  if (!hitText(e->position()).isEmpty()) emit requestTextFocus();
+  if (fullScreen_) {
+    emit fullScreenToggleRequested();  // 全画面のダブルクリックで、全画面を終える
+    return;
+  }
+  if (e->button() != Qt::LeftButton) return;
+  if (isEditingText()) {
+    // 編集中のダブルクリック: 文字の上なら単語を選ぶ。外側なら編集を確定する
+    if (insideEditedText(e->position())) {
+      commitPreedit();
+      bool up = false;
+      selectWordAt(editIndexAt(e->position(), &up));
+      grab_ = Grab::None;
+    } else {
+      endTextEdit(true);
+    }
+    return;
+  }
+  // 文字をダブルクリックしたら、その場で文字を編集する（押した位置に入力位置を置く）
+  const QString id = hitText(e->position());
+  if (id.isEmpty()) return;
+  Editor& ed = editor();
+  ed.pause();
+  if (!(ed.selection().type == Selection::Text && ed.selection().id == id)) ed.select({Selection::Text, id});
+  beginTextEdit(id, 0);
+  if (!isEditingText()) return;
+  bool up = false;
+  const int idx = editIndexAt(e->position(), &up);
+  moveCaret(idx, false, up);
 }
 
 void PreviewStage::dragEnterEvent(QDragEnterEvent* e) {
@@ -362,6 +494,598 @@ void PreviewStage::dropEvent(QDropEvent* e) {
   for (const auto& s : QString::fromUtf8(data).split(QLatin1Char('\n'), Qt::SkipEmptyParts)) ids.push_back(s);
   editor().addToTimeline(ids);
   e->acceptProposedAction();
+}
+
+// ---- 文字の直接編集 -----------------------------------------------------------------------------
+// 文字の内容は、1 文字入力するごとに編集データ（Editor）へ反映する。右の設定欄・タイムラインなどは、これまでどおり
+// 編集データを見て更新される（同じデータを使うので、どちらから編集しても同じ）。元に戻す履歴は、同じ merge の間は 1 回分。
+// 日本語入力の変換中の文字だけは、確定するまで編集データに入れず、プレビューの描画（PreviewEngine の上書き）にだけ出す。
+
+namespace {
+
+/** 入力・貼り付けの文字を整える。改行は \n にそろえ、改行以外の制御文字は捨てる */
+QString sanitizeInput(QString s) {
+  s.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+  s.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+  s.replace(QChar(0x2028), QLatin1Char('\n'));
+  s.replace(QChar(0x2029), QLatin1Char('\n'));
+  QString out;
+  out.reserve(s.size());
+  for (QChar c : s) {
+    if (c == QLatin1Char('\n') || (c.unicode() >= 0x20 && c.unicode() != 0x7f && !(c.unicode() >= 0x80 && c.unicode() < 0xa0))) out += c;
+  }
+  return out;
+}
+
+/** 文字の境目（1 文字 = 結合文字や絵文字を含むひとまとまり）、または単語の境目へ動く */
+int boundaryStep(const QString& s, int pos, bool forward, QTextBoundaryFinder::BoundaryType type) {
+  QTextBoundaryFinder f(type, s);
+  f.setPosition(std::clamp(pos, 0, int(s.size())));
+  const int r = forward ? f.toNextBoundary() : f.toPreviousBoundary();
+  return r < 0 ? (forward ? int(s.size()) : 0) : r;
+}
+
+/** 次 / 前の単語の端。空白だけのところは飛ばす */
+int wordStep(const QString& s, int pos, bool forward) {
+  int p = pos;
+  for (int i = 0; i < 64; ++i) {
+    const int n = boundaryStep(s, p, forward, QTextBoundaryFinder::Word);
+    const QString seg = forward ? s.mid(p, n - p) : s.mid(n, p - n);
+    p = n;
+    if (n <= 0 || n >= s.size() || !seg.trimmed().isEmpty()) break;
+  }
+  return p;
+}
+
+}  // namespace
+
+QString PreviewStage::committedText() const {
+  const TextItem* t = editor().text(editId_);
+  return t ? t->text : QString();
+}
+
+TextItem PreviewStage::editedItem() const {
+  const TextItem* t = editor().text(editId_);
+  if (!t) return {};
+  TextItem it = *t;
+  // 変換中の文字は、入力位置に差し込んだ形で見せる
+  if (!preedit_.isEmpty()) it.text = t->text.left(caret_) + preedit_ + t->text.mid(caret_);
+  return it;
+}
+
+bool PreviewStage::editGeometry(TextItem* item, TextLayout* layout, QTransform* toWidget) const {
+  if (!isEditingText()) return false;
+  const Editor& ed = editor();
+  const TextItem* base = ed.text(editId_);
+  const double t = ed.currentTime();
+  if (!base || !isTextVisible(*base, t)) return false;
+  const QSize d = designSize(ed.project().settings.aspect);
+  const TextItem shown = editedItem();
+  // 描画・枠と同じ配置: 画面の中央に置いたときの配置を、位置・拡大率・回転の変換で動かす
+  const LayerState ls = layerStateAt(shown, t - shown.start);
+  TextItem centered = shown;
+  centered.x = 0.5;
+  centered.y = 0.5;
+  centered.letterSpacing = ls.letterSpacing;
+  if (item) *item = centered;
+  if (layout) *layout = layoutText(centered, d.width(), d.height());
+  if (toWidget) {
+    const QRectF r = stageRect();
+    const double k = r.width() / d.width();
+    QTransform w;
+    w.translate(r.x(), r.y());
+    w.scale(k, k);
+    *toWidget = layerMatrix(ls, d) * w;
+  }
+  return true;
+}
+
+int PreviewStage::editIndexAt(QPointF pos, bool* upstream) const {
+  if (upstream) *upstream = false;
+  TextItem item;
+  TextLayout L;
+  QTransform T;
+  if (!editGeometry(&item, &L, &T)) return caret_;
+  bool ok = false;
+  const QTransform inv = T.inverted(&ok);
+  if (!ok) return caret_;
+  return textIndexAt(item, L, inv.map(pos), upstream);
+}
+
+bool PreviewStage::insideEditedText(QPointF pos) const {
+  TextItem item;
+  TextLayout L;
+  QTransform T;
+  if (!editGeometry(&item, &L, &T)) return false;
+  const QSize d = designSize(editor().project().settings.aspect);
+  const double k = stageRect().width() / d.width();
+  const QRectF b = L.bounds.adjusted(-8 / k, -8 / k, 8 / k, 8 / k);
+  QPolygonF poly;
+  poly << b.topLeft() << b.topRight() << b.bottomRight() << b.bottomLeft();
+  return T.map(poly).containsPoint(pos, Qt::WindingFill);
+}
+
+void PreviewStage::beginTextEdit(const QString& id, int caret) {
+  Editor& ed = editor();
+  const TextItem* t = ed.text(id);
+  if (!t || fullScreen_) return;
+  if (isEditingText()) endTextEdit(true);
+  ed.pause();
+  if (!(ed.selection().type == Selection::Text && ed.selection().id == id)) ed.select({Selection::Text, id});
+  ed.beginTextEdit();
+  editId_ = id;
+  editMerge_ = QStringLiteral("pvtext-") + id;
+  editOriginal_ = t->text;
+  caret_ = anchor_ = std::clamp(caret, 0, int(t->text.size()));
+  upstream_ = false;
+  wantX_ = -1;
+  preedit_.clear();
+  preeditAttrs_.clear();
+  preeditCursor_ = 0;
+  undo_.clear();
+  redo_.clear();
+  lastKind_ = EditKind::None;
+  grab_ = Grab::None;
+  guideV_ = guideH_ = false;
+  // 日本語入力（IME）を使えるようにして、キーボードの入力を受ける
+  setAttribute(Qt::WA_InputMethodEnabled, true);
+  setFocus(Qt::MouseFocusReason);
+  QGuiApplication::inputMethod()->update(Qt::ImEnabled | Qt::ImHints);
+  setCursor(Qt::IBeamCursor);
+  blinkReset();
+  syncEngine();
+  updateInputMethod();
+  update();
+}
+
+void PreviewStage::endTextEdit(bool commit) {
+  if (!isEditingText()) return;
+  Editor& ed = editor();
+  // 変換中の文字は、確定するときは文字として入れ、キャンセルのときは捨てる
+  if (commit) commitPreedit();
+  preedit_.clear();
+  preeditAttrs_.clear();
+  QGuiApplication::inputMethod()->reset();
+  const TextItem* t = ed.text(editId_);
+  const bool changed = t && t->text != editOriginal_;
+  editId_.clear();
+  blink_->stop();
+  grab_ = Grab::None;
+  undo_.clear();
+  redo_.clear();
+  setAttribute(Qt::WA_InputMethodEnabled, false);
+  QGuiApplication::inputMethod()->update(Qt::ImEnabled);
+  engine_->setTextOverride(QString(), QString());
+  if (!t) ed.endTextEdit();                         // 文字が無くなっていたら、戻すものは無い
+  else if (commit && changed) ed.endTextEdit();     // 確定: 始めてからの変更が、1 つの編集操作として残る
+  else ed.cancelTextEdit();                         // キャンセル（または、元の内容に戻っていた）: 履歴に残さない
+  unsetCursor();
+  engine_->refreshNow();
+  update();
+}
+
+void PreviewStage::blinkReset() {
+  blinkOn_ = true;
+  if (blink_ && isEditingText()) blink_->start();
+}
+
+void PreviewStage::syncEngine() {
+  if (!isEditingText()) return;
+  engine_->setTextOverride(editId_, editedItem().text);
+  engine_->refreshNow();
+}
+
+void PreviewStage::updateInputMethod() {
+  if (!isEditingText() || !hasFocus()) return;
+  QGuiApplication::inputMethod()->update(Qt::ImCursorRectangle | Qt::ImCursorPosition | Qt::ImAnchorPosition | Qt::ImSurroundingText |
+                                         Qt::ImCurrentSelection | Qt::ImTextBeforeCursor | Qt::ImTextAfterCursor | Qt::ImFont);
+}
+
+void PreviewStage::afterEdit() {
+  blinkReset();
+  syncEngine();
+  updateInputMethod();
+  update();
+}
+
+void PreviewStage::pushUndo(EditKind kind, bool hadSelection) {
+  const bool coalesce = kind == lastKind_ && (kind == EditKind::Type || kind == EditKind::Backspace || kind == EditKind::Delete) && !hadSelection && !undo_.empty();
+  if (!coalesce) {
+    undo_.push_back({committedText(), caret_, anchor_});
+    if (undo_.size() > 200) undo_.erase(undo_.begin());
+  }
+  redo_.clear();
+  lastKind_ = kind;
+}
+
+void PreviewStage::applyEdit(int from, int to, const QString& with, EditKind kind) {
+  if (!isEditingText()) return;
+  const QString cur = committedText();
+  from = std::clamp(from, 0, int(cur.size()));
+  to = std::clamp(to, from, int(cur.size()));
+  if (from == to && with.isEmpty()) return;
+  pushUndo(kind, from != to);
+  const QString next = cur.left(from) + with + cur.mid(to);
+  applying_ = true;
+  editor().updateText(editId_, [&](TextItem& t) { t.text = next; }, editMerge_);
+  applying_ = false;
+  caret_ = anchor_ = from + int(with.size());
+  upstream_ = false;
+  wantX_ = -1;
+  afterEdit();
+}
+
+void PreviewStage::restoreEdit(const EditState& s) {
+  applying_ = true;
+  editor().updateText(editId_, [&](TextItem& t) { t.text = s.text; }, editMerge_);
+  applying_ = false;
+  const int len = int(committedText().size());
+  caret_ = std::clamp(s.caret, 0, len);
+  anchor_ = std::clamp(s.anchor, 0, len);
+  upstream_ = false;
+  wantX_ = -1;
+  lastKind_ = EditKind::None;
+  afterEdit();
+}
+
+void PreviewStage::localUndo(bool redo) {
+  if (!preedit_.isEmpty()) return;
+  auto& from = redo ? redo_ : undo_;
+  auto& to = redo ? undo_ : redo_;
+  if (from.empty()) return;
+  to.push_back({committedText(), caret_, anchor_});
+  const EditState s = from.back();
+  from.pop_back();
+  restoreEdit(s);
+}
+
+void PreviewStage::moveCaret(int index, bool extend, bool upstream, bool keepWantX) {
+  caret_ = std::clamp(index, 0, int(committedText().size()));
+  if (!extend) anchor_ = caret_;
+  upstream_ = upstream;
+  if (!keepWantX) wantX_ = -1;
+  lastKind_ = EditKind::None;
+  blinkReset();
+  updateInputMethod();
+  update();
+}
+
+void PreviewStage::insertText(const QString& text, EditKind kind) {
+  const QString s = sanitizeInput(text);
+  if (s.isEmpty()) return;
+  if (hasSelection()) applyEdit(std::min(caret_, anchor_), std::max(caret_, anchor_), s, kind);
+  else applyEdit(caret_, caret_, s, kind);
+}
+
+void PreviewStage::commitPreedit() {
+  if (preedit_.isEmpty()) return;
+  const QString s = preedit_;
+  preedit_.clear();
+  preeditAttrs_.clear();
+  QGuiApplication::inputMethod()->reset();
+  insertText(s, EditKind::Type);
+}
+
+void PreviewStage::copySelection(bool cut) {
+  if (!hasSelection()) return;
+  const int a = std::min(caret_, anchor_), b = std::max(caret_, anchor_);
+  QGuiApplication::clipboard()->setText(committedText().mid(a, b - a));
+  if (cut) applyEdit(a, b, QString(), EditKind::Other);
+}
+
+void PreviewStage::pasteClipboard() {
+  const QString s = sanitizeInput(QGuiApplication::clipboard()->text());
+  if (!s.isEmpty()) insertText(s, EditKind::Other);
+}
+
+void PreviewStage::selectWordAt(int index) {
+  const QString s = committedText();
+  if (s.isEmpty()) return;
+  int i = std::clamp(index, 0, int(s.size()));
+  if (i >= s.size()) i = int(s.size()) - 1;
+  QTextBoundaryFinder f(QTextBoundaryFinder::Word, s);
+  f.setPosition(i);
+  const int start = f.isAtBoundary() ? i : f.toPreviousBoundary();
+  int end = f.toNextBoundary();
+  if (end < 0) end = int(s.size());
+  anchor_ = std::max(0, start);
+  caret_ = end;
+  upstream_ = false;
+  wantX_ = -1;
+  lastKind_ = EditKind::None;
+  blinkReset();
+  updateInputMethod();
+  update();
+}
+
+bool PreviewStage::editsKey(const QKeyEvent* e) const {
+  const Qt::KeyboardModifiers m = e->modifiers();
+  const bool ctrl = m & Qt::ControlModifier;
+  const bool alt = m & Qt::AltModifier;
+  switch (e->key()) {
+    case Qt::Key_Escape:
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+    case Qt::Key_Backspace:
+    case Qt::Key_Delete:
+    case Qt::Key_Left:
+    case Qt::Key_Right:
+    case Qt::Key_Up:
+    case Qt::Key_Down:
+    case Qt::Key_Home:
+    case Qt::Key_End:
+    case Qt::Key_Tab:
+    case Qt::Key_Backtab: return !alt || ctrl;
+    case Qt::Key_A:
+    case Qt::Key_C:
+    case Qt::Key_X:
+    case Qt::Key_V:
+    case Qt::Key_Z:
+    case Qt::Key_Y: return ctrl && !alt;
+    default: break;
+  }
+  // 文字キー（Alt だけを押しているときはメニューの操作なので、渡す）
+  const QString t = e->text();
+  return !t.isEmpty() && t.at(0).isPrint() && !(m & Qt::MetaModifier) && !(ctrl && !alt) && (!alt || ctrl);
+}
+
+bool PreviewStage::event(QEvent* e) {
+  // 編集中に使うキーは、メニューなどのショートカット（Ctrl+Z の「元に戻す」、Delete の「削除」など）より先に受け取る
+  if (isEditingText() && e->type() == QEvent::ShortcutOverride) {
+    if (editsKey(static_cast<QKeyEvent*>(e))) {
+      e->accept();
+      return true;
+    }
+  }
+  return QWidget::event(e);
+}
+
+bool PreviewStage::focusNextPrevChild(bool next) {
+  if (isEditingText()) return false;
+  return QWidget::focusNextPrevChild(next);
+}
+
+void PreviewStage::focusOutEvent(QFocusEvent* e) {
+  QWidget::focusOutEvent(e);
+  // ほかの部品を選んだら編集を確定する（ウィンドウの切り替えや日本語入力の候補の表示では、編集を続ける）
+  if (isEditingText() && e->reason() != Qt::ActiveWindowFocusReason && e->reason() != Qt::PopupFocusReason) endTextEdit(true);
+}
+
+void PreviewStage::keyPressEvent(QKeyEvent* e) {
+  if (!isEditingText()) {
+    QWidget::keyPressEvent(e);
+    return;
+  }
+  handleEditKey(e);
+}
+
+void PreviewStage::handleEditKey(QKeyEvent* e) {
+  const Qt::KeyboardModifiers m = e->modifiers();
+  const bool ctrl = m & Qt::ControlModifier;
+  const bool shift = m & Qt::ShiftModifier;
+  const bool alt = m & Qt::AltModifier;
+  const QString text = committedText();
+  const int len = int(text.size());
+  const int selFrom = std::min(caret_, anchor_), selTo = std::max(caret_, anchor_);
+  e->accept();
+  // 変換中の文字があるときのキーは、日本語入力（IME）が受け取るので、ここへは来ない。来た場合は先に確定する
+  switch (e->key()) {
+    case Qt::Key_Escape: endTextEdit(false); return;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+      if (ctrl) {
+        endTextEdit(true);  // Ctrl+Enter: 編集を確定する
+      } else {
+        commitPreedit();
+        insertText(QStringLiteral("\n"), EditKind::Other);  // Enter / Shift+Enter: 改行
+      }
+      return;
+    case Qt::Key_Backspace:
+      commitPreedit();
+      if (hasSelection()) applyEdit(selFrom, selTo, QString(), EditKind::Other);
+      else if (caret_ > 0) applyEdit(ctrl ? wordStep(text, caret_, false) : boundaryStep(text, caret_, false, QTextBoundaryFinder::Grapheme), caret_, QString(), ctrl ? EditKind::Other : EditKind::Backspace);
+      return;
+    case Qt::Key_Delete:
+      commitPreedit();
+      if (hasSelection()) applyEdit(selFrom, selTo, QString(), EditKind::Other);
+      else if (caret_ < len) applyEdit(caret_, ctrl ? wordStep(text, caret_, true) : boundaryStep(text, caret_, true, QTextBoundaryFinder::Grapheme), QString(), ctrl ? EditKind::Other : EditKind::Delete);
+      return;
+    case Qt::Key_Left:
+    case Qt::Key_Right: {
+      commitPreedit();
+      const bool fwd = e->key() == Qt::Key_Right;
+      if (hasSelection() && !shift) {
+        moveCaret(fwd ? selTo : selFrom, false);  // 選択をやめて、端に入力位置を置く
+      } else {
+        const int to = ctrl ? wordStep(text, caret_, fwd) : boundaryStep(text, caret_, fwd, QTextBoundaryFinder::Grapheme);
+        moveCaret(to, shift);
+      }
+      return;
+    }
+    case Qt::Key_Up:
+    case Qt::Key_Down: {
+      commitPreedit();
+      TextItem item;
+      TextLayout L;
+      if (!editGeometry(&item, &L, nullptr)) return;
+      if (wantX_ < 0) wantX_ = textCaretLine(item, L, caret_, upstream_).x1();
+      bool up = false;
+      const int to = textMoveVertical(item, L, caret_, upstream_, e->key() == Qt::Key_Up ? -1 : 1, wantX_, &up);
+      moveCaret(to, shift, up, true);
+      return;
+    }
+    case Qt::Key_Home:
+    case Qt::Key_End: {
+      commitPreedit();
+      const bool end = e->key() == Qt::Key_End;
+      if (ctrl) {
+        moveCaret(end ? len : 0, shift);
+        return;
+      }
+      TextItem item;
+      TextLayout L;
+      if (!editGeometry(&item, &L, nullptr)) return;
+      bool up = false;
+      moveCaret(textLineEdge(item, L, caret_, upstream_, end, &up), shift, up);
+      return;
+    }
+    case Qt::Key_Tab:
+    case Qt::Key_Backtab: return;
+    default: break;
+  }
+  if (ctrl && !alt) {
+    switch (e->key()) {
+      case Qt::Key_A:
+        commitPreedit();
+        anchor_ = 0;
+        moveCaret(int(committedText().size()), true);
+        return;
+      case Qt::Key_C: copySelection(false); return;
+      case Qt::Key_X: commitPreedit(); copySelection(true); return;
+      case Qt::Key_V: commitPreedit(); pasteClipboard(); return;
+      case Qt::Key_Z: localUndo(shift); return;
+      case Qt::Key_Y: localUndo(true); return;
+      default: return;
+    }
+  }
+  if ((m & Qt::MetaModifier) || (alt && !ctrl)) return;
+  const QString t = e->text();
+  if (!t.isEmpty() && t.at(0).isPrint()) {
+    commitPreedit();
+    insertText(t, EditKind::Type);
+  }
+}
+
+void PreviewStage::inputMethodEvent(QInputMethodEvent* e) {
+  if (!isEditingText()) {
+    e->ignore();
+    return;
+  }
+  e->accept();
+  const QString commit = sanitizeInput(e->commitString());
+  const int repStart = e->replacementStart();
+  const int repLen = e->replacementLength();
+  // この通知は、前の変換中の文字を置き換える
+  preedit_.clear();
+  preeditAttrs_.clear();
+  preeditCursor_ = 0;
+  if (!commit.isEmpty() || repLen > 0) {
+    if (repLen > 0) {
+      const int from = caret_ + repStart;
+      applyEdit(from, from + repLen, commit, EditKind::Type);
+    } else if (hasSelection()) {
+      applyEdit(std::min(caret_, anchor_), std::max(caret_, anchor_), commit, EditKind::Type);
+    } else {
+      applyEdit(caret_, caret_, commit, EditKind::Type);
+    }
+  }
+  const QString pre = sanitizeInput(e->preeditString());
+  if (!pre.isEmpty()) {
+    // 変換を始めるとき、選んでいた文字は置き換える
+    if (hasSelection()) applyEdit(std::min(caret_, anchor_), std::max(caret_, anchor_), QString(), EditKind::Other);
+    preedit_ = pre;
+    int cursor = int(pre.size());
+    for (const auto& a : e->attributes()) {
+      if (a.type == QInputMethodEvent::Cursor) cursor = a.start;
+      else if (a.type == QInputMethodEvent::TextFormat) preeditAttrs_.push_back(a);
+    }
+    preeditCursor_ = std::clamp(cursor, 0, int(pre.size()));
+    lastKind_ = EditKind::None;
+  }
+  afterEdit();
+}
+
+QVariant PreviewStage::inputMethodQuery(Qt::InputMethodQuery q) const {
+  if (!isEditingText()) return QWidget::inputMethodQuery(q);
+  const QString s = committedText();
+  const int a = std::min(caret_, anchor_), b = std::max(caret_, anchor_);
+  switch (q) {
+    case Qt::ImEnabled: return true;
+    case Qt::ImHints: return int(Qt::ImhMultiLine);
+    case Qt::ImCursorPosition: return caret_;
+    case Qt::ImAnchorPosition: return anchor_;
+    case Qt::ImSurroundingText: return s;
+    case Qt::ImCurrentSelection: return s.mid(a, b - a);
+    case Qt::ImTextBeforeCursor: return s.left(caret_);
+    case Qt::ImTextAfterCursor: return s.mid(caret_);
+    case Qt::ImInputItemClipRectangle: return rect();
+    case Qt::ImCursorRectangle:
+    case Qt::ImFont: {
+      TextItem item;
+      TextLayout L;
+      QTransform T;
+      if (!editGeometry(&item, &L, &T)) return q == Qt::ImFont ? QVariant(font()) : QVariant(QRect());
+      if (q == Qt::ImFont) return textFont(item, std::max(4, int(L.fontPx * std::hypot(T.m11(), T.m12()))));
+      // 変換の候補は、入力位置（変換中なら、変換中の文字の中の位置）のすぐ下に出る。回転・拡大した文字でも画面上の位置で渡す
+      const QLineF cl = textCaretLine(item, L, caret_ + (preedit_.isEmpty() ? 0 : preeditCursor_), preedit_.isEmpty() && upstream_);
+      const QRectF r = QRectF(T.map(cl.p1()), T.map(cl.p2())).normalized();
+      return QRectF(r.x(), r.y(), std::max(1.0, r.width()), std::max(1.0, r.height())).toAlignedRect();
+    }
+    default: return QWidget::inputMethodQuery(q);
+  }
+}
+
+void PreviewStage::paintTextEdit(QPainter& p) const {
+  TextItem item;
+  TextLayout L;
+  QTransform T;
+  if (!editGeometry(&item, &L, &T)) return;
+  const QSize d = designSize(editor().project().settings.aspect);
+  const double k = stageRect().width() / d.width();
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  // 選択範囲
+  if (hasSelection()) {
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(theme::accent.red(), theme::accent.green(), theme::accent.blue(), 120));
+    for (const QRectF& r : textRangeRects(item, L, caret_, anchor_)) {
+      QPolygonF poly;
+      poly << r.topLeft() << r.topRight() << r.bottomRight() << r.bottomLeft();
+      p.drawPolygon(T.map(poly));
+    }
+  }
+  // 変換中の文字: 下線（いま変換している文節は、色を付けて見分ける）
+  if (!preedit_.isEmpty()) {
+    for (const auto& a : preeditAttrs_) {
+      if (a.type != QInputMethodEvent::TextFormat || a.length <= 0 || !a.value.canConvert<QTextFormat>()) continue;
+      const QTextCharFormat f = qvariant_cast<QTextFormat>(a.value).toCharFormat();
+      if (f.background().style() == Qt::NoBrush) continue;
+      p.setPen(Qt::NoPen);
+      p.setBrush(QColor(theme::accent.red(), theme::accent.green(), theme::accent.blue(), 110));
+      for (const QRectF& r : textRangeRects(item, L, caret_ + a.start, caret_ + a.start + a.length)) {
+        QPolygonF poly;
+        poly << r.topLeft() << r.topRight() << r.bottomRight() << r.bottomLeft();
+        p.drawPolygon(T.map(poly));
+      }
+    }
+    p.setPen(QPen(QColor(255, 255, 255, 235), 2));
+    for (const QRectF& r : textRangeRects(item, L, caret_, caret_ + int(preedit_.size()))) {
+      p.drawLine(T.map(r.bottomLeft()), T.map(r.bottomRight()));
+    }
+  }
+  // 編集中の枠: ふつうの選択枠（白）とは違う、アクセントの色。ハンドルは出さない
+  {
+    const double pad = 4 / k;
+    const QRectF b = L.bounds.adjusted(-pad, -pad, pad, pad);
+    QPolygonF poly;
+    poly << b.topLeft() << b.topRight() << b.bottomRight() << b.bottomLeft();
+    const QPolygonF w = T.map(poly);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(QColor(0, 0, 0, 130), 3.5));
+    p.drawPolygon(w);
+    p.setPen(QPen(theme::accent, 2));
+    p.drawPolygon(w);
+  }
+  // 入力位置（背景に埋もれないよう、黒い縁取りをつけた白）
+  if (blinkOn_ && !hasSelection()) {
+    const QLineF cl = textCaretLine(item, L, caret_ + (preedit_.isEmpty() ? 0 : preeditCursor_), preedit_.isEmpty() && upstream_);
+    const QPointF a = T.map(cl.p1()), b = T.map(cl.p2());
+    p.setPen(QPen(QColor(0, 0, 0, 200), 4, Qt::SolidLine, Qt::FlatCap));
+    p.drawLine(a, b);
+    p.setPen(QPen(QColor(255, 255, 255), 2, Qt::SolidLine, Qt::FlatCap));
+    p.drawLine(a, b);
+  }
+  p.restore();
 }
 
 // ---- TransportBar -----------------------------------------------------------
@@ -404,7 +1128,14 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
   rh->setContentsMargins(0, 0, 0, 0);
   rh->addStretch(1);
   rh->addWidget(aspect_);
+  rh->addSpacing(8);
+  // 全画面ボタンは、比率の切り替えの右（プレビューの右下）に置く
+  auto* full = makeToolButton(QStringLiteral("maximize"), QStringLiteral("全画面表示"), this);
+  full->setObjectName(QStringLiteral("fullScreenButton"));
+  full->setAccessibleName(QStringLiteral("全画面表示"));
+  rh->addWidget(full);
   h->addWidget(right, 1);
+  connect(full, &QToolButton::clicked, this, &TransportBar::fullScreenRequested);
 
   Editor& ed = editor();
   connect(home, &QToolButton::clicked, this, [] { editor().seek(0); });
@@ -437,17 +1168,302 @@ void TransportBar::refresh() {
   aspect_->setValue(int(ed.project().settings.aspect));
 }
 
+// ---- 全画面表示 --------------------------------------------------------------
+
+namespace {
+
+/** シークバー。押した位置へそのまま移り、そのままドラッグできる */
+class SeekSlider : public QSlider {
+ public:
+  explicit SeekSlider(QWidget* parent) : QSlider(Qt::Horizontal, parent) {
+    setRange(0, 10000);
+    setFocusPolicy(Qt::NoFocus);
+    setFixedHeight(24);
+    setCursor(Qt::PointingHandCursor);
+    setAccessibleName(QStringLiteral("シークバー"));
+  }
+
+ protected:
+  void mousePressEvent(QMouseEvent* e) override {
+    if (e->button() != Qt::LeftButton) return;
+    setSliderDown(true);
+    moveTo(e->position().x());
+  }
+  void mouseMoveEvent(QMouseEvent* e) override {
+    if (isSliderDown()) moveTo(e->position().x());
+  }
+  void mouseReleaseEvent(QMouseEvent* e) override {
+    if (e->button() != Qt::LeftButton || !isSliderDown()) return;
+    moveTo(e->position().x());
+    setSliderDown(false);
+  }
+
+ private:
+  void moveTo(double x) {
+    const double half = 7;  // つまみの半分の幅
+    const double span = std::max(1.0, width() - half * 2);
+    setSliderPosition(int(std::lround(std::clamp((x - half) / span, 0.0, 1.0) * maximum())));
+  }
+};
+
+}  // namespace
+
+/**
+ * 全画面表示用のウィンドウ（黒背景）。プレビューを付け替えて、画面いっぱいに映像だけを出す。
+ * マウスを動かしたときだけ、下に再生コントロールを出す。このウィンドウではメインウィンドウのショートカットが効かないので、
+ * Space（再生・一時停止）と Esc / F / F11（終了）はここで受ける
+ */
+class FullScreenWindow : public QWidget {
+ public:
+  std::function<void()> onExit;
+
+  FullScreenWindow() : QWidget(nullptr, Qt::Window) {
+    setObjectName(QStringLiteral("fullScreenWindow"));
+    setWindowTitle(QStringLiteral("プレビュー（全画面）"));
+    setAutoFillBackground(true);
+    QPalette pal = palette();
+    pal.setColor(QPalette::Window, Qt::black);
+    setPalette(pal);
+    setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+
+    bar_ = new QFrame(this);
+    bar_->setObjectName(QStringLiteral("fsBar"));
+    bar_->setStyleSheet(QStringLiteral("#fsBar{background:rgba(20,20,20,225);border:1px solid #333333;border-radius:10px}"));
+    bar_->setCursor(Qt::ArrowCursor);
+    auto* h = new QHBoxLayout(bar_);
+    h->setContentsMargins(14, 0, 14, 0);
+    h->setSpacing(12);
+
+    play_ = new QToolButton(bar_);
+    play_->setObjectName(QStringLiteral("playButton"));
+    play_->setFixedSize(38, 38);
+    play_->setIconSize(QSize(18, 18));
+    play_->setFocusPolicy(Qt::NoFocus);
+    QFont mono = font();
+    mono.setStyleHint(QFont::Monospace);
+    mono.setFeature("tnum", 1);
+    cur_ = new QLabel(bar_);
+    len_ = new QLabel(bar_);
+    for (auto* l : {cur_, len_}) {
+      l->setFont(mono);
+      l->setMinimumWidth(l->fontMetrics().horizontalAdvance(QStringLiteral("00:00.0")) + 4);
+    }
+    cur_->setStyleSheet(QStringLiteral("color:#e6e6e6"));
+    len_->setStyleSheet(QStringLiteral("color:#9b9b9b"));
+    cur_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    cur_->setAccessibleName(QStringLiteral("再生位置"));
+    len_->setAccessibleName(QStringLiteral("動画の長さ"));
+    seek_ = new SeekSlider(bar_);
+    auto* exit = makeToolButton(QStringLiteral("minimize"), QStringLiteral("全画面表示を終了 (Esc)"), bar_);
+    exit->setObjectName(QStringLiteral("fullScreenExitButton"));
+    exit->setAccessibleName(QStringLiteral("全画面表示を終了"));
+    exit->setFocusPolicy(Qt::NoFocus);
+    h->addWidget(play_);
+    h->addWidget(cur_);
+    h->addWidget(seek_, 1);
+    h->addWidget(len_);
+    h->addWidget(exit);
+    bar_->hide();
+
+    hideTimer_.setSingleShot(true);
+    hideTimer_.setInterval(2500);
+    connect(&hideTimer_, &QTimer::timeout, this, [this] { hideControls(); });
+    connect(play_, &QToolButton::clicked, this, [this] {
+      editor().togglePlay();
+      showControls();
+    });
+    connect(exit, &QToolButton::clicked, this, [this] { requestExit(); });
+    connect(seek_, &QSlider::sliderMoved, this, [this](int v) {
+      editor().seek(editor().layout().total * v / double(seek_->maximum()));
+      showControls();
+    });
+    Editor& ed = editor();
+    connect(&ed, &Editor::timeChanged, this, [this] { refresh(); });
+    connect(&ed, &Editor::playingChanged, this, [this] { refresh(); });
+    connect(&ed, &Editor::projectChanged, this, [this] { refresh(); });
+    refresh();
+  }
+
+  /** プレビューを受け取る */
+  void adopt(PreviewStage* stage) {
+    stage_ = stage;
+    stage->setParent(this);
+    stage->setGeometry(rect());
+    conns_ << connect(stage, &PreviewStage::activity, this, [this] { showControls(); });
+    conns_ << connect(stage, &PreviewStage::fullScreenToggleRequested, this, [this] { requestExit(); });
+    stage->lower();
+    bar_->raise();
+  }
+
+  /** プレビューを手放す（付け替えは呼び出し側が行う） */
+  void release() {
+    for (const auto& c : conns_) disconnect(c);
+    conns_.clear();
+    hideTimer_.stop();
+    stage_ = nullptr;
+  }
+
+  void showControls() {
+    unsetCursor();
+    layoutBar();
+    bar_->show();
+    bar_->raise();
+    hideTimer_.start();
+  }
+
+  void hideControls() {
+    // コントロールの上にマウスがあるとき・シークバーをドラッグしているときは隠さない
+    if (bar_->underMouse() || seek_->isSliderDown()) {
+      hideTimer_.start();
+      return;
+    }
+    bar_->hide();
+    setCursor(Qt::BlankCursor);
+  }
+
+  bool controlsVisible() const { return bar_->isVisible(); }
+
+ protected:
+  void resizeEvent(QResizeEvent*) override {
+    if (stage_) stage_->setGeometry(rect());
+    layoutBar();
+  }
+  void keyPressEvent(QKeyEvent* e) override {
+    if (e->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {
+      QWidget::keyPressEvent(e);
+      return;
+    }
+    switch (e->key()) {
+      case Qt::Key_Space:
+        if (!e->isAutoRepeat()) {
+          editor().togglePlay();
+          showControls();
+        }
+        break;
+      case Qt::Key_Escape:
+      case Qt::Key_F:
+      case Qt::Key_F11:
+        if (!e->isAutoRepeat()) requestExit();
+        break;
+      default: QWidget::keyPressEvent(e); return;
+    }
+    e->accept();
+  }
+  void mouseMoveEvent(QMouseEvent*) override { showControls(); }
+  void closeEvent(QCloseEvent* e) override {
+    e->ignore();  // 閉じるのではなく、全画面表示を終えて編集画面へ戻る
+    requestExit();
+  }
+
+ private:
+  void requestExit() {
+    if (onExit) onExit();
+  }
+  void layoutBar() {
+    const int w = std::max(200, std::min(960, width() - 48));
+    const int h = 64;
+    bar_->setGeometry((width() - w) / 2, std::max(0, height() - h - 36), w, h);
+  }
+  void refresh() {
+    const Editor& ed = editor();
+    const double total = ed.layout().total;
+    play_->setIcon(theme::icon(ed.playing() ? QStringLiteral("pause") : QStringLiteral("play"), QColor(0x11, 0x11, 0x11)));
+    play_->setToolTip(ed.playing() ? QStringLiteral("一時停止 (Space)") : QStringLiteral("再生 (Space)"));
+    play_->setAccessibleName(ed.playing() ? QStringLiteral("一時停止") : QStringLiteral("再生"));
+    play_->setEnabled(ed.playEnd() > 0);
+    cur_->setText(formatTime(ed.currentTime()));
+    len_->setText(formatTime(total));
+    if (!seek_->isSliderDown()) {
+      QSignalBlocker b(seek_);
+      seek_->setValue(total > 0 ? int(std::lround(std::clamp(ed.currentTime() / total, 0.0, 1.0) * seek_->maximum())) : 0);
+    }
+  }
+
+  PreviewStage* stage_ = nullptr;
+  QFrame* bar_;
+  QToolButton* play_;
+  QLabel* cur_;
+  QLabel* len_;
+  QSlider* seek_;
+  QTimer hideTimer_;
+  QList<QMetaObject::Connection> conns_;
+};
+
 PreviewPanel::PreviewPanel(PreviewEngine* engine, QWidget* parent) : QWidget(parent) {
   setAutoFillBackground(true);
   QPalette pal = palette();
   pal.setColor(QPalette::Window, QColor(0x0d, 0x0d, 0x0d));
   setPalette(pal);
-  auto* v = new QVBoxLayout(this);
-  v->setContentsMargins(0, 0, 0, 0);
-  v->setSpacing(0);
+  layout_ = new QVBoxLayout(this);
+  layout_->setContentsMargins(0, 0, 0, 0);
+  layout_->setSpacing(0);
   stage_ = new PreviewStage(engine, this);
-  v->addWidget(stage_, 1);
-  v->addWidget(new TransportBar(this));
+  layout_->addWidget(stage_, 1);
+  auto* bar = new TransportBar(this);
+  layout_->addWidget(bar);
+  connect(bar, &TransportBar::fullScreenRequested, this, &PreviewPanel::toggleFullScreen);
+}
+
+PreviewPanel::~PreviewPanel() {
+  endFullScreen(false);  // 終了処理のときは、プレビューを元に戻すだけ（ウィンドウは出さない）
+}
+
+void PreviewPanel::toggleFullScreen() {
+  if (fs_) exitFullScreen();
+  else enterFullScreen();
+}
+
+void PreviewPanel::enterFullScreen() {
+  if (fs_) return;
+  QWidget* main = window();
+  if (!main || main == this) return;
+  mainWin_ = main;
+  fs_ = new FullScreenWindow;
+  fs_->onExit = [this] { exitFullScreen(); };
+  // 編集画面と同じ画面で、全画面にする
+  if (QScreen* sc = main->screen()) {
+    fs_->setScreen(sc);
+    fs_->setGeometry(sc->geometry());
+  }
+  // 映像・音声を出すエンジンはそのまま。プレビューの表示だけを別ウィンドウへ移す
+  layout_->removeWidget(stage_);
+  fs_->adopt(stage_);
+  stage_->setFullScreenMode(true);
+  fs_->showFullScreen();
+  stage_->show();
+  fs_->showControls();
+  fs_->activateWindow();
+  fs_->setFocus();
+  // 新しいウィンドウを出してから編集画面を隠す（隠している間は描画されない。レイアウトや選択はそのまま）
+  main->hide();
+}
+
+void PreviewPanel::exitFullScreen() {
+  endFullScreen(true);
+}
+
+void PreviewPanel::endFullScreen(bool showMain) {
+  if (!fs_) return;
+  FullScreenWindow* fs = fs_;
+  fs_ = nullptr;
+  fs->release();
+  stage_->setParent(this);
+  if (!showMain) {
+    // 終了処理のとき: 親ごとプレビューも消えるので、全画面のウィンドウだけを片付ける（エンジンはもう無いかもしれない）
+    delete fs;
+    return;
+  }
+  layout_->insertWidget(0, stage_, 1);
+  stage_->setFullScreenMode(false);
+  stage_->show();
+  if (showMain && mainWin_) {
+    mainWin_->show();
+    mainWin_->raise();
+    mainWin_->activateWindow();
+  }
+  fs->hide();
+  fs->deleteLater();  // キー操作の処理の途中で呼ばれるため、すぐには消さない
 }
 
 }  // namespace kv

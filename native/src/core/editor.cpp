@@ -137,6 +137,7 @@ static void clampVolumes(ProjectData& p) {
     t.scale = clampProp(AnimProp::Scale, t.scale);
     t.rotation = clampProp(AnimProp::Rotation, t.rotation);
     t.opacity = clampProp(AnimProp::Opacity, t.opacity);
+    t.letterSpacing = clampProp(AnimProp::LetterSpacing, t.letterSpacing);
   }
   for (auto& a : p.audios) {
     a.volume = std::clamp(a.volume, 0.0, kMaxVolume);
@@ -181,6 +182,50 @@ ProjectData Editor::tryChanges(const std::function<void()>& fn) {
   seekToken_ = seekToken;
   playing_ = playing;
   return result;
+}
+
+void Editor::beginTextEdit() {
+  endMerge();  // これまでの変更とは別の操作にする
+  TextEditSession s;
+  s.active = true;
+  s.uid = ws().uid;
+  s.revision = ws().revision;
+  s.dirty = ws().dirty;
+  s.project = ws().project;
+  s.pastSize = ws().past.size();
+  if (ws().past.size() >= kHistoryLimit) s.droppedFront = ws().past.front();
+  s.future = ws().future;
+  textEdit_ = std::move(s);
+}
+
+void Editor::cancelTextEdit() {
+  if (!textEdit_.active) return;
+  TextEditSession s = std::move(textEdit_);
+  textEdit_ = TextEditSession();
+  if (ws().uid != s.uid || ws().revision == s.revision) return;  // 別の編集場所になった / 何も変えていない
+  ws().project = s.project;
+  // 始めたあとに足された履歴を取り除く（いっぱいで押し出された先頭は戻す）
+  if (s.droppedFront) {
+    if (!ws().past.empty()) ws().past.pop_back();
+    ws().past.insert(ws().past.begin(), *s.droppedFront);
+  }
+  while (ws().past.size() > s.pastSize) ws().past.pop_back();
+  ws().future = std::move(s.future);
+  ws().lastMerge.clear();
+  afterProjectChange();
+  setDirty(s.dirty);
+}
+
+void Editor::endTextEdit() {
+  if (!textEdit_.active) return;
+  const TextEditSession s = std::move(textEdit_);
+  textEdit_ = TextEditSession();
+  // 何かの拍子に変更のまとまりが途切れて、履歴が 2 つ以上に分かれていたら、始めてからの変更を 1 つにまとめる
+  // （最初に足された履歴が、始める前の状態。履歴がいっぱいで押し出された場合は、位置がずれるので何もしない）
+  if (ws().uid == s.uid && !s.droppedFront && ws().past.size() > s.pastSize + 1) {
+    ws().past.erase(ws().past.begin() + std::ptrdiff_t(s.pastSize) + 1, ws().past.end());
+  }
+  endMerge();
 }
 
 void Editor::undo() {
@@ -811,8 +856,15 @@ struct AnimTarget {
   }
   /** 今の値（キーフレームがあれば、その補間した値） */
   double valueAt(AnimProp p, double local) const { return animValueAt(anim->keys(p), base(p), local); }
+  /** この項目をアニメーションできるか（字間は文字だけ） */
+  bool supports(AnimProp p) const { return p != AnimProp::LetterSpacing || text != nullptr; }
 };
 }  // namespace
+
+/** 選んでいるものに、その項目があるか（字間は文字だけ） */
+static bool propSupported(const Selection& sel, AnimProp p) {
+  return p != AnimProp::LetterSpacing || sel.type == Selection::Text;
+}
 
 static AnimTarget animTarget(ProjectData& p, const Selection& sel) {
   AnimTarget t;
@@ -897,7 +949,7 @@ void Editor::setAutoKey(bool on) {
 
 bool Editor::setPropValue(AnimProp prop, double value, const QString& merge) {
   const Selection sel = ws().selection;
-  if (!animatable()) return false;
+  if (!animatable() || !propSupported(sel, prop)) return false;
   const double now = ws().currentTime;
   const bool ak = autoKey_;
   bool accepted = false;
@@ -938,7 +990,7 @@ bool Editor::setPropValue(AnimProp prop, double value, const QString& merge) {
 
 bool Editor::toggleKey(AnimProp prop) {
   const Selection sel = ws().selection;
-  if (!animatable()) return false;
+  if (!animatable() || !propSupported(sel, prop)) return false;
   const double now = ws().currentTime;
   bool added = false;
   bool outside = false;
@@ -1065,7 +1117,7 @@ bool Editor::moveKeys(const std::vector<KeyMove>& moves, const QString& merge) {
 
 bool Editor::setKeyValue(AnimProp prop, int index, double value, const QString& merge) {
   const Selection sel = ws().selection;
-  if (!animatable()) return false;
+  if (!animatable() || !propSupported(sel, prop)) return false;
   bool changed = false;
   commit([&](ProjectData& p) {
     AnimTarget tg = animTarget(p, sel);
@@ -1127,7 +1179,7 @@ int Editor::pasteKeys(double local) {
     bool changed = false;
     for (const auto& ck : keyClip_) {
       const double t = local + ck.dt;
-      if (t > tg.duration + 1e-9) continue;
+      if (t > tg.duration + 1e-9 || !tg.supports(ck.prop)) continue;  // 字間のキーフレームは、映像には貼り付けない
       auto& keys = tg.anim->keys(ck.prop);
       const int near = findKey(keys, t, kMinKeyGap - 1e-9);
       if (near >= 0) {

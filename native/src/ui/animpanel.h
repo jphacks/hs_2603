@@ -42,6 +42,34 @@ class KeyButton : public QAbstractButton {
   bool hover_ = false;
 };
 
+/**
+ * 文字の「字間」の行: 見出し・スライダー・数値入力欄（px）・◀ ◆ ▶。
+ * 文字の設定（サイズなど）の近くに置く。キーフレームの時間・値・補間方式は、下のアニメーションの欄で編集する
+ */
+class LetterSpacingRow : public QWidget {
+  Q_OBJECT
+ public:
+  explicit LetterSpacingRow(QWidget* parent = nullptr);
+  /** 選んでいる文字の、今の再生位置での字間に合わせて表示を更新する */
+  void refresh();
+
+ signals:
+  /** 利用者がこの行を操作した（アニメーションの欄の入力欄が、この項目のキーフレームを編集するよう切り替える合図） */
+  void touched();
+
+ private:
+  /** 字間を変える。キーフレームのある項目で自動記録がオフのときは受け付けず、表示を元に戻す */
+  void apply(double v);
+  QLabel* label_;
+  SliderRow* slider_;
+  NumberSpin* spin_;
+  KeyButton* prev_;
+  KeyButton* diamond_;
+  KeyButton* next_;
+  /** 数値入力欄を操作している途中（入力中の表示を、更新で上書きしない） */
+  bool inEdit_ = false;
+};
+
 /** 音量キーフレームの ◀ ◆ ▶（映像の音声・オーディオ用）。ID でどちらかを探し、再生位置に追加・削除する */
 class VolumeKeyControls : public QWidget {
   Q_OBJECT
@@ -66,6 +94,8 @@ class AnimPanel : public QWidget {
   explicit AnimPanel(QWidget* parent = nullptr);
   /** 選んでいる映像・文字の今の値に合わせて表示を更新する */
   void refresh();
+  /** 時間・値・補間方式の入力欄が編集する項目を切り替える（ほかの場所の ◆ を押したときなど） */
+  void setActiveProp(AnimProp prop) { active_ = prop; }
 
  private:
   struct Row {

@@ -46,7 +46,13 @@ struct ExportClip {
 };
 
 struct PlannedText {
+  /** 画像のファイル。sequence のときは、連番のパターン（例 text-3-%05d.png。0 番から、文字を重ねるフレーム数だけ並ぶ） */
   QString path;
+  /**
+   * 1 フレームごとに違う画像（字間が時間で変わる文字）。false なら、1 枚の画像を重ねる時間だけ伸ばす。
+   * 連番の枚数は exportTextFrames() と同じにする
+   */
+  bool sequence = false;
   double start = 0;
   double duration = 0;
   TextAnimation animation = TextAnimation::None;
@@ -97,6 +103,15 @@ QString volumeExpression(const std::vector<VolumePoint>& points);
  * animValueAt() と同じ変わり方で、範囲は propLimits に収める
  */
 QString keyframeExpression(const std::vector<Keyframe>& keys, double base, const QString& T, AnimProp prop);
+/** 書き出す動画全体のフレーム数（buildExportPlan と同じ数え方） */
+long long exportTotalFrames(const ExportRequest& req);
+/** 書き出しのフレームレート（整数） */
+int exportFps(const ExportRequest& req);
+/**
+ * 文字を重ねるフレーム数（buildExportPlan と同じ数え方）。動画の終わりまでに収め、開始が動画の外なら 0。
+ * startFrame には、重ね始めるフレームを返す
+ */
+int exportTextFrames(const ExportRequest& req, double start, double duration, long long* startFrame = nullptr);
 ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedText>& texts);
 
 }  // namespace kv

@@ -45,9 +45,11 @@
 #include "ui/aipanel.h"
 #include "ui/exportdialog.h"
 #include "ui/inspector.h"
+#include "ui/keymap.h"
 #include "ui/librarypanel.h"
 #include "ui/previewwidget.h"
 #include "ui/serverstatus.h"
+#include "ui/shortcutsdialog.h"
 #include "ui/theme.h"
 #include "ui/timelinewidget.h"
 #include "ui/widgets.h"
@@ -171,30 +173,38 @@ MainWindow::~MainWindow() {
 
 void MainWindow::buildMenus() {
   Editor& ed = editor();
+  // ショートカットのキーは、最後に applyShortcuts() で keymap から付ける
   auto* file = menuBar()->addMenu(QStringLiteral("ファイル(&F)"));
-  file->addAction(QStringLiteral("新しい編集場所"), QKeySequence::New, this, &MainWindow::newProject);
-  file->addAction(QStringLiteral("開く... (新しいタブ)"), QKeySequence::Open, this, &MainWindow::openProject);
-  file->addAction(QStringLiteral("この編集場所を閉じる"), QKeySequence(QStringLiteral("Ctrl+W")), this,
-                  [this] { closeWorkspace(editor().workspaceIndex()); });
+  bindCommand(QStringLiteral("file.new"), file->addAction(QStringLiteral("新しい編集場所"), this, &MainWindow::newProject));
+  bindCommand(QStringLiteral("file.open"), file->addAction(QStringLiteral("開く... (新しいタブ)"), this, &MainWindow::openProject));
+  bindCommand(QStringLiteral("file.close"),
+              file->addAction(QStringLiteral("この編集場所を閉じる"), this, [this] { closeWorkspace(editor().workspaceIndex()); }));
   file->addSeparator();
-  file->addAction(QStringLiteral("保存"), QKeySequence::Save, this, [this] { saveProject(false); });
-  file->addAction(QStringLiteral("名前を付けて保存..."), QKeySequence(QStringLiteral("Ctrl+Shift+S")), this, [this] { saveProject(true); });
+  bindCommand(QStringLiteral("file.save"), file->addAction(QStringLiteral("保存"), this, [this] { saveProject(false); }));
+  bindCommand(QStringLiteral("file.saveAs"), file->addAction(QStringLiteral("名前を付けて保存..."), this, [this] { saveProject(true); }));
   file->addSeparator();
-  file->addAction(QStringLiteral("メディアを追加..."), QKeySequence(QStringLiteral("Ctrl+I")), this, [this] { LibraryPanel::pickAndImport(this); });
-  file->addAction(QStringLiteral("書き出し..."), QKeySequence(QStringLiteral("Ctrl+E")), this, &MainWindow::openExport);
+  bindCommand(QStringLiteral("file.import"), file->addAction(QStringLiteral("メディアを追加..."), this, [this] { LibraryPanel::pickAndImport(this); }));
+  bindCommand(QStringLiteral("file.export"), file->addAction(QStringLiteral("書き出し..."), this, &MainWindow::openExport));
   file->addSeparator();
-  file->addAction(QStringLiteral("終了"), QKeySequence(QStringLiteral("Alt+F4")), this, &QWidget::close);
+  bindCommand(QStringLiteral("file.quit"), file->addAction(QStringLiteral("終了"), this, &QWidget::close));
 
   auto* edit = menuBar()->addMenu(QStringLiteral("編集(&E)"));
-  QAction* undo = edit->addAction(QStringLiteral("元に戻す"), QKeySequence::Undo, this, [] { editor().undo(); });
-  QAction* redo = edit->addAction(QStringLiteral("やり直し"), QKeySequence(QStringLiteral("Ctrl+Y")), this, [] { editor().redo(); });
+  QAction* undo = edit->addAction(QStringLiteral("元に戻す"), this, [] { editor().undo(); });
+  QAction* redo = edit->addAction(QStringLiteral("やり直し"), this, [] { editor().redo(); });
+  bindCommand(QStringLiteral("edit.undo"), undo);
+  bindCommand(QStringLiteral("edit.redo"), redo);
   edit->addSeparator();
-  edit->addAction(QStringLiteral("分割"), this, [] { editor().splitAtPlayhead(); })->setShortcutVisibleInContextMenu(true);
-  QAction* dup = edit->addAction(QStringLiteral("複製"), QKeySequence(QStringLiteral("Ctrl+D")), this, [] { editor().duplicateSelection(); });
+  QAction* split = edit->addAction(QStringLiteral("分割"), this, [] { editor().splitAtPlayhead(); });
+  split->setShortcutVisibleInContextMenu(true);
+  bindCommand(QStringLiteral("edit.split"), split);
+  QAction* dup = edit->addAction(QStringLiteral("複製"), this, [] { editor().duplicateSelection(); });
+  bindCommand(QStringLiteral("edit.duplicate"), dup);
   QAction* del = edit->addAction(QStringLiteral("削除"), this, [] { editor().deleteSelection(); });
+  bindCommand(QStringLiteral("edit.delete"), del);
+  addHiddenCommand(QStringLiteral("edit.deselect"), [] { editor().select({}); }, [] { return bool(editor().selection()); });
   edit->addSeparator();
   // キーフレームのコピー・貼り付け（選んでいるキーフレームを、再生位置へ。値と補間方式は保たれる）
-  QAction* copyKeys = edit->addAction(QStringLiteral("キーフレームをコピー"), QKeySequence(QStringLiteral("Ctrl+Shift+C")), this, [] {
+  QAction* copyKeys = edit->addAction(QStringLiteral("キーフレームをコピー"), this, [] {
     Editor& e = editor();
     std::vector<Editor::KeyRef> keys;
     if (e.animation()) {
@@ -209,7 +219,7 @@ void MainWindow::buildMenus() {
     if (e.copyKeys(keys)) e.toast(QStringLiteral("キーフレームをコピーしました"));
     else e.toast(QStringLiteral("コピーするキーフレームを選んでください"));
   });
-  QAction* pasteKeys = edit->addAction(QStringLiteral("キーフレームを貼り付け"), QKeySequence(QStringLiteral("Ctrl+Shift+V")), this, [] {
+  QAction* pasteKeys = edit->addAction(QStringLiteral("キーフレームを貼り付け"), this, [] {
     Editor& e = editor();
     const int n = e.pasteKeys(std::clamp(e.currentTime() - e.objectStart(), 0.0, e.objectDuration()));
     e.toast(n > 0 ? QStringLiteral("キーフレームを%1個貼り付けました").arg(n) : QStringLiteral("貼り付けられるキーフレームがありません"));
@@ -220,19 +230,37 @@ void MainWindow::buildMenus() {
   });
   copyKeys->setEnabled(false);
   pasteKeys->setEnabled(false);
+  bindCommand(QStringLiteral("edit.copyKeys"), copyKeys);
+  bindCommand(QStringLiteral("edit.pasteKeys"), pasteKeys);
   edit->addSeparator();
   // テキストの段を変えるのは、移動や長さの変更とは別の、この明示的な操作だけ
   auto moveTextTrack = [](int delta) {
     const Selection s = editor().selection();
     if (s.type == Selection::Text) editor().moveTextTrack(s.id, delta);
   };
-  QAction* trackUp = edit->addAction(QStringLiteral("テキストを上の段へ"), QKeySequence(QStringLiteral("Alt+Up")), this, [moveTextTrack] { moveTextTrack(-1); });
-  QAction* trackDown = edit->addAction(QStringLiteral("テキストを下の段へ"), QKeySequence(QStringLiteral("Alt+Down")), this, [moveTextTrack] { moveTextTrack(1); });
+  QAction* trackUp = edit->addAction(QStringLiteral("テキストを上の段へ"), this, [moveTextTrack] { moveTextTrack(-1); });
+  QAction* trackDown = edit->addAction(QStringLiteral("テキストを下の段へ"), this, [moveTextTrack] { moveTextTrack(1); });
+  bindCommand(QStringLiteral("edit.textUp"), trackUp);
+  bindCommand(QStringLiteral("edit.textDown"), trackDown);
   edit->addSeparator();
-  edit->addAction(QStringLiteral("テキストを追加"), this, [this] {
+  bindCommand(QStringLiteral("edit.addText"), edit->addAction(QStringLiteral("テキストを追加"), this, [this] {
     editor().addText(QStringLiteral("basic"));
     inspector_->focusText();
-  });
+  }));
+
+  // 再生・コマ送り（メニューには出さない）
+  addHiddenCommand(QStringLiteral("play.toggle"), [] { editor().togglePlay(); });
+  auto seekBy = [](double sec, bool frames) {
+    Editor& e = editor();
+    e.pause();
+    e.seek(e.currentTime() + (frames ? sec / e.project().settings.fps : sec));
+  };
+  addHiddenCommand(QStringLiteral("play.prevFrame"), [seekBy] { seekBy(-1, true); });
+  addHiddenCommand(QStringLiteral("play.nextFrame"), [seekBy] { seekBy(1, true); });
+  addHiddenCommand(QStringLiteral("play.back1s"), [seekBy] { seekBy(-1, false); });
+  addHiddenCommand(QStringLiteral("play.forward1s"), [seekBy] { seekBy(1, false); });
+  addHiddenCommand(QStringLiteral("play.start"), [] { editor().seek(0); });
+  addHiddenCommand(QStringLiteral("play.end"), [] { editor().seek(editor().playEnd()); });
   auto refreshEdit = [undo, redo, dup, del, trackUp, trackDown] {
     undo->setEnabled(editor().canUndo());
     redo->setEnabled(editor().canRedo());
@@ -247,24 +275,30 @@ void MainWindow::buildMenus() {
   refreshEdit();
 
   auto* view = menuBar()->addMenu(QStringLiteral("表示(&V)"));
-  view->addAction(QStringLiteral("タイムラインを拡大"), QKeySequence(QStringLiteral("Ctrl+=")), this, [] { editor().setPxPerSec(editor().pxPerSec() * 1.4); });
-  view->addAction(QStringLiteral("タイムラインを縮小"), QKeySequence(QStringLiteral("Ctrl+-")), this, [] { editor().setPxPerSec(editor().pxPerSec() / 1.4); });
-  view->addAction(QStringLiteral("全体を表示"), QKeySequence(QStringLiteral("Ctrl+0")), this, [this] { timeline_->view()->fitAll(); });
+  bindCommand(QStringLiteral("view.zoomIn"),
+              view->addAction(QStringLiteral("タイムラインを拡大"), this, [] { editor().setPxPerSec(editor().pxPerSec() * 1.4); }));
+  bindCommand(QStringLiteral("view.zoomOut"),
+              view->addAction(QStringLiteral("タイムラインを縮小"), this, [] { editor().setPxPerSec(editor().pxPerSec() / 1.4); }));
+  bindCommand(QStringLiteral("view.fitAll"), view->addAction(QStringLiteral("全体を表示"), this, [this] { timeline_->view()->fitAll(); }));
   view->addSeparator();
-  aiAction_ = view->addAction(QStringLiteral("AI アシスタント"), QKeySequence(QStringLiteral("Ctrl+Shift+A")), this, [this] { setAiVisible(!aiPanel_->isVisible()); });
+  bindCommand(QStringLiteral("view.fullScreen"),
+              view->addAction(QStringLiteral("プレビューを全画面表示"), this, [this] { preview_->toggleFullScreen(); }));
+  view->addSeparator();
+  aiAction_ = view->addAction(QStringLiteral("AI アシスタント"), this, [this] { setAiVisible(!aiPanel_->isVisible()); });
   aiAction_->setCheckable(true);
+  bindCommand(QStringLiteral("view.ai"), aiAction_);
   view->addSeparator();
-  view->addAction(QStringLiteral("次のタブ"), QKeySequence(QStringLiteral("Ctrl+PgDown")), this, [] {
+  bindCommand(QStringLiteral("view.nextTab"), view->addAction(QStringLiteral("次のタブ"), this, [] {
     const int n = editor().workspaceCount();
     editor().switchWorkspace((editor().workspaceIndex() + 1) % n);
-  });
-  view->addAction(QStringLiteral("前のタブ"), QKeySequence(QStringLiteral("Ctrl+PgUp")), this, [] {
+  }));
+  bindCommand(QStringLiteral("view.prevTab"), view->addAction(QStringLiteral("前のタブ"), this, [] {
     const int n = editor().workspaceCount();
     editor().switchWorkspace((editor().workspaceIndex() + n - 1) % n);
-  });
+  }));
 
   auto* help = menuBar()->addMenu(QStringLiteral("ヘルプ(&H)"));
-  help->addAction(QStringLiteral("キーボードショートカット"), this, &MainWindow::showShortcuts);
+  bindCommand(QStringLiteral("help.shortcuts"), help->addAction(QStringLiteral("キーボードショートカット"), this, &MainWindow::showShortcuts));
   help->addAction(QStringLiteral("バージョン情報"), this, [this] {
     QMessageBox::about(this, QStringLiteral("バージョン情報"),
                        QStringLiteral("<b>かんたん動画エディタ</b><br>バージョン %1<br><br>Qt %2 / FFmpeg / miniaudio / Lucide")
@@ -278,6 +312,8 @@ void MainWindow::buildMenus() {
   ch->setSpacing(2);
   auto* undoBtn = makeToolButton(QStringLiteral("undo"), QStringLiteral("元に戻す (Ctrl+Z)"), corner);
   auto* redoBtn = makeToolButton(QStringLiteral("redo"), QStringLiteral("やり直し (Ctrl+Y)"), corner);
+  undoButton_ = undoBtn;
+  redoButton_ = redoBtn;
   exportButton_ = new QPushButton(theme::icon(QStringLiteral("download"), Qt::white), QStringLiteral("書き出し"), corner);
   exportButton_->setProperty("primary", true);
   exportButton_->setFocusPolicy(Qt::NoFocus);
@@ -300,6 +336,60 @@ void MainWindow::buildMenus() {
   };
   connect(&ed, &Editor::projectChanged, this, refreshCorner);
   refreshCorner();
+  applyShortcuts();
+}
+
+void MainWindow::bindCommand(const QString& id, QAction* action, std::function<bool()> ready) {
+  commands_.insert(id, {action, std::move(ready)});
+}
+
+void MainWindow::addHiddenCommand(const QString& id, std::function<void()> run, std::function<bool()> ready) {
+  auto* a = new QAction(this);
+  connect(a, &QAction::triggered, this, [run = std::move(run)] { run(); });
+  addAction(a);  // メニューに無くても、このウィンドウでショートカットが効くように
+  bindCommand(id, a, std::move(ready));
+}
+
+void MainWindow::applyShortcuts() {
+  plainKeys_.clear();
+  for (const keymap::Command& c : keymap::commands()) {
+    const auto it = commands_.constFind(c.id);
+    if (it == commands_.constEnd()) continue;
+    // Ctrl・Alt を使うキーは QAction のショートカットに（メニューにも出る）。
+    // 使わないキーは、文字の入力中には効かないように eventFilter で受け取る
+    QList<QKeySequence> actionKeys;
+    for (const QKeySequence& k : keymap::keys(c.id)) {
+      if (keymap::isPlain(k)) plainKeys_.insert(k[0].toCombined(), c.id);
+      else actionKeys << k;
+    }
+    it->action->setShortcuts(actionKeys);
+  }
+  auto tip = [](const QString& label, const QString& id) {
+    const QString k = keymap::text(keymap::keys(id));
+    return k.isEmpty() ? label : QStringLiteral("%1 (%2)").arg(label, k);
+  };
+  if (undoButton_) undoButton_->setToolTip(tip(QStringLiteral("元に戻す"), QStringLiteral("edit.undo")));
+  if (redoButton_) redoButton_->setToolTip(tip(QStringLiteral("やり直し"), QStringLiteral("edit.redo")));
+  if (aiButton_) aiButton_->setToolTip(tip(QStringLiteral("AI アシスタント"), QStringLiteral("view.ai")));
+}
+
+QString MainWindow::plainCommandFor(const QKeyEvent* e) const {
+  const Qt::KeyboardModifiers mods = e->modifiers() & ~Qt::KeypadModifier;
+  if (mods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) return {};
+  const Qt::Key key = Qt::Key(e->key());
+  QString id = plainKeys_.value(QKeyCombination(mods, key).toCombined());
+  // Shift 付きで割り当てが無ければ、Shift なしの割り当てを使う（Shift+S でも分割、"?" を Shift で打つキーボードなど）
+  if (id.isEmpty() && (mods & Qt::ShiftModifier)) id = plainKeys_.value(QKeyCombination(mods & ~Qt::ShiftModifier, key).toCombined());
+  return id;
+}
+
+bool MainWindow::runCommand(const QString& id) {
+  const auto it = commands_.constFind(id);
+  if (it == commands_.constEnd()) return false;
+  QAction* a = it->action;
+  if (!a->isEnabled() || !a->isVisible() || (it->ready && !it->ready())) return false;
+  a->trigger();
+  return true;
 }
 
 /** 開いているダイアログ（前回の続きを開くかの確認など）が閉じてから fn を行う */
@@ -501,63 +591,11 @@ void MainWindow::openExport() {
 }
 
 void MainWindow::showShortcuts() {
-  QDialog dlg(this);
-  dlg.setWindowTitle(QStringLiteral("キーボードショートカット"));
-  dlg.setMinimumWidth(420);
-  auto* v = new QVBoxLayout(&dlg);
-  auto* table = new QTableWidget(&dlg);
-  QList<QPair<QString, QString>> rows = {
-      {QStringLiteral("再生 / 一時停止"), QStringLiteral("Space")},
-      {QStringLiteral("分割"), QStringLiteral("S")},
-      {QStringLiteral("削除"), QStringLiteral("Delete")},
-      {QStringLiteral("複製"), QStringLiteral("Ctrl+D")},
-      {QStringLiteral("キーフレームをコピー / 貼り付け"), QStringLiteral("Ctrl+Shift+C / V")},
-      {QStringLiteral("数値欄の調整（選んでいるとき）"), QStringLiteral("↑ → 増 / ↓ ← 減")},
-      {QStringLiteral("数値欄の調整（カーソルを合わせて）"), QStringLiteral("ホイール")},
-      {QStringLiteral("数値の調整量を10倍 / 0.1倍"), QStringLiteral("Shift / Alt")},
-      {QStringLiteral("元に戻す"), QStringLiteral("Ctrl+Z")},
-      {QStringLiteral("やり直し"), QStringLiteral("Ctrl+Y")},
-      {QStringLiteral("テキストを追加"), QStringLiteral("T")},
-      {QStringLiteral("選んだテキストを上 / 下の段へ"), QStringLiteral("Alt+↑ / Alt+↓")},
-      {QStringLiteral("1フレーム移動"), QStringLiteral("← / →")},
-      {QStringLiteral("1秒移動"), QStringLiteral("Shift+← / →")},
-      {QStringLiteral("先頭 / 末尾へ移動"), QStringLiteral("Home / End")},
-      {QStringLiteral("タイムラインの拡大・縮小"), QStringLiteral("Ctrl+ホイール")},
-      {QStringLiteral("吸い付かせずに動かす"), QStringLiteral("Alt+ドラッグ")},
-      {QStringLiteral("新しい編集場所（タブ）を追加"), QStringLiteral("Ctrl+N")},
-      {QStringLiteral("編集場所（タブ）を閉じる"), QStringLiteral("Ctrl+W")},
-      {QStringLiteral("前 / 次のタブへ切り替え"), QStringLiteral("Ctrl+PgUp / PgDown")},
-      {QStringLiteral("メディアを追加"), QStringLiteral("Ctrl+I")},
-      {QStringLiteral("AI アシスタントを出す / しまう"), QStringLiteral("Ctrl+Shift+A")},
-      {QStringLiteral("書き出し"), QStringLiteral("Ctrl+E")},
-      {QStringLiteral("新規 / 開く / 保存"), QStringLiteral("Ctrl+N / Ctrl+O / Ctrl+S")},
-  };
   // AI アシスタントを使えないときは、その操作も載せない
-  if (!aiAvailable_) rows.removeIf([](const QPair<QString, QString>& r) { return r.first.startsWith(QStringLiteral("AI ")); });
-  table->setColumnCount(2);
-  table->setRowCount(int(rows.size()));
-  table->horizontalHeader()->hide();
-  table->verticalHeader()->hide();
-  table->setShowGrid(false);
-  table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  table->setSelectionMode(QAbstractItemView::NoSelection);
-  table->setFocusPolicy(Qt::NoFocus);
-  table->setStyleSheet(QStringLiteral("QTableWidget{background:transparent;border:none}QTableWidget::item{border-bottom:1px solid #2a2a2a;padding:4px}"));
-  for (int i = 0; i < rows.size(); ++i) {
-    table->setItem(i, 0, new QTableWidgetItem(rows[i].first));
-    auto* k = new QTableWidgetItem(rows[i].second);
-    k->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    k->setForeground(theme::muted);
-    table->setItem(i, 1, k);
-  }
-  table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-  table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-  table->setMinimumHeight(int(rows.size()) * 30 + 4);
-  v->addWidget(table);
-  auto* buttons = new QDialogButtonBox(&dlg);
-  buttons->addButton(QStringLiteral("閉じる"), QDialogButtonBox::AcceptRole);
-  connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-  v->addWidget(buttons);
+  QStringList hidden;
+  if (!aiAvailable_) hidden << QStringLiteral("view.ai");
+  ShortcutsDialog dlg(hidden, this);
+  connect(&dlg, &ShortcutsDialog::changed, this, &MainWindow::applyShortcuts);
   dlg.exec();
 }
 
@@ -623,6 +661,8 @@ void MainWindow::dropEvent(QDropEvent* e) {
 }
 
 static bool isTextInput(QObject* o) {
+  // プレビュー上で文字を直接編集している間も、文字の入力欄と同じ（Space・Delete・S・T などを、編集の操作に使わない）
+  if (auto* stage = qobject_cast<PreviewStage*>(o)) return stage->isEditingText();
   return qobject_cast<QLineEdit*>(o) || qobject_cast<QPlainTextEdit*>(o) || qobject_cast<QTextEdit*>(o) || qobject_cast<QAbstractSpinBox*>(o) ||
          (qobject_cast<QComboBox*>(o) && static_cast<QComboBox*>(o)->isEditable());
 }
@@ -636,39 +676,9 @@ static bool isNumericFocus(const QWidget* w) {
 }
 
 bool MainWindow::handleKey(QKeyEvent* e) {
-  Editor& ed = editor();
-  const int fps = ed.project().settings.fps;
-  const bool shift = e->modifiers() & Qt::ShiftModifier;
-  if (e->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) return false;
-  switch (e->key()) {
-    case Qt::Key_Space: ed.togglePlay(); return true;
-    case Qt::Key_S: ed.splitAtPlayhead(); return true;
-    case Qt::Key_Delete:
-    case Qt::Key_Backspace:
-      if (!ed.selection()) return false;
-      ed.deleteSelection();
-      return true;
-    case Qt::Key_Left:
-      ed.pause();
-      ed.seek(ed.currentTime() - (shift ? 1.0 : 1.0 / fps));
-      return true;
-    case Qt::Key_Right:
-      ed.pause();
-      ed.seek(ed.currentTime() + (shift ? 1.0 : 1.0 / fps));
-      return true;
-    case Qt::Key_Home: ed.seek(0); return true;
-    case Qt::Key_End: ed.seek(ed.playEnd()); return true;
-    case Qt::Key_T:
-      ed.addText(QStringLiteral("basic"));
-      inspector_->focusText();
-      return true;
-    case Qt::Key_Escape:
-      if (!ed.selection()) return false;
-      ed.select({});
-      return true;
-    case Qt::Key_Question: showShortcuts(); return true;
-    default: return false;
-  }
+  // Ctrl・Alt を使わないキー（既定は Space・S・T・←→・Home・End・Delete・Esc・? など）。割り当ては keymap で変えられる
+  const QString id = plainCommandFor(e);
+  return !id.isEmpty() && runCommand(id);
 }
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
@@ -689,11 +699,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
     if (isTextInput(QApplication::focusWidget())) return false;
     if (e->type() == QEvent::ShortcutOverride) {
       // 矢印キーなどをスライダーより先に受け取る
-      const int k = ke->key();
-      const bool mine = !(ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier)) &&
-                        (k == Qt::Key_Space || k == Qt::Key_S || k == Qt::Key_T || k == Qt::Key_Left || k == Qt::Key_Right ||
-                         k == Qt::Key_Home || k == Qt::Key_End || k == Qt::Key_Delete || k == Qt::Key_Question);
-      if (mine) e->accept();
+      if (!plainCommandFor(ke).isEmpty()) e->accept();
       return false;
     }
     if (obj != QApplication::focusWidget() && QApplication::focusWidget()) return false;

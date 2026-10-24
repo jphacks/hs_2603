@@ -77,10 +77,135 @@ void KeyButton::paintEvent(QPaintEvent*) {
   const double s = 4.5;
   const double dir = kind_ == Kind::Prev ? -1 : 1;
   QPolygonF tri;
-  tri << QPointF(c.x() + dir * s, c.y() - s) << QPointF(c.x() - dir * s, c.y()) << QPointF(c.x() + dir * s, c.y() + s);
+  // ◀（前へ）は頂点を左に、▶（次へ）は頂点を右に向ける
+  tri << QPointF(c.x() - dir * s, c.y() - s) << QPointF(c.x() + dir * s, c.y()) << QPointF(c.x() - dir * s, c.y() + s);
   p.setPen(Qt::NoPen);
   p.setBrush(isEnabled() ? (hover_ ? theme::text : theme::muted) : theme::dim);
   p.drawPolygon(tri);
+}
+
+// ---- LetterSpacingRow ------------------------------------------------------------
+
+LetterSpacingRow::LetterSpacingRow(QWidget* parent) : QWidget(parent) {
+  const AnimProp prop = AnimProp::LetterSpacing;
+  auto* h = new QHBoxLayout(this);
+  h->setContentsMargins(0, 0, 0, 0);
+  h->setSpacing(4);
+  label_ = makeLabel(propLabel(prop), nullptr, this);
+  label_->setFixedWidth(30);
+  // スライダー: -50〜100px を 1px ずつ。ホイール・矢印キーも同じ決め方（Shift で10、Alt で0.1）。数値は右の入力欄に出す
+  slider_ = new SliderRow(propLabel(prop), kMinLetterSpacing, kMaxLetterSpacing, 1, [](double x) { return QStringLiteral("%1 px").arg(x, 0, 'f', 1); }, this);
+  slider_->setLabelVisible(false);
+  slider_->setValueVisible(false);
+  slider_->setDefault(0);
+  slider_->setValueBubble(true);
+  slider_->setUnit(1, 0.1);
+  spin_ = new NumberSpin(this);
+  spin_->setDecimals(1);
+  spin_->setRange(kMinLetterSpacing, kMaxLetterSpacing);
+  spin_->setUnit(1, 0.1);
+  spin_->setSuffix(QStringLiteral(" px"));
+  spin_->setFixedWidth(78);
+  spin_->setAccessibleName(QStringLiteral("字間（px）"));
+  spin_->setToolTip(QStringLiteral("文字と文字の間隔（px）。プラスで広がり、マイナスで狭まります。0 でフォント本来の間隔です。\n直接入力 / ホイール / 矢印キーで調整（Shift で10ずつ、Alt で0.1ずつ）"));
+  slider_->setToolTip(QStringLiteral("文字と文字の間隔。ドラッグで調整（ダブルクリックで 0）"));
+  prev_ = new KeyButton(KeyButton::Kind::Prev, this);
+  diamond_ = new KeyButton(KeyButton::Kind::Diamond, this);
+  next_ = new KeyButton(KeyButton::Kind::Next, this);
+  prev_->setToolTip(QStringLiteral("前のキーフレームへ"));
+  next_->setToolTip(QStringLiteral("次のキーフレームへ"));
+  diamond_->setToolTip(QStringLiteral("再生位置に字間のキーフレームを追加 / 削除"));
+  prev_->setAccessibleName(propLabel(prop) + QStringLiteral(": 前のキーフレームへ"));
+  next_->setAccessibleName(propLabel(prop) + QStringLiteral(": 次のキーフレームへ"));
+  diamond_->setAccessibleName(propLabel(prop) + QStringLiteral(": キーフレームを追加または削除"));
+  h->addWidget(label_);
+  h->addWidget(slider_, 1);
+  h->addWidget(spin_);
+  h->addSpacing(2);
+  h->addWidget(prev_);
+  h->addWidget(diamond_);
+  h->addWidget(next_);
+
+  connect(slider_, &SliderRow::changed, this, [this](double x) {
+    emit touched();
+    apply(x);
+  });
+  connect(slider_, &SliderRow::released, this, [] { editor().endMerge(); });
+  connect(spin_, &QDoubleSpinBox::valueChanged, this, [this](double x) {
+    emit touched();
+    inEdit_ = true;
+    apply(x);
+    inEdit_ = false;
+  });
+  connect(spin_, &NumberSpin::stepFinished, this, [] { editor().endMerge(); });
+  connect(spin_, &QAbstractSpinBox::editingFinished, this, [] { editor().endMerge(); });
+  connect(diamond_, &QAbstractButton::clicked, this, [this, prop] {
+    emit touched();
+    editor().toggleKey(prop);
+  });
+  connect(prev_, &QAbstractButton::clicked, this, [this, prop] {
+    emit touched();
+    editor().seekToKey(prop, false);
+  });
+  connect(next_, &QAbstractButton::clicked, this, [this, prop] {
+    emit touched();
+    editor().seekToKey(prop, true);
+  });
+
+  Editor& ed = editor();
+  auto refreshIfVisible = [this] {
+    if (isVisible()) refresh();
+  };
+  connect(&ed, &Editor::timeChanged, this, refreshIfVisible);
+  connect(&ed, &Editor::projectChanged, this, refreshIfVisible);
+  connect(&ed, &Editor::autoKeyChanged, this, refreshIfVisible);
+}
+
+void LetterSpacingRow::apply(double v) {
+  const Editor& ed = editor();
+  // 数値の入力・スライダーのどちらから変えても、同じ操作として 1 回の元に戻す履歴にまとめる
+  const QString merge = QStringLiteral("anim-%1-%2").arg(int(AnimProp::LetterSpacing)).arg(ed.selection().id);
+  const bool inEdit = inEdit_;
+  // 受け付けなかったとき（キーフレームのある項目で、自動記録がオフ）は、表示を元の値に戻す
+  if (!editor().setPropValue(AnimProp::LetterSpacing, v, merge)) {
+    inEdit_ = false;
+    refresh();
+    inEdit_ = inEdit;
+    return;
+  }
+  // 反映した値を、もう一方の部品にも合わせる（入力中の数値欄は、入力を邪魔しないよう触らない）
+  if (!inEdit) {
+    const QSignalBlocker b(spin_);
+    spin_->setValue(clampProp(AnimProp::LetterSpacing, v));
+  }
+  const QSignalBlocker b(slider_);
+  slider_->setValue(clampProp(AnimProp::LetterSpacing, v));
+}
+
+void LetterSpacingRow::refresh() {
+  const Editor& ed = editor();
+  const Animation* a = ed.animation();
+  if (ed.selection().type != Selection::Text || !a) return;
+  const double value = ed.currentLayerState().letterSpacing;
+  slider_->setValue(value);
+  if (!inEdit_) {
+    const QSignalBlocker b(spin_);
+    // 入力中は、打っている途中の文字を消さないよう更新しない
+    if (!spin_->hasFocus() || std::abs(spin_->value() - value) > 0.05 || ed.playing()) spin_->setValue(value);
+  }
+  const auto& keys = a->keys(AnimProp::LetterSpacing);
+  const double local = ed.currentTime() - ed.objectStart();
+  // アニメーションを設定している項目は、名前を黄色にして見分けられるようにする
+  label_->setStyleSheet(keys.empty() ? QString() : QStringLiteral("color:#ffc83d;font-weight:bold"));
+  diamond_->setActive(findKey(keys, local) >= 0);
+  bool hasPrev = false;
+  bool hasNext = false;
+  for (const auto& k : keys) {
+    if (k.t < local - 1e-3) hasPrev = true;
+    if (k.t > local + 1e-3) hasNext = true;
+  }
+  prev_->setEnabled(hasPrev);
+  next_->setEnabled(hasNext);
 }
 
 // ---- VolumeKeyControls -----------------------------------------------------------
@@ -257,6 +382,7 @@ AnimPanel::AnimPanel(QWidget* parent) : QWidget(parent) {
       case AnimProp::Scale: fmt = [](double x) { return formatPercent(x); }; break;
       case AnimProp::Rotation: fmt = [](double x) { return formatDegrees(x); }; break;
       case AnimProp::Opacity: fmt = [](double x) { return formatPercent(x); }; break;
+      case AnimProp::LetterSpacing: break;  // 字間は文字の設定欄に行がある（LetterSpacingRow）
     }
     r.slider = new SliderRow(propLabel(prop), d.min, d.max, d.step, fmt, body_);
     r.slider->setLabelVisible(false);
@@ -356,7 +482,8 @@ AnimPanel::AnimPanel(QWidget* parent) : QWidget(parent) {
       case AnimProp::Y: v = shown / d.height(); break;
       case AnimProp::Scale:
       case AnimProp::Opacity: v = shown / 100; break;
-      case AnimProp::Rotation: break;
+      case AnimProp::Rotation:
+      case AnimProp::LetterSpacing: break;
     }
     editor().setKeyValue(key->prop, key->index, v, QStringLiteral("keyval-%1").arg(editor().selection().id));
   });
@@ -497,7 +624,7 @@ void AnimPanel::refresh() {
   const Animation* a = ed.animation();
   if (!a) return;
   const LayerState st = ed.currentLayerState();
-  const double vals[kAnimPropCount] = {st.x, st.y, st.scale, st.rotation, st.opacity};
+  const double vals[kAnimPropCount] = {st.x, st.y, st.scale, st.rotation, st.opacity, st.letterSpacing};
   const double local = ed.currentTime() - ed.objectStart();
   const QSize design = designSize(ed.project().settings.aspect);
   bool anyKeys = false;
@@ -521,6 +648,8 @@ void AnimPanel::refresh() {
     r.prev->setEnabled(hasPrev);
     r.next->setEnabled(hasNext);
   }
+  // この欄に行が無い項目（文字の字間）のキーフレームも数える
+  for (int pi = 0; pi < kAnimPropCount; ++pi) anyKeys = anyKeys || !a->keys(static_cast<AnimProp>(pi)).empty();
   {
     const QSignalBlocker blocker(autoKey_);
     autoKey_->setChecked(ed.autoKey());
@@ -579,6 +708,13 @@ void AnimPanel::refresh() {
         keyValue_->setRange(lim.min, lim.max);
         keyValue_->setUnit(1, 0.1);
         keyValue_->setSuffix(QStringLiteral(" °"));
+        if (!keyValue_->hasFocus()) keyValue_->setValue(k.value);
+        break;
+      case AnimProp::LetterSpacing:
+        keyValue_->setDecimals(1);
+        keyValue_->setRange(lim.min, lim.max);
+        keyValue_->setUnit(1, 0.1);
+        keyValue_->setSuffix(QStringLiteral(" px"));
         if (!keyValue_->hasFocus()) keyValue_->setValue(k.value);
         break;
     }

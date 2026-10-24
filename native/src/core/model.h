@@ -58,9 +58,16 @@ struct VolumePoint {
 /** キーフレームから次のキーフレームまでの変わり方 */
 enum class Easing { Linear, EaseIn, EaseOut, EaseInOut, Hold };
 
-/** アニメーションできる項目。X, Y は画面に対する割合（中心の位置。0.5 が画面の中央） */
-enum class AnimProp { X, Y, Scale, Rotation, Opacity };
-constexpr int kAnimPropCount = 5;
+/**
+ * アニメーションできる項目。X, Y は画面に対する割合（中心の位置。0.5 が画面の中央）。
+ * LetterSpacing（字間）は文字だけの項目で、基準解像度の px（映像のアニメーションには使わない）
+ */
+enum class AnimProp { X, Y, Scale, Rotation, Opacity, LetterSpacing };
+constexpr int kAnimPropCount = 6;
+
+/** 字間の範囲（基準解像度の px）。0 はフォント本来の文字間隔 */
+constexpr double kMinLetterSpacing = -50;
+constexpr double kMaxLetterSpacing = 100;
 
 struct Keyframe {
   double t = 0;
@@ -132,6 +139,8 @@ struct TextItem {
   double boxOpacity = 0;
   bool shadow = true;
   TextAlign align = TextAlign::Center;
+  /** 字間（基準解像度の px。プラスで広がり、マイナスで狭まる。0 はフォント本来の間隔）。キーフレームでアニメーションできる */
+  double letterSpacing = 0;
   TextAnimation animation = TextAnimation::Fade;
   /**
    * タイムラインの段（0 が一番上）。追加するときに一度だけ決め、開始時間や長さを変えても、

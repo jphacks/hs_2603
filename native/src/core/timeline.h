@@ -110,6 +110,8 @@ struct LayerState {
   double scale = 1;
   double rotation = 0;
   double opacity = 1;
+  /** 字間（文字だけ。基準解像度の px） */
+  double letterSpacing = 0;
 };
 LayerState layerStateAt(const VideoClip& c, double local);
 LayerState layerStateAt(const TextItem& t, double local);

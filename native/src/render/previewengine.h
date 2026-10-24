@@ -31,6 +31,14 @@ class PreviewEngine : public QObject {
   /** 今のフレームが目的の時刻のものか（読み込み待ちでないか） */
   bool frameExact() const { return exact_; }
 
+  /**
+   * プレビュー上で文字を直接編集している間、その文字を text の内容で描く（確定前の、変換中の文字を含む）。
+   * 編集データは変えない。id が空なら元に戻す
+   */
+  void setTextOverride(const QString& id, const QString& text);
+  /** 停止中なら、今の再生位置の画面をすぐ作り直す（編集中の文字と、その上に重ねる入力位置の表示がずれないように） */
+  void refreshNow();
+
  signals:
   void frameReady();
 
@@ -48,6 +56,8 @@ class PreviewEngine : public QObject {
   std::map<QString, std::unique_ptr<VideoSource>> sources_;
   std::deque<QString> idle_;  // 今は使っていないデコーダー（新しい順）
   std::map<QString, TextSprite> sprites_;
+  QString textOverrideId_;
+  QString textOverride_;
   std::atomic<bool> dirty_{true};
   bool wasPlaying_ = false;
   int seenSeek_ = -1;

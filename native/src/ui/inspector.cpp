@@ -475,8 +475,11 @@ class TextPanel : public QWidget {
     checks->addWidget(bold_);
     checks->addWidget(shadow_);
     checks->addStretch(1);
+    // 字間: 文字の大きさの近くに置く（スライダー・数値入力欄・キーフレームの ◆）
+    spacing_ = new LetterSpacingRow(fontSec);
     fontSec->body()->addWidget(font_);
     fontSec->body()->addWidget(size_);
+    fontSec->body()->addWidget(spacing_);
     fontSec->body()->addLayout(checks);
     addSection(v, fontSec);
 
@@ -532,6 +535,8 @@ class TextPanel : public QWidget {
     v->addWidget(makeSeparator());
     animPanel_ = new AnimPanel(this);
     v->addWidget(animPanel_);
+    // 字間の行を操作したら、アニメーションの欄の入力欄（時間・値・補間方式）も字間のキーフレームを編集する
+    connect(spacing_, &LetterSpacingRow::touched, animPanel_, [this] { animPanel_->setActiveProp(AnimProp::LetterSpacing); });
 
     auto* timeSec = new Section(QStringLiteral("タイミング"), this);
     auto* tg = new QHBoxLayout();
@@ -601,6 +606,7 @@ class TextPanel : public QWidget {
     const TextItem* t = editor().text(textId_);
     if (!t) return;
     animPanel_->refresh();
+    spacing_->refresh();
     header_->set(QStringLiteral("type"), QStringLiteral("テキスト"),
                  QStringLiteral("%1〜%2").arg(formatTime(t->start), formatTime(t->start + t->duration)));
     if (edit_->toPlainText() != t->text) {
@@ -640,6 +646,7 @@ class TextPanel : public QWidget {
   QPlainTextEdit* edit_;
   QComboBox* font_;
   SliderRow* size_;
+  LetterSpacingRow* spacing_;
   QCheckBox* bold_;
   QCheckBox* shadow_;
   ColorSwatches* color_;

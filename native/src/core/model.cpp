@@ -124,7 +124,7 @@ Easing easingFromString(const QString& s) {
   return Easing::Linear;
 }
 
-static const char* const kPropIds[kAnimPropCount] = {"x", "y", "scale", "rotation", "opacity"};
+static const char* const kPropIds[kAnimPropCount] = {"x", "y", "scale", "rotation", "opacity", "letterSpacing"};
 
 QString propToString(AnimProp p) {
   return QString::fromLatin1(kPropIds[int(p)]);

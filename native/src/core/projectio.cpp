@@ -127,6 +127,7 @@ QJsonObject projectToJson(const ProjectData& p) {
         {QStringLiteral("boxOpacity"), t.boxOpacity},
         {QStringLiteral("shadow"), t.shadow},
         {QStringLiteral("align"), alignToString(t.align)},
+        {QStringLiteral("letterSpacing"), t.letterSpacing},
         {QStringLiteral("animation"), animationToString(t.animation)},
         {QStringLiteral("scale"), t.scale},
         {QStringLiteral("rotation"), t.rotation},
@@ -253,6 +254,7 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
     c.opacity = clampProp(AnimProp::Opacity, numOr(o, "opacity", 1));
     volumePointsFromJson(o.value(QStringLiteral("volumePoints")).toArray(), c.volumePoints);
     c.anim = animFromJson(o);
+    c.anim.keys(AnimProp::LetterSpacing).clear();  // 字間は文字だけの項目（映像に紛れ込んだ分は捨てる）
     file.project.clips.push_back(c);
   }
   bool hasAllTracks = true;
@@ -277,6 +279,8 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
     t.boxOpacity = std::clamp(numOr(o, "boxOpacity", 0), 0.0, 1.0);
     t.shadow = o.value(QStringLiteral("shadow")).toBool(true);
     t.align = alignFromString(o.value(QStringLiteral("align")).toString());
+    // 字間（以前のプロジェクトには無い。その場合は 0 = フォント本来の間隔）
+    t.letterSpacing = clampProp(AnimProp::LetterSpacing, numOr(o, "letterSpacing", 0));
     t.animation = animationFromString(o.value(QStringLiteral("animation")).toString());
     t.scale = clampProp(AnimProp::Scale, numOr(o, "scale", 1));
     t.rotation = clampProp(AnimProp::Rotation, numOr(o, "rotation", 0));

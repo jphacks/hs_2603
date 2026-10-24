@@ -113,6 +113,8 @@ class SliderRow : public QWidget {
   double value() const;
   void setDefault(double v) { default_ = v; }
   void setLabelVisible(bool v);
+  /** 右上の数値の表示を出す / 隠す（数値を別の入力欄で出すときに隠す） */
+  void setValueVisible(bool v);
   /** つまみをドラッグしている間（とホイール・矢印キーで変えている間）だけ、つまみの近くに今の値（format で整えたもの）を出す */
   void setValueBubble(bool on) { bubbleOn_ = on; }
   /**

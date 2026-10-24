@@ -1,7 +1,10 @@
 #pragma once
 
+#include <QHash>
 #include <QMainWindow>
 #include <QTimer>
+
+#include <functional>
 
 class QAction;
 class QLabel;
@@ -50,6 +53,16 @@ class MainWindow : public QMainWindow {
   void showToast(const QString& message, int kind);
   void setTaskbarProgress(double ratio, bool running);
   bool handleKey(QKeyEvent* e);
+  /** キーボードショートカットで動かす操作（keymap の id）と、その QAction を結び付ける。ready が false の間はキーを横取りしない */
+  void bindCommand(const QString& id, QAction* action, std::function<bool()> ready = {});
+  /** メニューに出さない操作（再生・コマ送りなど）を、ショートカット用の QAction として足す */
+  void addHiddenCommand(const QString& id, std::function<void()> run, std::function<bool()> ready = {});
+  /** keymap の割り当てを、メニューの QAction と、Ctrl・Alt を使わないキーの表に反映する */
+  void applyShortcuts();
+  /** Ctrl・Alt を使わないキーで動かす操作の id（無ければ空） */
+  QString plainCommandFor(const QKeyEvent* e) const;
+  /** 操作を行う。いま行えなければ false（キーはほかの部品に渡す） */
+  bool runCommand(const QString& id);
   /** 保存していない変更があれば保存するか尋ねる。続けてよければ true */
   bool confirmSaveWorkspace(int index);
   void closeWorkspace(int index);
@@ -64,6 +77,15 @@ class MainWindow : public QMainWindow {
   QToolButton* aiButton_ = nullptr;
   QAction* aiAction_ = nullptr;
   bool aiAvailable_ = false;
+  struct BoundCommand {
+    QAction* action = nullptr;
+    std::function<bool()> ready;
+  };
+  QHash<QString, BoundCommand> commands_;
+  /** Ctrl・Alt を使わないキー（QKeyCombination::toCombined()）→ 操作の id */
+  QHash<int, QString> plainKeys_;
+  QToolButton* undoButton_ = nullptr;
+  QToolButton* redoButton_ = nullptr;
   PreviewPanel* preview_;
   TimelineWidget* timeline_;
   Inspector* inspector_;

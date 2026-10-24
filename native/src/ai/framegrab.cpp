@@ -63,7 +63,9 @@ QImage compose(const Job& job, const QImage& frame, QSize size, QSize design) {
   QPainter p(&canvas);
   for (const TextItem& item : job.texts) {
     const bool plain = layerIsPlain(item);
+    const LayerState ls = layerStateAt(item, job.t - item.start);
     TextItem drawItem = item;
+    drawItem.letterSpacing = ls.letterSpacing;  // 字間のキーフレームも含めた、この時間の字間
     if (!plain) {
       drawItem.x = 0.5;
       drawItem.y = 0.5;
@@ -77,7 +79,6 @@ QImage compose(const Job& job, const QImage& frame, QSize size, QSize design) {
       p.drawImage(s.pos + offset, s.image);
       continue;
     }
-    const LayerState ls = layerStateAt(item, job.t - item.start);
     p.save();
     p.setOpacity(st.alpha * ls.opacity);
     drawLayer(p, s.image, s.pos, ls, offset, size);

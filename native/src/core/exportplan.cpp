@@ -182,10 +182,32 @@ static QStringList fades(const char* filter, double fadeIn, double fadeOut, doub
   return out;
 }
 
+int exportFps(const ExportRequest& req) {
+  return std::max(1, int(jsRound(req.fps)));
+}
+
+long long exportTotalFrames(const ExportRequest& req) {
+  const int FPS = exportFps(req);
+  long long total = 0;
+  for (const ExportClip& clip : req.clips) total += std::max(1, int(jsRound(clip.duration * FPS)));
+  return total;
+}
+
+static int textFramesOf(long long totalFrames, int FPS, double start, double duration, long long* startFrame) {
+  const long long s = jsRound(start * FPS);
+  if (startFrame) *startFrame = s;
+  if (s >= totalFrames) return 0;
+  return int(std::max<long long>(1, std::min<long long>(jsRound(duration * FPS), totalFrames - s)));
+}
+
+int exportTextFrames(const ExportRequest& req, double start, double duration, long long* startFrame) {
+  return textFramesOf(exportTotalFrames(req), exportFps(req), start, duration, startFrame);
+}
+
 ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedText>& texts) {
   const int W = evenSize(req.width);
   const int H = evenSize(req.height);
-  const int FPS = std::max(1, int(jsRound(req.fps)));
+  const int FPS = exportFps(req);
   if (req.clips.empty()) throw std::runtime_error("クリップがありません");
 
   ExportPlan plan;
@@ -279,14 +301,22 @@ ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedTe
   QString vLabel = QStringLiteral("vcat");
   for (size_t j = 0; j < texts.size(); ++j) {
     const PlannedText& t = texts[j];
-    const long long startFrame = jsRound(t.start * FPS);
-    if (startFrame >= totalFrames) continue;
-    const int frames = int(std::max<long long>(1, std::min<long long>(jsRound(t.duration * FPS), totalFrames - startFrame)));
+    long long startFrame = 0;
+    const int frames = textFramesOf(totalFrames, FPS, t.start, t.duration, &startFrame);
+    if (frames <= 0) continue;
     const double dur = double(frames) / FPS;
     const AnimTimes times = textAnimTimes(dur, t.animation);
-    const int k = addInput({QStringLiteral("-i"), t.path});
-    QStringList parts{QStringLiteral("[%1:v]format=rgba").arg(k), QStringLiteral("settb=1/%1").arg(FPS),
-                      QStringLiteral("loop=loop=%1:size=1:start=0").arg(frames - 1), QStringLiteral("setpts=N")};
+    QStringList parts;
+    if (t.sequence) {
+      // 1 フレームごとの連番画像（字間が時間で変わる文字）。枚数が多くても少なくても、重ねるフレーム数でそろえる
+      const int k = addInput({QStringLiteral("-framerate"), QString::number(FPS), QStringLiteral("-start_number"), QStringLiteral("0"), QStringLiteral("-i"), t.path});
+      parts << QStringLiteral("[%1:v]format=rgba").arg(k) << QStringLiteral("settb=1/%1").arg(FPS) << QStringLiteral("setpts=N")
+            << QStringLiteral("trim=end_frame=%1").arg(frames) << QStringLiteral("setpts=N");
+    } else {
+      const int k = addInput({QStringLiteral("-i"), t.path});
+      parts << QStringLiteral("[%1:v]format=rgba").arg(k) << QStringLiteral("settb=1/%1").arg(FPS)
+            << QStringLiteral("loop=loop=%1:size=1:start=0").arg(frames - 1) << QStringLiteral("setpts=N");
+    }
     if (times.fadeIn > 0) parts << QStringLiteral("fade=t=in:st=0:d=%1:alpha=1").arg(num6(times.fadeIn));
     if (times.fadeOut > 0) parts << QStringLiteral("fade=t=out:st=%1:d=%2:alpha=1").arg(num6(dur - times.fadeOut), num6(times.fadeOut));
     const double start = double(startFrame) / FPS;
