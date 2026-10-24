@@ -1,0 +1,3 @@
+# cmd.exe は改行が LF だけのバッチファイルを正しく読めないことがあるので、CRLF で取り出す
+*.cmd text eol=crlf
+*.bat text eol=crlf

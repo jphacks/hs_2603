@@ -1,0 +1,68 @@
+# ---- 秘密の設定 ----
+# .env はコミットしない。アプリの .env には AI サーバーのアドレス、server/.env には Bedrock の API キーや
+# データベースのパスワードを書く（キーは絶対にコミットしない）。見本は .env.example と server/.env.example
+.env
+.env.*
+!.env.example
+node_modules/
+# ---- ビルドの出力 ----
+# native/build.ps1 は native/build/ と native/dist/ に出力する。
+# IDE でビルドしたときの出力先もまとめて除外する
+#   VS Code (CMake Tools) / Qt Creator: build/, build-*/
+#   Visual Studio: out/
+#   CLion: cmake-build-*/
+build/
+build-*/
+dist/
+out/
+cmake-build-*/
+
+# ソースのフォルダーで直接 cmake を実行したときにできるファイル
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+# 個人用の CMake 設定（共有しない決まりのファイル）
+CMakeUserPresets.json
+
+# ---- バイナリ・動画 ----
+# GitHub は 100MB を超えるファイルを受け付けない（FFmpeg の DLL は 100MB を超える）。
+# 一度コミットすると履歴に残り続けるので入れない。どうしても必要なときは git add -f
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.mp4
+*.mov
+*.m4v
+*.mkv
+*.avi
+*.webm
+*.part
+
+# ---- エディタ・IDE の個人設定 ----
+.vs/
+.idea/
+.qtcreator/
+.cache/
+*.user
+CMakeLists.txt.user*
+# VS Code はチームで共有する設定だけ入れる
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# （AI サーバーの node_modules などは server/.gitignore で除外している）
+
+# ---- OS・その他 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+*.log

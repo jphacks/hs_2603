@@ -1,0 +1,43 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/">
+  <file>icons/play.svg</file>
+  <file>icons/pause.svg</file>
+  <file>icons/skip-back.svg</file>
+  <file>icons/skip-forward.svg</file>
+  <file>icons/rewind.svg</file>
+  <file>icons/fast-forward.svg</file>
+  <file>icons/plus.svg</file>
+  <file>icons/x.svg</file>
+  <file>icons/scissors.svg</file>
+  <file>icons/copy.svg</file>
+  <file>icons/trash.svg</file>
+  <file>icons/type.svg</file>
+  <file>icons/music.svg</file>
+  <file>icons/film.svg</file>
+  <file>icons/image.svg</file>
+  <file>icons/zoom-in.svg</file>
+  <file>icons/zoom-out.svg</file>
+  <file>icons/maximize.svg</file>
+  <file>icons/undo.svg</file>
+  <file>icons/redo.svg</file>
+  <file>icons/download.svg</file>
+  <file>icons/keyboard.svg</file>
+  <file>icons/folder-open.svg</file>
+  <file>icons/check.svg</file>
+  <file>icons/alert.svg</file>
+  <file>icons/loader.svg</file>
+  <file>icons/volume-x.svg</file>
+  <file>icons/align-left.svg</file>
+  <file>icons/align-center.svg</file>
+  <file>icons/align-right.svg</file>
+  <file>icons/arrow-up-to-line.svg</file>
+  <file>icons/arrow-down-to-line.svg</file>
+  <file>icons/move-vertical.svg</file>
+  <file>icons/sliders.svg</file>
+  <file>icons/upload.svg</file>
+  <file>icons/check-mark.svg</file>
+  <file>icons/message-square.svg</file>
+  <file>icons/send.svg</file>
+  <file>icons/stop.svg</file>
+</qresource>
+</RCC>

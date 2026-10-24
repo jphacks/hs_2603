@@ -1,0 +1,12 @@
+# AI サーバー（server フォルダー）だけで使う除外。server フォルダーだけをほかの場所に置いても効くように、ここに書く
+
+# ライブラリ（start.cmd・npm ci で作り直せる。バージョンは package-lock.json で固定している）
+node_modules/
+
+# start.cmd がダウンロードした Node.js と、ライブラリを入れ替えるときの作業場所
+.runtime/
+
+# 設定（PostgreSQL のパスワードと Bedrock の API キーが入る）。絶対にコミットしない。見本は .env.example
+.env
+.env.*
+!.env.example

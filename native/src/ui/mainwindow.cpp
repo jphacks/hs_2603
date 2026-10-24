@@ -1,0 +1,705 @@
+#include "ui/mainwindow.h"
+
+#include <QAbstractSlider>
+#include <QAbstractSpinBox>
+#include <QAction>
+#include <QApplication>
+#include <QCloseEvent>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QMimeData>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSaveFile>
+#include <QSplitter>
+#include <QStandardPaths>
+#include <QStatusBar>
+#include <QTableWidget>
+#include <QTextEdit>
+#include <QToolButton>
+#include <QVBoxLayout>
+
+#include <windows.h>
+#include <shobjidl.h>
+
+#include <functional>
+
+#include "ai/account.h"
+#include "ai/assistant.h"
+#include "core/editor.h"
+#include "core/projectio.h"
+#include "export/exporter.h"
+#include "media/mediamanager.h"
+#include "render/previewengine.h"
+#include "ui/accountdialog.h"
+#include "ui/aipanel.h"
+#include "ui/exportdialog.h"
+#include "ui/inspector.h"
+#include "ui/librarypanel.h"
+#include "ui/previewwidget.h"
+#include "ui/serverstatus.h"
+#include "ui/theme.h"
+#include "ui/timelinewidget.h"
+#include "ui/widgets.h"
+#include "ui/workspacebar.h"
+
+namespace kv {
+
+MainWindow::MainWindow() {
+  setWindowIcon(QIcon(QStringLiteral(":/icons/film.svg")));
+  setAcceptDrops(true);
+  resize(1440, 900);
+  setMinimumSize(1100, 680);
+
+  engine_ = new PreviewEngine(this);
+  library_ = new LibraryPanel(this);
+  preview_ = new PreviewPanel(engine_, this);
+  inspector_ = new Inspector(this);
+  timeline_ = new TimelineWidget(this);
+  library_->setMinimumWidth(220);
+  inspector_->setMinimumWidth(280);
+  // AI アシスタントは右端の欄。はじめはしまっておき、右上の「AI」で出す
+  aiPanel_ = new AiPanel(this);
+
+  auto* top = new QSplitter(Qt::Horizontal, this);
+  top_ = top;
+  top->addWidget(library_);
+  top->addWidget(preview_);
+  top->addWidget(inspector_);
+  top->addWidget(aiPanel_);
+  top->setStretchFactor(0, 0);
+  top->setStretchFactor(1, 1);
+  top->setStretchFactor(2, 0);
+  top->setStretchFactor(3, 0);
+  top->setSizes({264, 860, 316, 0});
+  top->setChildrenCollapsible(false);
+  aiPanel_->hide();
+  connect(aiPanel_, &AiPanel::closeRequested, this, [this] { setAiVisible(false); });
+  auto* main = new QSplitter(Qt::Vertical, this);
+  main->addWidget(top);
+  main->addWidget(timeline_);
+  main->setStretchFactor(0, 1);
+  main->setStretchFactor(1, 0);
+  main->setSizes({580, 300});
+  main->setChildrenCollapsible(false);
+  timeline_->setMinimumHeight(200);
+
+  // 編集画面の上に、編集場所の切り替えタブ（編集1 / 編集2）を置く
+  auto* central = new QWidget(this);
+  auto* cv = new QVBoxLayout(central);
+  cv->setContentsMargins(0, 0, 0, 0);
+  cv->setSpacing(0);
+  auto* tabBar = new WorkspaceBar(central);
+  connect(tabBar, &WorkspaceBar::closeRequested, this, &MainWindow::closeWorkspace);
+  cv->addWidget(tabBar);
+  cv->addWidget(main, 1);
+  setCentralWidget(central);
+
+  buildMenus();
+  // AI サーバーのアドレス（.env の KANTAN_AI_SERVER）が無ければ、AI アシスタントは出さない。
+  // .env を書き換えてアプリに戻ってきたら、Account が読み直して changed を出す（起動し直さなくてよい）
+  refreshAiAvailability();
+  connect(&ai::account(), &ai::Account::changed, this, &MainWindow::refreshAiAvailability);
+
+  // 通知（ステータスバーの左）と、AI サーバーにつながっているか（右下）
+  auto* sb = statusBar();
+  sb->setSizeGripEnabled(false);
+  auto* toast = new QWidget(sb);
+  auto* th = new QHBoxLayout(toast);
+  th->setContentsMargins(6, 0, 6, 0);
+  th->setSpacing(6);
+  toastIcon_ = new QLabel(toast);
+  toastText_ = new QLabel(toast);
+  th->addWidget(toastIcon_);
+  th->addWidget(toastText_);
+  th->addStretch(1);
+  sb->addWidget(toast, 1);
+  sb->addPermanentWidget(new ServerStatus(sb));
+  toastTimer_.setSingleShot(true);
+  connect(&toastTimer_, &QTimer::timeout, this, [this] {
+    toastIcon_->clear();
+    toastText_->clear();
+  });
+
+  dropOverlay_ = new QWidget(this);
+  dropOverlay_->setAttribute(Qt::WA_TransparentForMouseEvents);
+  dropOverlay_->setStyleSheet(QStringLiteral("background: rgba(38,128,235,30); border: 2px solid #2680eb;"));
+  dropOverlay_->hide();
+
+  Editor& ed = editor();
+  connect(&ed, &Editor::toastRequested, this, [this](const QString& m, ToastKind k) { showToast(m, int(k)); });
+  connect(&ed, &Editor::dirtyChanged, this, &MainWindow::updateTitle);
+  connect(&ed, &Editor::workspacesChanged, this, &MainWindow::updateTitle);
+  connect(&ed, &Editor::projectChanged, this, [this] {
+    updateTitle();
+    exportButton_->setEnabled(!editor().project().clips.empty());
+    autosave_.start();
+  });
+  autosave_.setSingleShot(true);
+  autosave_.setInterval(1200);
+  connect(&autosave_, &QTimer::timeout, this, [] { writeAutosave(); });
+
+  auto focusText = [this] { inspector_->focusText(); };
+  connect(timeline_, &TimelineWidget::requestTextFocus, this, focusText);
+  connect(preview_->stage(), &PreviewStage::requestTextFocus, this, focusText);
+
+  qApp->installEventFilter(this);
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  ITaskbarList3* tb = nullptr;
+  if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_ITaskbarList3, reinterpret_cast<void**>(&tb)))) {
+    tb->HrInit();
+    taskbar_ = tb;
+  }
+  updateTitle();
+  exportButton_->setEnabled(false);
+}
+
+MainWindow::~MainWindow() {
+  qApp->removeEventFilter(this);
+  if (taskbar_) static_cast<ITaskbarList3*>(taskbar_)->Release();
+}
+
+void MainWindow::buildMenus() {
+  Editor& ed = editor();
+  auto* file = menuBar()->addMenu(QStringLiteral("ファイル(&F)"));
+  file->addAction(QStringLiteral("新しい編集場所"), QKeySequence::New, this, &MainWindow::newProject);
+  file->addAction(QStringLiteral("開く... (新しいタブ)"), QKeySequence::Open, this, &MainWindow::openProject);
+  file->addAction(QStringLiteral("この編集場所を閉じる"), QKeySequence(QStringLiteral("Ctrl+W")), this,
+                  [this] { closeWorkspace(editor().workspaceIndex()); });
+  file->addSeparator();
+  file->addAction(QStringLiteral("保存"), QKeySequence::Save, this, [this] { saveProject(false); });
+  file->addAction(QStringLiteral("名前を付けて保存..."), QKeySequence(QStringLiteral("Ctrl+Shift+S")), this, [this] { saveProject(true); });
+  file->addSeparator();
+  file->addAction(QStringLiteral("メディアを追加..."), QKeySequence(QStringLiteral("Ctrl+I")), this, [this] { LibraryPanel::pickAndImport(this); });
+  file->addAction(QStringLiteral("書き出し..."), QKeySequence(QStringLiteral("Ctrl+E")), this, &MainWindow::openExport);
+  file->addSeparator();
+  file->addAction(QStringLiteral("終了"), QKeySequence(QStringLiteral("Alt+F4")), this, &QWidget::close);
+
+  auto* edit = menuBar()->addMenu(QStringLiteral("編集(&E)"));
+  QAction* undo = edit->addAction(QStringLiteral("元に戻す"), QKeySequence::Undo, this, [] { editor().undo(); });
+  QAction* redo = edit->addAction(QStringLiteral("やり直し"), QKeySequence(QStringLiteral("Ctrl+Y")), this, [] { editor().redo(); });
+  edit->addSeparator();
+  edit->addAction(QStringLiteral("分割"), this, [] { editor().splitAtPlayhead(); })->setShortcutVisibleInContextMenu(true);
+  QAction* dup = edit->addAction(QStringLiteral("複製"), QKeySequence(QStringLiteral("Ctrl+D")), this, [] { editor().duplicateSelection(); });
+  QAction* del = edit->addAction(QStringLiteral("削除"), this, [] { editor().deleteSelection(); });
+  edit->addSeparator();
+  // キーフレームのコピー・貼り付け（選んでいるキーフレームを、再生位置へ。値と補間方式は保たれる）
+  QAction* copyKeys = edit->addAction(QStringLiteral("キーフレームをコピー"), QKeySequence(QStringLiteral("Ctrl+Shift+C")), this, [] {
+    Editor& e = editor();
+    std::vector<Editor::KeyRef> keys;
+    if (e.animation()) {
+      // 再生位置にあるキーフレーム（項目ごと）
+      const double local = e.currentTime() - e.objectStart();
+      for (int pi = 0; pi < kAnimPropCount; ++pi) {
+        const AnimProp prop = static_cast<AnimProp>(pi);
+        const int idx = findKey(e.animation()->keys(prop), local);
+        if (idx >= 0) keys.push_back({prop, idx});
+      }
+    }
+    if (e.copyKeys(keys)) e.toast(QStringLiteral("キーフレームをコピーしました"));
+    else e.toast(QStringLiteral("コピーするキーフレームを選んでください"));
+  });
+  QAction* pasteKeys = edit->addAction(QStringLiteral("キーフレームを貼り付け"), QKeySequence(QStringLiteral("Ctrl+Shift+V")), this, [] {
+    Editor& e = editor();
+    const int n = e.pasteKeys(std::clamp(e.currentTime() - e.objectStart(), 0.0, e.objectDuration()));
+    e.toast(n > 0 ? QStringLiteral("キーフレームを%1個貼り付けました").arg(n) : QStringLiteral("貼り付けられるキーフレームがありません"));
+  });
+  connect(&ed, &Editor::selectionChanged, this, [copyKeys, pasteKeys] {
+    copyKeys->setEnabled(editor().animatable());
+    pasteKeys->setEnabled(editor().animatable());
+  });
+  copyKeys->setEnabled(false);
+  pasteKeys->setEnabled(false);
+  edit->addSeparator();
+  // テキストの段を変えるのは、移動や長さの変更とは別の、この明示的な操作だけ
+  auto moveTextTrack = [](int delta) {
+    const Selection s = editor().selection();
+    if (s.type == Selection::Text) editor().moveTextTrack(s.id, delta);
+  };
+  QAction* trackUp = edit->addAction(QStringLiteral("テキストを上の段へ"), QKeySequence(QStringLiteral("Alt+Up")), this, [moveTextTrack] { moveTextTrack(-1); });
+  QAction* trackDown = edit->addAction(QStringLiteral("テキストを下の段へ"), QKeySequence(QStringLiteral("Alt+Down")), this, [moveTextTrack] { moveTextTrack(1); });
+  edit->addSeparator();
+  edit->addAction(QStringLiteral("テキストを追加"), this, [this] {
+    editor().addText(QStringLiteral("basic"));
+    inspector_->focusText();
+  });
+  auto refreshEdit = [undo, redo, dup, del, trackUp, trackDown] {
+    undo->setEnabled(editor().canUndo());
+    redo->setEnabled(editor().canRedo());
+    dup->setEnabled(bool(editor().selection()));
+    del->setEnabled(bool(editor().selection()));
+    const bool isText = editor().selection().type == Selection::Text;
+    trackUp->setEnabled(isText);
+    trackDown->setEnabled(isText);
+  };
+  connect(&ed, &Editor::projectChanged, this, refreshEdit);
+  connect(&ed, &Editor::selectionChanged, this, refreshEdit);
+  refreshEdit();
+
+  auto* view = menuBar()->addMenu(QStringLiteral("表示(&V)"));
+  view->addAction(QStringLiteral("タイムラインを拡大"), QKeySequence(QStringLiteral("Ctrl+=")), this, [] { editor().setPxPerSec(editor().pxPerSec() * 1.4); });
+  view->addAction(QStringLiteral("タイムラインを縮小"), QKeySequence(QStringLiteral("Ctrl+-")), this, [] { editor().setPxPerSec(editor().pxPerSec() / 1.4); });
+  view->addAction(QStringLiteral("全体を表示"), QKeySequence(QStringLiteral("Ctrl+0")), this, [this] { timeline_->view()->fitAll(); });
+  view->addSeparator();
+  aiAction_ = view->addAction(QStringLiteral("AI アシスタント"), QKeySequence(QStringLiteral("Ctrl+Shift+A")), this, [this] { setAiVisible(!aiPanel_->isVisible()); });
+  aiAction_->setCheckable(true);
+  view->addSeparator();
+  view->addAction(QStringLiteral("次のタブ"), QKeySequence(QStringLiteral("Ctrl+PgDown")), this, [] {
+    const int n = editor().workspaceCount();
+    editor().switchWorkspace((editor().workspaceIndex() + 1) % n);
+  });
+  view->addAction(QStringLiteral("前のタブ"), QKeySequence(QStringLiteral("Ctrl+PgUp")), this, [] {
+    const int n = editor().workspaceCount();
+    editor().switchWorkspace((editor().workspaceIndex() + n - 1) % n);
+  });
+
+  auto* help = menuBar()->addMenu(QStringLiteral("ヘルプ(&H)"));
+  help->addAction(QStringLiteral("キーボードショートカット"), this, &MainWindow::showShortcuts);
+  help->addAction(QStringLiteral("バージョン情報"), this, [this] {
+    QMessageBox::about(this, QStringLiteral("バージョン情報"),
+                       QStringLiteral("<b>かんたん動画エディタ</b><br>バージョン %1<br><br>Qt %2 / FFmpeg / miniaudio / Lucide")
+                           .arg(QStringLiteral(KV_VERSION), QString::fromLatin1(qVersion())));
+  });
+
+  // 右上: 元に戻す・やり直し・書き出し
+  auto* corner = new QWidget(menuBar());
+  auto* ch = new QHBoxLayout(corner);
+  ch->setContentsMargins(0, 3, 8, 3);
+  ch->setSpacing(2);
+  auto* undoBtn = makeToolButton(QStringLiteral("undo"), QStringLiteral("元に戻す (Ctrl+Z)"), corner);
+  auto* redoBtn = makeToolButton(QStringLiteral("redo"), QStringLiteral("やり直し (Ctrl+Y)"), corner);
+  exportButton_ = new QPushButton(theme::icon(QStringLiteral("download"), Qt::white), QStringLiteral("書き出し"), corner);
+  exportButton_->setProperty("primary", true);
+  exportButton_->setFocusPolicy(Qt::NoFocus);
+  aiButton_ = makeToolButton(QStringLiteral("message-square"), QStringLiteral("AI アシスタント (Ctrl+Shift+A)"), corner, QStringLiteral("AI"));
+  aiButton_->setCheckable(true);
+  ch->addWidget(undoBtn);
+  ch->addWidget(redoBtn);
+  ch->addSpacing(8);
+  ch->addWidget(aiButton_);
+  ch->addSpacing(4);
+  ch->addWidget(exportButton_);
+  connect(aiButton_, &QToolButton::clicked, this, [this] { setAiVisible(!aiPanel_->isVisible()); });
+  menuBar()->setCornerWidget(corner, Qt::TopRightCorner);
+  connect(undoBtn, &QToolButton::clicked, this, [] { editor().undo(); });
+  connect(redoBtn, &QToolButton::clicked, this, [] { editor().redo(); });
+  connect(exportButton_, &QPushButton::clicked, this, &MainWindow::openExport);
+  auto refreshCorner = [undoBtn, redoBtn] {
+    undoBtn->setEnabled(editor().canUndo());
+    redoBtn->setEnabled(editor().canRedo());
+  };
+  connect(&ed, &Editor::projectChanged, this, refreshCorner);
+  refreshCorner();
+}
+
+/** 開いているダイアログ（前回の続きを開くかの確認など）が閉じてから fn を行う */
+static void whenNoModal(QObject* ctx, std::function<void()> fn) {
+  if (!QApplication::activeModalWidget()) {
+    fn();
+    return;
+  }
+  QTimer::singleShot(300, ctx, [ctx, fn] { whenNoModal(ctx, fn); });
+}
+
+void MainWindow::startupLogin() {
+  ai::Account& a = ai::account();
+  // .env に AI サーバーのアドレスが無ければ、AI は使わない（ログインの画面も出さない）
+  if (a.server().isEmpty()) return;
+  if (!a.loadSaved()) {
+    // ログインしていない（はじめて・ログアウトした）: 先にログインの画面を出す
+    AccountDialog::run(this, AccountDialog::Page::Login, true);
+    return;
+  }
+  // 前回のログインが残っていれば、そのまま使う。サーバーで確かめて、期限が切れていたらログインの画面を出す
+  // （サーバーにつながらないときは、つながったら自動で使う）
+  a.refresh(this, [this](ai::Account::Refresh result) {
+    if (result == ai::Account::Refresh::Expired) {
+      whenNoModal(this, [this] { AccountDialog::run(this, AccountDialog::Page::Login, true); });
+    } else if (result == ai::Account::Refresh::LoggedIn && ai::account().info().mustChangePassword) {
+      whenNoModal(this, [this] { AccountDialog::run(this, AccountDialog::Page::Password, true); });
+    }
+  });
+}
+
+void MainWindow::refreshAiAvailability() {
+  aiAvailable_ = !ai::account().server().isEmpty();
+  // 隠した項目は、ショートカット（Ctrl+Shift+A）でも出せない
+  if (aiButton_) aiButton_->setVisible(aiAvailable_);
+  if (aiAction_) aiAction_->setVisible(aiAvailable_);
+  if (!aiAvailable_ && aiPanel_->isVisible()) {
+    // 使っている途中で .env のアドレスが消えた。返事を待つのをやめて、欄をしまう
+    aiPanel_->assistant()->cancel();
+    setAiVisible(false);
+    editor().toast(QStringLiteral(".env に AI サーバーのアドレス（KANTAN_AI_SERVER）が無くなったので、AI アシスタントを隠しました"), ToastKind::Info);
+  }
+}
+
+void MainWindow::setAiVisible(bool on) {
+  if (!aiAvailable_) on = false;
+  if (aiButton_) aiButton_->setChecked(on);
+  if (aiAction_) aiAction_->setChecked(on);
+  if (on == aiPanel_->isVisible()) {
+    if (on) aiPanel_->focusInput();
+    return;
+  }
+  if (!on) {
+    aiPanel_->hide();
+    return;
+  }
+  // 出すときは、プレビューの幅を分けて 340px ほどにする
+  QList<int> sizes = top_->sizes();
+  aiPanel_->show();
+  if (sizes.size() == 4) {
+    const int want = 340;
+    const int take = std::min(want, std::max(0, sizes[1] - 420));
+    sizes[1] -= take;
+    sizes[3] = std::max(take, aiPanel_->minimumWidth());
+    top_->setSizes(sizes);
+  }
+  aiPanel_->focusInput();
+}
+
+void MainWindow::updateTitle() {
+  const Editor& ed = editor();
+  QString name = ed.workspaceName(ed.workspaceIndex());
+  if (!ed.projectPath().isEmpty()) name = QFileInfo(ed.projectPath()).completeBaseName();
+  setWindowTitle(QStringLiteral("%1%2 - かんたん動画エディタ").arg(name, ed.dirty() ? QStringLiteral(" *") : QString()));
+}
+
+void MainWindow::showToast(const QString& message, int kind) {
+  const QString icon = kind == int(ToastKind::Error) ? QStringLiteral("alert") : kind == int(ToastKind::Success) ? QStringLiteral("check") : QString();
+  const QColor color = kind == int(ToastKind::Error) ? theme::danger : theme::ok;
+  if (icon.isEmpty()) toastIcon_->clear();
+  else toastIcon_->setPixmap(theme::iconPixmap(icon, 14, color, devicePixelRatioF()));
+  toastText_->setText(message);
+  toastText_->setStyleSheet(kind == int(ToastKind::Error) ? QStringLiteral("color:#ff9a9e") : QStringLiteral("color:#e6e6e6"));
+  toastTimer_.start(kind == int(ToastKind::Error) ? 8000 : 4000);
+}
+
+void MainWindow::setTaskbarProgress(double ratio, bool running) {
+  auto* tb = static_cast<ITaskbarList3*>(taskbar_);
+  if (!tb) return;
+  const HWND hwnd = reinterpret_cast<HWND>(winId());
+  if (!running) {
+    tb->SetProgressState(hwnd, TBPF_NOPROGRESS);
+    return;
+  }
+  tb->SetProgressState(hwnd, TBPF_NORMAL);
+  tb->SetProgressValue(hwnd, ULONGLONG(ratio * 1000), 1000);
+}
+
+/** 保存していない変更があるタブについて、保存するか尋ねる。続けてよければ true。保存を選んで保存できなかったときは false */
+bool MainWindow::confirmSaveWorkspace(int index) {
+  Editor& ed = editor();
+  if (!ed.workspaceDirty(index) || !ed.workspaceHasContent(index)) return true;
+  // 何についての確認か分かるよう、そのタブを表示してから尋ねる
+  // 確認を出している間に、別のウィンドウから開かれるなどでタブが増えたり切り替わったりしても、
+  // 同じタブを保存・閉じられるよう、番号ではなく変わらない ID で覚えておく
+  const int uid = ed.workspaceUid(index);
+  ed.switchWorkspace(index);
+  QMessageBox box(QMessageBox::Question, QStringLiteral("かんたん動画エディタ"),
+                  QStringLiteral("「%1」の変更を保存しますか？").arg(ed.workspaceName(index)), QMessageBox::NoButton, this);
+  QPushButton* save = box.addButton(QStringLiteral("保存"), QMessageBox::AcceptRole);
+  QPushButton* dont = box.addButton(QStringLiteral("保存しない"), QMessageBox::DestructiveRole);
+  box.addButton(QStringLiteral("キャンセル"), QMessageBox::RejectRole);
+  box.setDefaultButton(save);
+  box.exec();
+  if (box.clickedButton() == save) {
+    const int now = ed.indexOfWorkspaceUid(uid);
+    if (now < 0) return false;
+    ed.switchWorkspace(now);
+    return saveProject(false);
+  }
+  return box.clickedButton() == dont;
+}
+
+void MainWindow::closeWorkspace(int index) {
+  if (index < 0 || index >= editor().workspaceCount()) return;
+  const int uid = editor().workspaceUid(index);
+  if (!confirmSaveWorkspace(index)) return;
+  // 確認のあとで番号が変わっていても、確認したタブを閉じる
+  const int now = editor().indexOfWorkspaceUid(uid);
+  if (now >= 0) editor().closeWorkspace(now);
+}
+
+void MainWindow::newProject() {
+  // 今のタブはそのままにして、新しい空のタブを追加する
+  editor().addWorkspace();
+}
+
+void MainWindow::openProject() {
+  static QString dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+  const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("開く"), dir, QStringLiteral("プロジェクト ファイル (*.kvproj)"));
+  if (path.isEmpty()) return;
+  dir = QFileInfo(path).absolutePath();
+  media().openProject(path);
+}
+
+bool MainWindow::saveProject(bool saveAs) {
+  Editor& ed = editor();
+  QString path = saveAs ? QString() : ed.projectPath();
+  if (path.isEmpty()) {
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    // 保存先を選んでいる間に別のタブへ切り替わっても、選んだときのタブを保存する
+    const int uid = ed.workspaceUid(ed.workspaceIndex());
+    path = QFileDialog::getSaveFileName(this, QStringLiteral("名前を付けて保存"), dir + QLatin1Char('/') + ed.workspaceName(ed.workspaceIndex()) + QStringLiteral(".kvproj"),
+                                        QStringLiteral("プロジェクト ファイル (*.kvproj)"));
+    if (path.isEmpty()) return false;
+    const int index = ed.indexOfWorkspaceUid(uid);
+    if (index < 0) return false;
+    ed.switchWorkspace(index);
+    if (!path.endsWith(QStringLiteral(".kvproj"), Qt::CaseInsensitive)) path += QStringLiteral(".kvproj");
+    // 別のタブが使っているファイルには上書きしない（2 つのタブが同じファイルを指さないように）
+    const int other = ed.workspaceWithPath(path);
+    if (other >= 0 && other != ed.workspaceIndex()) {
+      ed.toast(QStringLiteral("そのファイルは「%1」で開いています。別の名前で保存してください").arg(ed.workspaceName(other)), ToastKind::Error);
+      return false;
+    }
+    const QString name = QFileInfo(path).completeBaseName();
+    if (name != ed.project().name) {
+      ed.commit([&](ProjectData& p) {
+        p.name = name;
+        return true;
+      });
+    }
+  }
+  // 書き込みに失敗したときに、元のファイルが壊れないよう、できあがってから置き換える
+  QSaveFile f(path);
+  if (!f.open(QIODevice::WriteOnly) || f.write(serializeProject()) < 0 || !f.commit()) {
+    ed.toast(QStringLiteral("保存できませんでした: %1").arg(f.errorString()), ToastKind::Error);
+    return false;
+  }
+  ed.markSaved(path);
+  updateTitle();
+  ed.toast(QStringLiteral("保存しました"), ToastKind::Success);
+  return true;
+}
+
+void MainWindow::openExport() {
+  editor().pause();
+  const ExportCheck check = checkExportable();
+  if (!check.ok) {
+    editor().toast(check.message, ToastKind::Error);
+    return;
+  }
+  if (!exportDialog_) {
+    exportDialog_ = new ExportDialog(this);
+    connect(exportDialog_, &ExportDialog::progressChanged, this, &MainWindow::setTaskbarProgress);
+  }
+  exportDialog_->show();
+  exportDialog_->raise();
+}
+
+void MainWindow::showShortcuts() {
+  QDialog dlg(this);
+  dlg.setWindowTitle(QStringLiteral("キーボードショートカット"));
+  dlg.setMinimumWidth(420);
+  auto* v = new QVBoxLayout(&dlg);
+  auto* table = new QTableWidget(&dlg);
+  QList<QPair<QString, QString>> rows = {
+      {QStringLiteral("再生 / 一時停止"), QStringLiteral("Space")},
+      {QStringLiteral("分割"), QStringLiteral("S")},
+      {QStringLiteral("削除"), QStringLiteral("Delete")},
+      {QStringLiteral("複製"), QStringLiteral("Ctrl+D")},
+      {QStringLiteral("キーフレームをコピー / 貼り付け"), QStringLiteral("Ctrl+Shift+C / V")},
+      {QStringLiteral("数値欄の調整（選んでいるとき）"), QStringLiteral("↑ → 増 / ↓ ← 減")},
+      {QStringLiteral("数値欄の調整（カーソルを合わせて）"), QStringLiteral("ホイール")},
+      {QStringLiteral("数値の調整量を10倍 / 0.1倍"), QStringLiteral("Shift / Alt")},
+      {QStringLiteral("元に戻す"), QStringLiteral("Ctrl+Z")},
+      {QStringLiteral("やり直し"), QStringLiteral("Ctrl+Y")},
+      {QStringLiteral("テキストを追加"), QStringLiteral("T")},
+      {QStringLiteral("選んだテキストを上 / 下の段へ"), QStringLiteral("Alt+↑ / Alt+↓")},
+      {QStringLiteral("1フレーム移動"), QStringLiteral("← / →")},
+      {QStringLiteral("1秒移動"), QStringLiteral("Shift+← / →")},
+      {QStringLiteral("先頭 / 末尾へ移動"), QStringLiteral("Home / End")},
+      {QStringLiteral("タイムラインの拡大・縮小"), QStringLiteral("Ctrl+ホイール")},
+      {QStringLiteral("吸い付かせずに動かす"), QStringLiteral("Alt+ドラッグ")},
+      {QStringLiteral("新しい編集場所（タブ）を追加"), QStringLiteral("Ctrl+N")},
+      {QStringLiteral("編集場所（タブ）を閉じる"), QStringLiteral("Ctrl+W")},
+      {QStringLiteral("前 / 次のタブへ切り替え"), QStringLiteral("Ctrl+PgUp / PgDown")},
+      {QStringLiteral("メディアを追加"), QStringLiteral("Ctrl+I")},
+      {QStringLiteral("AI アシスタントを出す / しまう"), QStringLiteral("Ctrl+Shift+A")},
+      {QStringLiteral("書き出し"), QStringLiteral("Ctrl+E")},
+      {QStringLiteral("新規 / 開く / 保存"), QStringLiteral("Ctrl+N / Ctrl+O / Ctrl+S")},
+  };
+  // AI アシスタントを使えないときは、その操作も載せない
+  if (!aiAvailable_) rows.removeIf([](const QPair<QString, QString>& r) { return r.first.startsWith(QStringLiteral("AI ")); });
+  table->setColumnCount(2);
+  table->setRowCount(int(rows.size()));
+  table->horizontalHeader()->hide();
+  table->verticalHeader()->hide();
+  table->setShowGrid(false);
+  table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  table->setSelectionMode(QAbstractItemView::NoSelection);
+  table->setFocusPolicy(Qt::NoFocus);
+  table->setStyleSheet(QStringLiteral("QTableWidget{background:transparent;border:none}QTableWidget::item{border-bottom:1px solid #2a2a2a;padding:4px}"));
+  for (int i = 0; i < rows.size(); ++i) {
+    table->setItem(i, 0, new QTableWidgetItem(rows[i].first));
+    auto* k = new QTableWidgetItem(rows[i].second);
+    k->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    k->setForeground(theme::muted);
+    table->setItem(i, 1, k);
+  }
+  table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+  table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+  table->setMinimumHeight(int(rows.size()) * 30 + 4);
+  v->addWidget(table);
+  auto* buttons = new QDialogButtonBox(&dlg);
+  buttons->addButton(QStringLiteral("閉じる"), QDialogButtonBox::AcceptRole);
+  connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+  v->addWidget(buttons);
+  dlg.exec();
+}
+
+void MainWindow::offerRestore() {
+  auto file = readAutosave();
+  if (!file) return;
+  QMessageBox box(QMessageBox::Question, QStringLiteral("かんたん動画エディタ"), QStringLiteral("前回の編集内容が残っています。復元しますか？"),
+                  QMessageBox::NoButton, this);
+  QPushButton* restore = box.addButton(QStringLiteral("復元"), QMessageBox::AcceptRole);
+  box.addButton(QStringLiteral("破棄"), QMessageBox::DestructiveRole);
+  box.setDefaultButton(restore);
+  box.exec();
+  if (box.clickedButton() == restore) {
+    media().loadSession(*file);
+  } else {
+    clearAutosave();
+  }
+}
+
+void MainWindow::closeEvent(QCloseEvent* e) {
+  if (exportDialog_ && exportDialog_->isRunning()) {
+    const auto r = QMessageBox::question(this, QStringLiteral("かんたん動画エディタ"), QStringLiteral("書き出し中です。中止して終了しますか？"));
+    if (r != QMessageBox::Yes) {
+      e->ignore();
+      return;
+    }
+  }
+  // 保存していない変更があるタブを順に確認する。途中でキャンセルしたら終了しない
+  Editor& ed = editor();
+  for (int i = 0; i < ed.workspaceCount(); ++i) {
+    if (!confirmSaveWorkspace(i)) {
+      e->ignore();
+      return;
+    }
+  }
+  // 全部のタブについて保存するかどうかを決めたので、前回の編集内容の自動保存は残さない
+  clearAutosave();
+  ed.pause();
+  e->accept();
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
+  if (!e->mimeData()->hasUrls()) return;
+  e->acceptProposedAction();
+  dropOverlay_->setGeometry(rect());
+  dropOverlay_->raise();
+  dropOverlay_->show();
+}
+
+void MainWindow::dragLeaveEvent(QDragLeaveEvent*) {
+  dropOverlay_->hide();
+}
+
+void MainWindow::dropEvent(QDropEvent* e) {
+  dropOverlay_->hide();
+  QStringList paths;
+  for (const QUrl& u : e->mimeData()->urls()) {
+    if (u.isLocalFile()) paths << u.toLocalFile();
+  }
+  if (paths.isEmpty()) return;
+  e->acceptProposedAction();
+  media().importPaths(paths, true);
+}
+
+static bool isTextInput(QObject* o) {
+  return qobject_cast<QLineEdit*>(o) || qobject_cast<QPlainTextEdit*>(o) || qobject_cast<QTextEdit*>(o) || qobject_cast<QAbstractSpinBox*>(o) ||
+         (qobject_cast<QComboBox*>(o) && static_cast<QComboBox*>(o)->isEditable());
+}
+
+/** 数値の部品（SliderRow・NumberSpin、その中の部品）を選んでいるか */
+static bool isNumericFocus(const QWidget* w) {
+  for (; w; w = w->parentWidget()) {
+    if (w->property("kvNumeric").toBool()) return true;
+  }
+  return false;
+}
+
+bool MainWindow::handleKey(QKeyEvent* e) {
+  Editor& ed = editor();
+  const int fps = ed.project().settings.fps;
+  const bool shift = e->modifiers() & Qt::ShiftModifier;
+  if (e->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) return false;
+  switch (e->key()) {
+    case Qt::Key_Space: ed.togglePlay(); return true;
+    case Qt::Key_S: ed.splitAtPlayhead(); return true;
+    case Qt::Key_Delete:
+    case Qt::Key_Backspace:
+      if (!ed.selection()) return false;
+      ed.deleteSelection();
+      return true;
+    case Qt::Key_Left:
+      ed.pause();
+      ed.seek(ed.currentTime() - (shift ? 1.0 : 1.0 / fps));
+      return true;
+    case Qt::Key_Right:
+      ed.pause();
+      ed.seek(ed.currentTime() + (shift ? 1.0 : 1.0 / fps));
+      return true;
+    case Qt::Key_Home: ed.seek(0); return true;
+    case Qt::Key_End: ed.seek(ed.playEnd()); return true;
+    case Qt::Key_T:
+      ed.addText(QStringLiteral("basic"));
+      inspector_->focusText();
+      return true;
+    case Qt::Key_Escape:
+      if (!ed.selection()) return false;
+      ed.select({});
+      return true;
+    case Qt::Key_Question: showShortcuts(); return true;
+    default: return false;
+  }
+}
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
+  if (e->type() == QEvent::KeyPress || e->type() == QEvent::ShortcutOverride) {
+    // このウィンドウの中だけで、文字入力欄以外にフォーカスがあるときに使う
+    QWidget* w = qobject_cast<QWidget*>(obj);
+    if (!w || w->window() != this || QApplication::activeModalWidget() || QApplication::activePopupWidget()) return false;
+    auto* ke = static_cast<QKeyEvent*>(e);
+    // 数値の欄（スライダーの数値・数値入力欄）を選んでいるときは、矢印キー（Shift・Alt つきも）は数値の調整に使う。
+    // タイムラインのコマ送りや、メニューの Alt+↑↓ のショートカットより先に、その欄へ渡す
+    if (isNumericFocus(QApplication::focusWidget())) {
+      const int k = ke->key();
+      if ((k == Qt::Key_Left || k == Qt::Key_Right || k == Qt::Key_Up || k == Qt::Key_Down) && !(ke->modifiers() & (Qt::ControlModifier | Qt::MetaModifier))) {
+        if (e->type() == QEvent::ShortcutOverride) e->accept();
+        return false;
+      }
+    }
+    if (isTextInput(QApplication::focusWidget())) return false;
+    if (e->type() == QEvent::ShortcutOverride) {
+      // 矢印キーなどをスライダーより先に受け取る
+      const int k = ke->key();
+      const bool mine = !(ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier)) &&
+                        (k == Qt::Key_Space || k == Qt::Key_S || k == Qt::Key_T || k == Qt::Key_Left || k == Qt::Key_Right ||
+                         k == Qt::Key_Home || k == Qt::Key_End || k == Qt::Key_Delete || k == Qt::Key_Question);
+      if (mine) e->accept();
+      return false;
+    }
+    if (obj != QApplication::focusWidget() && QApplication::focusWidget()) return false;
+    if (handleKey(ke)) return true;
+  }
+  return QMainWindow::eventFilter(obj, e);
+}
+
+}  // namespace kv
