@@ -56,6 +56,7 @@ set(SOURCES
   src/ui/workspacebar.h src/ui/workspacebar.cpp
   src/ui/keymap.h src/ui/keymap.cpp
   src/ui/shortcutsdialog.h src/ui/shortcutsdialog.cpp
+  src/ui/perspective.h src/ui/perspective.cpp
   src/ai/aiconfig.h src/ai/aiconfig.cpp
   src/ai/bedrock.h src/ai/bedrock.cpp
   src/ai/framegrab.h src/ai/framegrab.cpp

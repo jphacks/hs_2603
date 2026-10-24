@@ -16,7 +16,12 @@ class Inspector : public QScrollArea {
   /** テキストの入力欄にカーソルを移す */
   void focusText();
 
+ protected:
+  /** ほかのタブの裏にいた間・閉じていた間に変わった分（再生位置の音量など）を出し直す */
+  void showEvent(QShowEvent* e) override;
+
  private:
+  void refreshCurrent();
   void onSelection();
   ProjectPanel* project_;
   ClipPanel* clip_;

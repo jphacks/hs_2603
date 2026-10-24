@@ -18,7 +18,7 @@ class PreviewEngine;
 class PreviewPanel;
 class TimelineWidget;
 class Inspector;
-class LibraryPanel;
+class PerspectiveManager;
 class ExportDialog;
 class AiPanel;
 
@@ -89,7 +89,7 @@ class MainWindow : public QMainWindow {
   PreviewPanel* preview_;
   TimelineWidget* timeline_;
   Inspector* inspector_;
-  LibraryPanel* library_;
+  PerspectiveManager* perspective_ = nullptr;
   ExportDialog* exportDialog_ = nullptr;
   QPushButton* exportButton_;
   QLabel* toastIcon_;

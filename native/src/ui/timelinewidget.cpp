@@ -1,8 +1,11 @@
 #include "ui/timelinewidget.h"
 
 #include <QAction>
+#include <QCursor>
 #include <QDragEnterEvent>
 #include <QContextMenuEvent>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QHBoxLayout>
 #include <QMenu>
 #include <QMimeData>
@@ -13,6 +16,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 #include "core/exportplan.h"
 #include "core/textstyles.h"
@@ -65,34 +69,31 @@ TimelineView::TimelineView(QWidget* parent) : QAbstractScrollArea(parent) {
   });
   connect(&ed, &Editor::fitRequested, this, &TimelineView::fitAll);
   // タブを切り替える前の表示位置は編集場所に覚えさせ、切り替えたあとは、そのタブの位置に戻す
-  connect(&ed, &Editor::workspaceAboutToChange, this,
-          [this] { editor().setViewScroll(horizontalScrollBar()->value(), verticalScrollBar()->value()); });
-  // ドラッグ中、端に近づいたら自動でスクロールする
-  autoScroll_ = new QTimer(this);
-  autoScroll_->setInterval(30);
-  connect(autoScroll_, &QTimer::timeout, this, [this] {
-    if (!drop_) {
-      autoScroll_->stop();
-      return;
+  connect(&ed, &Editor::workspaceAboutToChange, this, [this] {
+    editor().setViewScroll(horizontalScrollBar()->value(), verticalScrollBar()->value());
+    if (dragSession_) {
+      editor().endEditSession();  // ドラッグ中に編集場所が変わった: そこまでの変更は残す
+      dragSession_ = false;
     }
-    const double edge = 56;
-    const double left = kHeadW + edge;
-    const double right = viewport()->width() - edge;
-    double dx = 0;
-    if (dropPos_.x() < left) dx = -std::min(26.0, (left - dropPos_.x()) / edge * 24.0 + 2);
-    else if (dropPos_.x() > right) dx = std::min(26.0, (dropPos_.x() - right) / edge * 24.0 + 2);
-    if (dx == 0) return;
-    auto* sb = horizontalScrollBar();
-    const int before = sb->value();
-    sb->setValue(before + int(dx));
-    if (sb->value() != before) updateDrop(dropPos_);  // スクロールで、同じマウス位置の時間が変わる
   });
+  // ドラッグ中、端に近づいたら自動でスクロールする（約 60 回/秒。端に近い間だけ動かす）
+  autoScroll_ = new QTimer(this);
+  autoScroll_->setTimerType(Qt::PreciseTimer);
+  autoScroll_->setInterval(16);
+  connect(autoScroll_, &QTimer::timeout, this, &TimelineView::autoScrollTick);
   connect(&ed, &Editor::workspaceChanged, this, [this] {
     drag_ = Drag::None;
+    dragSession_ = false;
+    libDrag_ = false;
+    dragReach_ = 0;
+    keepEnd_ = 0;
+    audioMemo_.clear();  // 別の編集場所の段の並びは引き継がない
+    laneHoldId_.clear();
+    laneHold_ = -1;
     keySel_ = {};
     dropX_.reset();
     drop_.reset();
-    autoScroll_->stop();
+    stopAutoScroll();
     // 見えていなかったあいだに届いたサムネイルを反映させ、別のタブのぶんの画像は手放す
     thumbCache_.clear();
     relayout();
@@ -112,36 +113,76 @@ static TimelineView::Lanes textLanesOf(const std::vector<TextItem>& texts) {
   return lanes;
 }
 
-static TimelineView::Lanes assignLanesFor(const std::vector<std::pair<QString, std::pair<double, double>>>& items) {
-  std::vector<std::pair<QString, std::pair<double, double>>> sorted = items;
-  std::stable_sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.first < b.second.first; });
-  std::vector<double> laneEnds;
-  TimelineView::Lanes lanes;
-  for (const auto& [id, range] : sorted) {
-    int i = -1;
-    for (size_t k = 0; k < laneEnds.size(); ++k) {
-      if (laneEnds[k] <= range.first + 1e-6) {
-        i = int(k);
-        break;
-      }
+namespace {
+struct LaneSpan {
+  QString id;
+  double start = 0;
+  double end = 0;
+};
+}  // namespace
+
+/**
+ * オーディオの段。段は編集データには無く、時間の重なりから決める（重なるものは別の段に並べる）。
+ * 段がころころ入れ替わらないよう、前回の割り当て（memo）を引き継ぐ:
+ *  - 前回から時間が変わっていないものは、前回の段のまま（ほかの物を動かしても、勝手に段を移らない）
+ *  - ドラッグ中の物（holdId）は、ドラッグを始めたときの段（holdLane）が空いていればそこ、ふさがっていれば空いている一番上の段
+ *  - ほかに時間が変わったもの・新しいものは、始まりの早い順に、空いている一番上の段へ入れる（元に戻すと、元の段に戻る）
+ *  - 何も入っていない段は詰める（上下の順はそのまま）
+ * 前回の割り当てが無いとき（開いた直後など）は、これまでと同じ並べ方（始まりの早い順に、空いている一番上の段）になる
+ */
+static TimelineView::Lanes stableLanes(const std::vector<LaneSpan>& items, const std::map<QString, TimelineView::LaneMemo>& memo,
+                                       const QString& holdId = QString(), int holdLane = -1) {
+  constexpr double kEps = 1e-6;
+  std::vector<std::vector<std::pair<double, double>>> used;  // 段ごとの、入っている時間の範囲
+  auto fits = [&](int lane, double s, double e) {
+    if (lane < 0) return false;
+    if (lane >= int(used.size())) return true;
+    for (const auto& [a, b] : used[size_t(lane)]) {
+      if (s < b - kEps && a < e - kEps) return false;  // 端が接しているだけなら重ならない
     }
-    if (i < 0) {
-      i = int(laneEnds.size());
-      laneEnds.push_back(0);
-    }
-    laneEnds[size_t(i)] = range.second;
-    lanes.lane[id] = i;
+    return true;
+  };
+  std::map<QString, int> lane;
+  auto put = [&](const LaneSpan& it, int l) {
+    if (l >= int(used.size())) used.resize(size_t(l) + 1);
+    used[size_t(l)].push_back({it.start, it.end});
+    lane[it.id] = l;
+  };
+  std::vector<const LaneSpan*> moved;
+  for (const auto& it : items) {
+    const auto m = memo.find(it.id);
+    const bool same = m != memo.end() && it.id != holdId && std::abs(m->second.start - it.start) < kEps && std::abs(m->second.end - it.end) < kEps;
+    if (same && fits(m->second.lane, it.start, it.end)) put(it, m->second.lane);
+    else moved.push_back(&it);
   }
-  lanes.count = std::max(1, int(laneEnds.size()));
-  return lanes;
+  std::stable_sort(moved.begin(), moved.end(), [](const LaneSpan* a, const LaneSpan* b) { return a->start < b->start; });
+  for (const LaneSpan* it : moved) {
+    const int want = !holdId.isEmpty() && it->id == holdId ? holdLane : -1;
+    int l = fits(want, it->start, it->end) ? want : 0;
+    while (!fits(l, it->start, it->end)) ++l;
+    put(*it, l);
+  }
+  std::vector<int> remap(used.size(), 0);
+  int count = 0;
+  for (size_t k = 0; k < used.size(); ++k) {
+    remap[k] = count;
+    if (!used[k].empty()) ++count;
+  }
+  TimelineView::Lanes out;
+  for (const auto& [id, l] : lane) out.lane[id] = remap[size_t(l)];
+  out.count = std::max(1, count);
+  return out;
 }
 
 void TimelineView::relayout() {
   const ProjectData& p = editor().project();
   textLanes_ = textLanesOf(p.texts);
-  std::vector<std::pair<QString, std::pair<double, double>>> a;
-  for (const auto& x : p.audios) a.push_back({x.id, {x.start, x.start + audioDuration(x)}});
-  audioLanes_ = assignLanesFor(a);
+  std::vector<LaneSpan> a;
+  for (const auto& x : p.audios) a.push_back({x.id, x.start, x.start + audioDuration(x)});
+  audioLanes_ = stableLanes(a, audioMemo_, laneHoldId_, laneHold_);
+  // 次に並べ直すときのために、今の段と時間を覚えておく
+  audioMemo_.clear();
+  for (const auto& s : a) audioMemo_[s.id] = {audioLanes_.lane.at(s.id), s.start, s.end};
   updateScrollBars();
 }
 
@@ -170,11 +211,17 @@ double TimelineView::tOf(double x) const {
 }
 
 void TimelineView::updateScrollBars() {
-  const double end = editor().contentEnd();
+  // ドラッグ・ドロップ中の物が、今の終わりより先へ行くときは、そこまでスクロールできるよう範囲を広げる。
+  // ドラッグを終えたときの表示位置も、範囲に残しておく（keepEnd_）
+  const double end = std::max({editor().contentEnd(), dragReach_, keepEnd_});
   const int viewW = viewport()->width() - kHeadW;
   const int contentW = int(std::max<double>(viewW, (end + 6) * pps() + 240));
+  int maxX = std::max(0, contentW - viewW);
+  // ドラッグの途中で中身が短くなっても（いちばん後ろの物を前へ動かした等）、範囲を縮めて今の表示位置を動かすことはしない。
+  // 動かすと、表示もドラッグしている物も勝手に飛んでしまう
+  if (dragActive()) maxX = std::max(maxX, horizontalScrollBar()->value());
   horizontalScrollBar()->setPageStep(std::max(1, viewW));
-  horizontalScrollBar()->setRange(0, std::max(0, contentW - viewW));
+  horizontalScrollBar()->setRange(0, maxX);
   const int contentH = kRulerH + textH() + kVideoH + audioH();
   verticalScrollBar()->setPageStep(viewport()->height());
   verticalScrollBar()->setRange(0, std::max(0, contentH - viewport()->height()));
@@ -186,10 +233,32 @@ void TimelineView::resizeEvent(QResizeEvent* e) {
 }
 
 void TimelineView::scrollContentsBy(int, int) {
+  // ドラッグを終えたあとに広げたままにしていた範囲は、表示が左へ戻ったぶんだけ縮める（今の表示位置は動かさない）
+  if (keepEnd_ > 0 && !dragActive() && !horizontalScrollBar()->isSliderDown()) {
+    const double need = std::max(0.0, viewNeedEnd());
+    if (need < keepEnd_) {
+      keepEnd_ = need;
+      updateScrollBars();
+    }
+  }
   viewport()->update();
 }
 
+double TimelineView::viewNeedEnd() const {
+  const int viewW = viewport()->width() - kHeadW;
+  return (horizontalScrollBar()->value() + viewW - 240 + 1) / pps() - 6;
+}
+
+void TimelineView::rememberView() {
+  keepEnd_ = std::max(keepEnd_, viewNeedEnd());
+}
+
+bool TimelineView::dragActive() const {
+  return drag_ != Drag::None || drop_.has_value() || libDrag_;
+}
+
 void TimelineView::fitAll() {
+  keepEnd_ = 0;
   const double end = editor().contentEnd();
   const double avail = viewport()->width() - kHeadW - 60;
   editor().setPxPerSec(avail / std::max(3.0, end));
@@ -862,7 +931,7 @@ void TimelineView::paintEvent(QPaintEvent*) {
 // 赤い線を x の位置へ動かす。snapOn のときは、押したときに作った吸着先（dragSnap_）と目盛りの数字に吸着させる
 void TimelineView::scrubTo(double x, bool snapOn) {
   Editor& ed = editor();
-  const double t = tOf(x);
+  const double t = tOf(dragX(x));  // 見出しの列の上では、見えている左端の時間（赤い線が見出しの下に隠れない）
   snapMark_ = snapOn ? snap(t, dragSnap_) : std::nullopt;
   ed.seek(snapMark_.value_or(t));
   // 内容の終わりより後ろの数字に吸着して、seek で終わりに止められたときは目印を出さない
@@ -871,12 +940,18 @@ void TimelineView::scrubTo(double x, bool snapOn) {
 
 void TimelineView::mousePressEvent(QMouseEvent* e) {
   if (e->button() != Qt::LeftButton) return;
+  // 前のドラッグで離した合図が届いていなかった: 先にそれを終えてから、新しく始める
+  if (drag_ != Drag::None) finishDrag(dragPos_);
   Editor& ed = editor();
   const QPointF pos = e->position();
+  armAutoScroll(pos.x());
   pressPos_ = pos;
+  dragPos_ = pos;
+  dragMods_ = e->modifiers();
   dragMoved_ = false;
   dragDx_ = 0;
   snapMark_.reset();
+  stopAutoScroll();
   merge_ = QStringLiteral("tl-") + newId();
   // 見出しの列のクリックは無視する。左上の角（目盛りの行）だけは、目盛りと同じく再生位置を動かす
   if (pos.x() < kHeadW && pos.y() >= kRulerH) return;
@@ -919,6 +994,9 @@ void TimelineView::mousePressEvent(QMouseEvent* e) {
   } else {
     origAudio_ = *ed.audio(h.id);
     drag_ = h.handle != 0 ? Drag::ItemTrim : Drag::ItemMove;
+    // ドラッグのあいだ、このオーディオは元の段にとどめる（ほかの物と重なる間だけ、空いている段へ移る）。ほかのオーディオの段は変えない
+    laneHoldId_ = h.id;
+    laneHold_ = audioLanes_.lane.count(h.id) ? audioLanes_.lane.at(h.id) : 0;
   }
 }
 
@@ -930,34 +1008,71 @@ void TimelineView::mouseMoveEvent(QMouseEvent* e) {
     viewport()->setCursor(keyHitTest(pos).index >= 0 ? Qt::SizeAllCursor : h.handle != 0 ? Qt::SizeHorCursor : Qt::ArrowCursor);
     return;
   }
-  Editor& ed = editor();
-  if (drag_ == Drag::KeyMove) {
-    // 掴んだ点だけを動かす。上下 = 音量（0〜100%）、左右 = 音量が変わる時間。少し動くまでは何もしない（クリックで選ぶだけ）
-    if (!dragMoved_ && std::hypot(pos.x() - pressPos_.x(), pos.y() - pressPos_.y()) < 3) return;
-    dragMoved_ = true;
-    const AudioItem* cur = ed.audio(dragId_);
-    if (!cur) return;
-    const QRectF r = audioRect(*cur);
-    const double volume = std::round(yToVolume(r, pos.y()) * 100) / 100;  // 1% 刻み（表示も整数の %）
-    ed.moveVolumePoint(dragId_, dragKey_, tOf(pos.x()) - cur->start, volume, merge_);
-    viewport()->update();
+  // ボタンを離した合図を受け取りそこねていた（ドラッグ中にほかの画面が前に出た等）: 最後の位置でドラッグを終える
+  if (!(e->buttons() & Qt::LeftButton)) {
+    finishDrag(dragPos_);
     return;
   }
-  const double dx = pos.x() - pressPos_.x();
-  const double dt = dx / pps();
-  const int threshold = drag_ == Drag::ClipMove ? 6 : drag_ == Drag::ItemMove ? 4 : 0;
-  if (!dragMoved_ && std::abs(dx) < threshold) return;
+  // 見出しの列の上や、タイムラインの外（ウィンドウの外も）へ出ても、ボタンを押している間は、このビューにマウスの動きが届く
+  // （押したときに Qt が自動でマウスをつかみ、離すまで放さない）。位置はこのビューの座標で、外なら負や幅より大きい値になる
+  dragPos_ = pos;
+  dragMods_ = e->modifiers();
+  updateArming(pos.x());
+  dragStep();
+  // 端に近づいたら、自動スクロールを始める。マウスを止めても、端にいる間は続く（離れる・ドラッグが終わると止まる）
+  QPointF src;
+  if (autoScrollSource(&src) && autoScrollTarget(pos.x()) != 0) startAutoScroll();
+}
+
+void TimelineView::dragStep() {
+  if (drag_ == Drag::KeyMove) keyMoveTo(dragPos_);
+  else dragTo(dragPos_, dragMods_);
+}
+
+void TimelineView::keyMoveTo(QPointF pos) {
+  Editor& ed = editor();
+  // 掴んだ点だけを動かす。上下 = 音量（0〜100%）、左右 = 音量が変わる時間。少し動くまでは何もしない（クリックで選ぶだけ）
+  if (!dragMoved_ && std::hypot(pos.x() - pressPos_.x(), pos.y() - pressPos_.y()) < 3) return;
+  if (!dragMoved_ && !ed.editSessionActive()) {
+    ed.beginEditSession();  // Esc でやめたときに、元に戻せるようにする
+    dragSession_ = true;
+  }
   dragMoved_ = true;
+  const AudioItem* cur = ed.audio(dragId_);
+  if (!cur) return;
+  const QRectF r = audioRect(*cur);
+  const double volume = std::round(yToVolume(r, pos.y()) * 100) / 100;  // 1% 刻み（表示も整数の %）
+  ed.moveVolumePoint(dragId_, dragKey_, tOf(dragX(pos.x())) - cur->start, volume, merge_);
+  viewport()->update();
+}
+
+void TimelineView::dragTo(QPointF pos, Qt::KeyboardModifiers mods) {
+  Editor& ed = editor();
+  // マウスの位置の時間 − 押したときの位置の時間。ピクセルではなく時間で測るので、スクロールやズームで表示が動いても、
+  // ドラッグしているものがカーソルからずれない。見出しの列の上やタイムラインの外では、見えている端の位置にとどめる
+  const double x = dragX(pos.x());
+  const double dt = tOf(x) - pressTime_;
+  const double dx = dt * pps();
+  // 動かし始めの判定は、マウスが実際に動いた量で見る（端の近くで押して外へ出たときも、ちゃんと動かし始める）
+  const int threshold = drag_ == Drag::ClipMove ? 6 : drag_ == Drag::ItemMove ? 4 : 0;
+  if (!dragMoved_ && std::abs(pos.x() - pressPos_.x()) < threshold) return;
+  const bool first = !dragMoved_;
+  dragMoved_ = true;
+  // 動かしながら編集データを変えるドラッグは、Esc でやめたときに元に戻せるよう、始めの状態を覚える
+  if (first && (drag_ == Drag::ClipTrim || drag_ == Drag::ItemMove || drag_ == Drag::ItemTrim) && !ed.editSessionActive()) {
+    ed.beginEditSession();
+    dragSession_ = true;
+  }
   const int fps = ed.project().settings.fps;
   // Alt を押している間は、どの吸着も効かない
-  const bool snapOn = !(e->modifiers() & Qt::AltModifier);
+  const bool snapOn = !(mods & Qt::AltModifier);
   switch (drag_) {
     case Drag::Scrub:
-      scrubTo(pos.x(), snapOn);
+      scrubTo(x, snapOn);
       break;
     case Drag::ClipMove:
       dragDx_ = dx;
-      dragIndex_ = insertionIndex(pos.x(), dragId_);
+      dragIndex_ = insertionIndex(x, dragId_);
       viewport()->update();
       break;
     case Drag::ClipTrim: {
@@ -1073,9 +1188,17 @@ void TimelineView::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void TimelineView::mouseReleaseEvent(QMouseEvent* e) {
+  if (e->button() != Qt::LeftButton) return;  // ドラッグは左ボタンで始めるので、左ボタンを離したときに終える
+  finishDrag(e->position());
+}
+
+void TimelineView::finishDrag(QPointF pos) {
   Editor& ed = editor();
+  stopAutoScroll();  // ドラッグが終わったら、自動スクロールは確実に止める
+  if (drag_ != Drag::None) rememberView();  // このあと中身が短くなっても、今の表示位置は動かさない
   if (drag_ == Drag::ClipMove) {
-    if (dragMoved_) ed.moveClip(dragId_, insertionIndex(e->position().x(), dragId_));
+    // スクロールしていても、いまの表示でマウスがある位置（そこの時間）に置く。見出しの列の上などで離したときは、見えている端の位置
+    if (dragMoved_) ed.moveClip(dragId_, insertionIndex(dragX(pos.x()), dragId_));
     else ed.seek(pressTime_);
   } else if (drag_ == Drag::ItemMove && !dragMoved_) {
     ed.seek(pressTime_);
@@ -1083,12 +1206,202 @@ void TimelineView::mouseReleaseEvent(QMouseEvent* e) {
   drag_ = Drag::None;
   dragMoved_ = false;
   dragDx_ = 0;
+  dragIndex_ = -1;
   snapMark_.reset();
+  if (dragSession_) {
+    dragSession_ = false;
+    ed.endEditSession();
+  }
   ed.endMerge();
+  laneHoldId_.clear();
+  laneHold_ = -1;
+  updateScrollBars();
+  viewport()->update();
+}
+
+bool TimelineView::isDragging() const {
+  return drag_ == Drag::ClipMove || drag_ == Drag::ClipTrim || drag_ == Drag::ItemMove || drag_ == Drag::ItemTrim || drag_ == Drag::KeyMove;
+}
+
+bool TimelineView::cancelDrag() {
+  if (!isDragging()) return false;
+  Editor& ed = editor();
+  stopAutoScroll();
+  rememberView();  // 元に戻して中身が短くなっても、今の表示位置は動かさない
+  drag_ = Drag::None;
+  dragMoved_ = false;
+  dragDx_ = 0;
+  dragIndex_ = -1;
+  snapMark_.reset();
+  // 動かしながら変えていた分は、始める前の状態に戻す（元に戻す履歴には何も残さない）。
+  // オーディオは、ドラッグを始めたときの段に戻す（laneHoldId_ を消すのは、戻したあと）
+  if (dragSession_) {
+    dragSession_ = false;
+    ed.cancelEditSession();
+  }
+  ed.endMerge();
+  laneHoldId_.clear();
+  laneHold_ = -1;
+  updateScrollBars();
+  viewport()->update();
+  return true;
+}
+
+// ---- ドラッグ中の自動スクロール -----------------------------------------------------------------
+
+namespace {
+constexpr double kAutoEdge = 50;  // 表示領域の端からこの距離（px）以内に入ったら、スクロールを始める
+
+/** 端からの距離 d（px。端の外は負）→ スクロールの速さ（px/秒）。50px で低速、30px で中速、15px で高速、端で最高速。間は直線でつなぐ */
+double edgeSpeed(double d) {
+  struct P {
+    double d;
+    double v;
+  };
+  static constexpr P pts[] = {{kAutoEdge, 60}, {30, 280}, {15, 700}, {0, 1200}, {-80, 1600}};
+  if (d >= kAutoEdge) return 0;
+  for (size_t i = 0; i + 1 < std::size(pts); ++i) {
+    if (d >= pts[i + 1].d) {
+      const double t = (pts[i].d - d) / (pts[i].d - pts[i + 1].d);
+      return pts[i].v + (pts[i + 1].v - pts[i].v) * t;
+    }
+  }
+  return pts[std::size(pts) - 1].v;  // 領域の外へ大きく出ても、速さはここまで
+}
+}  // namespace
+
+QPair<double, double> TimelineView::autoScrollEdges() const {
+  double left = kHeadW;  // 時間の目盛りが始まる位置（左の見出しの列の右）
+  double right = viewport()->width();
+  // ウィンドウが画面からはみ出していて、表示領域の端がどの画面にも入っていないときは、カーソルがいる画面の端を端とみなす
+  // （そうしないと、カーソルが表示領域の端の近くまで行けず、自動スクロールが始まらない）
+  const QScreen* here = QGuiApplication::screenAt(QCursor::pos());
+  if (here) {
+    const QRect g = here->geometry();
+    const int y = viewport()->height() / 2;
+    if (!QGuiApplication::screenAt(viewport()->mapToGlobal(QPoint(std::max(0, viewport()->width() - 1), y)))) {
+      right = std::min(right, double(viewport()->mapFromGlobal(QPoint(g.right() + 1, g.top() + y)).x()));
+    }
+    if (!QGuiApplication::screenAt(viewport()->mapToGlobal(QPoint(0, y)))) {
+      left = std::max(left, double(viewport()->mapFromGlobal(QPoint(g.left(), g.top() + y)).x()));
+    }
+  }
+  return {left, right};
+}
+
+double TimelineView::autoScrollTarget(double x) const {
+  const auto [left, right] = autoScrollEdges();
+  // 左端の 50px より左（見出しの列の上・タイムラインの外も）は左へ、右端の 50px より右（外も）は右へ。端より外は最高速
+  if (x < left + kAutoEdge) return armedLeft_ ? -edgeSpeed(x - left) : 0;
+  if (x > right - kAutoEdge) return armedRight_ ? edgeSpeed(right - x) : 0;
+  return 0;
+}
+
+double TimelineView::dragX(double x) const {
+  const auto [left, right] = autoScrollEdges();
+  return std::clamp(x, left, std::max(left, right));
+}
+
+namespace {
+constexpr double kArmMove = 8;  // 端の近くで始めたドラッグは、その端の方へこれだけ動かすと、自動スクロールが効くようになる
+}
+
+void TimelineView::armAutoScroll(double x) {
+  const auto [left, right] = autoScrollEdges();
+  armRefX_ = x;
+  armedLeft_ = x >= left + kAutoEdge;
+  armedRight_ = x <= right - kAutoEdge;
+}
+
+void TimelineView::updateArming(double x) {
+  const auto [left, right] = autoScrollEdges();
+  if (!armedLeft_ && (x >= left + kAutoEdge || x <= armRefX_ - kArmMove)) armedLeft_ = true;
+  if (!armedRight_ && (x <= right - kAutoEdge || x >= armRefX_ + kArmMove)) armedRight_ = true;
+}
+
+bool TimelineView::autoScrollSource(QPointF* pos, bool* dragging) const {
+  if (dragging) *dragging = false;
+  // 動かしている最中のもの。再生位置の赤い線（や、空いたところ・目盛りのドラッグ）も、音量キーフレームの点も含める
+  const bool dragKind = drag_ == Drag::ClipMove || drag_ == Drag::ClipTrim || drag_ == Drag::ItemMove || drag_ == Drag::ItemTrim ||
+                        drag_ == Drag::Scrub || drag_ == Drag::KeyMove;
+  if (dragMoved_ && dragKind) {
+    *pos = dragPos_;
+    if (dragging) *dragging = true;
+    return true;
+  }
+  if (drop_ || libDrag_) {
+    *pos = dropPos_;
+    return true;
+  }
+  return false;
+}
+
+void TimelineView::startAutoScroll() {
+  if (autoScroll_->isActive()) return;
+  autoClock_.start();
+  autoScroll_->start();
+}
+
+void TimelineView::stopAutoScroll() {
+  if (autoScroll_) autoScroll_->stop();
+  scrollVel_ = 0;
+  scrollRemainder_ = 0;
+}
+
+void TimelineView::autoScrollTick() {
+  QPointF pos;
+  bool dragging = false;
+  if (!autoScrollSource(&pos, &dragging)) {
+    stopAutoScroll();
+    return;
+  }
+  // ボタンはもう離されていた（ドラッグ中にダイアログが出て、そちらで離した等。このビューには離した合図が来ない）: そこで終える
+  if (dragging && !(QGuiApplication::mouseButtons() & Qt::LeftButton)) {
+    finishDrag(dragPos_);
+    return;
+  }
+  // 実際に経った時間で動かすので、描画が遅れても速さは変わらない
+  const double dt = std::clamp(autoClock_.restart() / 1000.0, 0.001, 0.05);
+  const double target = autoScrollTarget(pos.x());
+  // 目標の速さへなめらかに近づける（速くするときはゆっくり、遅くする・向きを変えるときは素早く）
+  const bool speedingUp = std::abs(target) > std::abs(scrollVel_) && target * scrollVel_ >= 0;
+  const double tau = speedingUp ? 0.10 : 0.05;
+  scrollVel_ += (target - scrollVel_) * (1 - std::exp(-dt / tau));
+  if (target == 0 && std::abs(scrollVel_) < 10) {
+    stopAutoScroll();  // 端から離れた: 止める
+    return;
+  }
+  scrollRemainder_ += scrollVel_ * dt;
+  const int step = int(scrollRemainder_);  // スクロールバーは整数。端数は次へ持ち越す
+  if (step == 0) return;
+  scrollRemainder_ -= step;
+  auto* sb = horizontalScrollBar();
+  const int before = sb->value();
+  sb->setValue(before + step);
+  if (sb->value() == before) {  // スクロールできる端まで来た
+    scrollVel_ = 0;
+    scrollRemainder_ = 0;
+    return;
+  }
+  // スクロールで、同じマウス位置の時間が変わった: ドラッグしているものを、カーソルに追従させ直す
+  if (dragging) dragStep();
+  else if (drop_) updateDrop(dropPos_);
+  else refreshLibraryDrop(dropPos_);
+}
+
+void TimelineView::refreshLibraryDrop(QPointF pos) {
+  dropPos_ = pos;
+  updateArming(pos.x());
+  const Row row = rowAt(pos.y());
+  audioDropHover_ = row == Row::Audio;
+  // 見出しの列の上では、見えている左端の位置に入れる
+  if (row == Row::Video) dropX_ = indicatorX(insertionIndex(dragX(pos.x()), QString()), QString());
+  else dropX_.reset();
   viewport()->update();
 }
 
 void TimelineView::contextMenuEvent(QContextMenuEvent* e) {
+  if (drag_ != Drag::None) return;  // ドラッグの途中（左ボタンを押したまま右クリック）では出さない
   const QPointF pos = e->pos();
   const KeyHit kh = keyHitTest(pos);
   if (kh.index < 0) return;
@@ -1163,12 +1476,13 @@ std::vector<QString> TimelineView::audioAssetsOf(const QMimeData* m) {
 void TimelineView::updateDrop(QPointF pos) {
   if (!drop_) return;
   dropPos_ = pos;
+  updateArming(pos.x());
   const Editor& ed = editor();
   DropGhost& g = *drop_;
-  // 左の見出しの上には置けない（時間が 0 より前になる）
-  g.valid = pos.x() >= kHeadW;
+  // 左の見出しの列の上では、見えている左端の時間に置く（自動スクロールで左へ戻していく途中でも、そのまま落とせる）
+  g.valid = true;
   // ズームとスクロールを含めて、マウスの位置を時間にする。フレームにそろえる
-  const double start = frameRound(std::max(0.0, tOf(std::max<double>(pos.x(), kHeadW))), ed.project().settings.fps);
+  const double start = frameRound(std::max(0.0, tOf(dragX(pos.x()))), ed.project().settings.fps);
   g.items.clear();
   if (g.type == Selection::Text) {
     GhostItem it;
@@ -1182,27 +1496,35 @@ void TimelineView::updateDrop(QPointF pos) {
     g.items.push_back(it);
   } else {
     // 追加したあとと同じ並べ方: 最初の素材を落とした位置に置き、次の素材はその終わりに続ける
-    std::vector<std::pair<QString, std::pair<double, double>>> all;
-    for (const auto& x : ed.project().audios) all.push_back({x.id, {x.start, x.start + audioDuration(x)}});
+    std::vector<LaneSpan> all;
+    for (const auto& x : ed.project().audios) all.push_back({x.id, x.start, x.start + audioDuration(x)});
     double t = start;
     for (size_t i = 0; i < g.audioDurations.size(); ++i) {
       GhostItem it;
       it.start = t;
       it.duration = g.audioDurations[i];
       it.label = g.audioNames[i];
-      all.push_back({QStringLiteral("__ghost-%1").arg(i), {t, t + it.duration}});
+      all.push_back({QStringLiteral("__ghost-%1").arg(i), t, t + it.duration});
       g.items.push_back(it);
       t += it.duration;
     }
-    audioLanes_ = assignLanesFor(all);  // 既存のオーディオが別の段に動くことはない（追加後も同じ計算）
+    // 今あるオーディオの段はそのまま。追加予定のものは、追加したあとと同じく空いている段へ入れる
+    audioLanes_ = stableLanes(all, audioMemo_);
     for (size_t i = 0; i < g.items.size(); ++i) g.items[i].lane = audioLanes_.lane.at(QStringLiteral("__ghost-%1").arg(i));
   }
+  // 追加予定の終わりまでスクロールできるように、範囲を広げる（まだ追加していないので、編集データの終わりには入っていない）
+  dragReach_ = 0;
+  for (const GhostItem& it : g.items) dragReach_ = std::max(dragReach_, it.start + it.duration);
   updateScrollBars();
   viewport()->update();
+  // 端に近づいたら、自動でスクロールを始める
+  if (autoScrollTarget(pos.x()) != 0) startAutoScroll();
 }
 
 void TimelineView::endDrop() {
-  autoScroll_->stop();
+  stopAutoScroll();
+  if (drop_ || dragReach_ > 0) rememberView();  // 追加予定のぶん広げていた範囲を戻しても、今の表示位置は動かさない
+  dragReach_ = 0;
   if (!drop_) return;
   drop_.reset();
   relayout();  // 段の数を本来の状態に戻す
@@ -1304,10 +1626,11 @@ void TimelineView::beginDrop(Selection::Type type, const std::vector<QString>& a
     g.audioNames.push_back(a ? a->name : QString());
   }
   drop_ = g;
-  if (!autoScroll_->isActive()) autoScroll_->start();
 }
 
 void TimelineView::dragEnterEvent(QDragEnterEvent* e) {
+  // 入ってきた位置が端の近く（見出しの列の上など）でも、通りかかっただけではスクロールしない
+  armAutoScroll(e->position().x());
   if (isTextPresetDrag(e->mimeData())) {
     beginDrop(Selection::Text, {});
     updateDrop(e->position());
@@ -1322,8 +1645,13 @@ void TimelineView::dragEnterEvent(QDragEnterEvent* e) {
     else e->ignore();
     return;
   }
-  if (e->mimeData()->hasFormat(QString::fromLatin1(kAssetMime))) e->acceptProposedAction();
-  else e->ignore();
+  if (e->mimeData()->hasFormat(QString::fromLatin1(kAssetMime))) {
+    libDrag_ = true;  // 動画・写真などを素材一覧からドラッグしてきた
+    dropPos_ = e->position();
+    e->acceptProposedAction();
+  } else {
+    e->ignore();
+  }
 }
 
 void TimelineView::dragMoveEvent(QDragMoveEvent* e) {
@@ -1338,16 +1666,16 @@ void TimelineView::dragMoveEvent(QDragMoveEvent* e) {
     e->ignore();
     return;
   }
-  const Row row = rowAt(e->position().y());
-  audioDropHover_ = row == Row::Audio;
-  if (row == Row::Video) dropX_ = indicatorX(insertionIndex(e->position().x(), QString()), QString());
-  else dropX_.reset();
+  libDrag_ = true;
+  refreshLibraryDrop(e->position());
   e->acceptProposedAction();
-  viewport()->update();
+  // 端に近づいたら、自動でスクロールを始める（マウスを止めても、端にいる間は続く）
+  if (autoScrollTarget(e->position().x()) != 0) startAutoScroll();
 }
 
 void TimelineView::dragLeaveEvent(QDragLeaveEvent*) {
   // タイムラインの外へ出た・Esc で中止した: 追加予定の表示を消すだけで、何も追加しない
+  libDrag_ = false;
   endDrop();
   dropX_.reset();
   audioDropHover_ = false;
@@ -1355,6 +1683,8 @@ void TimelineView::dragLeaveEvent(QDragLeaveEvent*) {
 }
 
 void TimelineView::dropEvent(QDropEvent* e) {
+  libDrag_ = false;
+  stopAutoScroll();  // 落としたら、自動スクロールは止める
   if (isTextPresetDrag(e->mimeData())) {
     dropTextPreset(e);
     return;
@@ -1371,8 +1701,9 @@ void TimelineView::dropEvent(QDropEvent* e) {
   std::vector<QString> ids;
   for (const auto& s : QString::fromUtf8(data).split(QLatin1Char('\n'), Qt::SkipEmptyParts)) ids.push_back(s);
   const Row row = rowAt(e->position().y());
-  const double t = std::max(0.0, tOf(e->position().x()));
-  if (row == Row::Video) editor().addToTimeline(ids, insertionIndex(e->position().x(), QString()), t);
+  const double x = dragX(e->position().x());  // 見出しの列の上で落としたときは、見えている左端の位置
+  const double t = std::max(0.0, tOf(x));
+  if (row == Row::Video) editor().addToTimeline(ids, insertionIndex(x, QString()), t);
   else editor().addToTimeline(ids, std::nullopt, t);
   e->acceptProposedAction();
 }

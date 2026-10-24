@@ -612,7 +612,7 @@ void PreviewStage::beginTextEdit(const QString& id, int caret) {
   if (isEditingText()) endTextEdit(true);
   ed.pause();
   if (!(ed.selection().type == Selection::Text && ed.selection().id == id)) ed.select({Selection::Text, id});
-  ed.beginTextEdit();
+  ed.beginEditSession();
   editId_ = id;
   editMerge_ = QStringLiteral("pvtext-") + id;
   editOriginal_ = t->text;
@@ -656,9 +656,9 @@ void PreviewStage::endTextEdit(bool commit) {
   setAttribute(Qt::WA_InputMethodEnabled, false);
   QGuiApplication::inputMethod()->update(Qt::ImEnabled);
   engine_->setTextOverride(QString(), QString());
-  if (!t) ed.endTextEdit();                         // 文字が無くなっていたら、戻すものは無い
-  else if (commit && changed) ed.endTextEdit();     // 確定: 始めてからの変更が、1 つの編集操作として残る
-  else ed.cancelTextEdit();                         // キャンセル（または、元の内容に戻っていた）: 履歴に残さない
+  if (!t) ed.endEditSession();                      // 文字が無くなっていたら、戻すものは無い
+  else if (commit && changed) ed.endEditSession();  // 確定: 始めてからの変更が、1 つの編集操作として残る
+  else ed.cancelEditSession();                      // キャンセル（または、元の内容に戻っていた）: 履歴に残さない
   unsetCursor();
   engine_->refreshNow();
   update();

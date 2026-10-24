@@ -8,6 +8,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -807,13 +808,7 @@ Inspector::Inspector(QWidget* parent) : QScrollArea(parent) {
   setWidget(container);
   Editor& ed = editor();
   connect(&ed, &Editor::selectionChanged, this, &Inspector::onSelection);
-  connect(&ed, &Editor::projectChanged, this, [this] {
-    const Selection& s = editor().selection();
-    if (s.type == Selection::Clip) clip_->refresh();
-    else if (s.type == Selection::Text) text_->refresh();
-    else if (s.type == Selection::Audio) audio_->refresh();
-    else project_->refresh();
-  });
+  connect(&ed, &Editor::projectChanged, this, &Inspector::refreshCurrent);
   connect(&ed, &Editor::assetsChanged, this, [this] {
     if (clip_->isVisible()) clip_->refresh();
     if (audio_->isVisible()) audio_->refresh();
@@ -840,6 +835,20 @@ void Inspector::onSelection() {
     project_->refresh();
   }
   verticalScrollBar()->setValue(0);
+}
+
+void Inspector::refreshCurrent() {
+  const Selection& s = editor().selection();
+  if (s.type == Selection::Clip) clip_->refresh();
+  else if (s.type == Selection::Text) text_->refresh();
+  else if (s.type == Selection::Audio) audio_->refresh();
+  else project_->refresh();
+}
+
+void Inspector::showEvent(QShowEvent* e) {
+  QScrollArea::showEvent(e);
+  // 隠れている間は、再生位置が変わっても出し直していない（isVisible() で省いている）ので、出たときに合わせる
+  if (!e->spontaneous()) refreshCurrent();
 }
 
 void Inspector::focusText() {

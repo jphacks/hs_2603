@@ -12,8 +12,6 @@
 #include <QScrollArea>
 #include <QStandardPaths>
 #include <QStyledItemDelegate>
-#include <QTabBar>
-#include <QTabWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -349,69 +347,42 @@ void AssetList::paintEvent(QPaintEvent* e) {
 
 // ---- LibraryPanel -----------------------------------------------------------
 
-namespace {
-/** 3 つのタブを同じ幅にする */
-class EvenTabBar : public QTabBar {
- public:
-  using QTabBar::QTabBar;
+// 欄の幅をこれより狭くしない（メディアのカードが 1 列は入る幅）
+static constexpr int kViewMinWidth = 220;
 
- protected:
-  QSize tabSizeHint(int index) const override {
-    QSize s = QTabBar::tabSizeHint(index);
-    if (count() > 0) s.setWidth(width() / count());
-    return s;
-  }
-  void resizeEvent(QResizeEvent* e) override {
-    QTabBar::resizeEvent(e);
-    // 幅が変わったら、タブの並びを引き直す
-    if (count() > 0) setTabText(0, tabText(0));
-  }
-};
-
-class LibraryTabs : public QTabWidget {
- public:
-  explicit LibraryTabs(QWidget* parent) : QTabWidget(parent) { setTabBar(new EvenTabBar(this)); }
-};
-}  // namespace
-
-LibraryPanel::LibraryPanel(QWidget* parent) : QWidget(parent) {
-  setAutoFillBackground(true);
-  auto* v = new QVBoxLayout(this);
-  v->setContentsMargins(0, 0, 0, 0);
-  auto* tabs = new LibraryTabs(this);
-  tabs->setDocumentMode(true);
-  tabs->tabBar()->setExpanding(true);
-  v->addWidget(tabs);
-
-  // メディア（動画・写真）
-  auto* mediaPage = new QWidget(tabs);
+QWidget* LibraryPanel::createMediaView(QWidget* parent) {
+  auto* mediaPage = new QWidget(parent);
+  mediaPage->setMinimumWidth(kViewMinWidth);
   auto* mv = new QVBoxLayout(mediaPage);
   mv->setContentsMargins(10, 10, 6, 0);
   mv->setSpacing(10);
   auto* addBtn = new QPushButton(theme::icon(QStringLiteral("plus")), QStringLiteral("メディアを追加"), mediaPage);
   addBtn->setFocusPolicy(Qt::TabFocus);
-  connect(addBtn, &QPushButton::clicked, this, [this] { pickAndImport(this); });
+  QObject::connect(addBtn, &QPushButton::clicked, mediaPage, [mediaPage] { pickAndImport(mediaPage); });
   mv->addWidget(addBtn);
-  list_ = new AssetList(AssetList::Kind::Media, mediaPage);
-  mv->addWidget(list_, 1);
-  tabs->addTab(mediaPage, QStringLiteral("メディア"));
+  mv->addWidget(new AssetList(AssetList::Kind::Media, mediaPage), 1);
+  return mediaPage;
+}
 
-  // オーディオ（BGM・効果音・ナレーションなど）。メディアと同じ構成で、一覧に登録して何度でも使える
-  auto* audioPage = new QWidget(tabs);
+QWidget* LibraryPanel::createAudioView(QWidget* parent) {
+  // メディアと同じ構成で、一覧に登録して何度でも使える
+  auto* audioPage = new QWidget(parent);
+  audioPage->setMinimumWidth(kViewMinWidth);
   auto* av = new QVBoxLayout(audioPage);
   av->setContentsMargins(10, 10, 6, 0);
   av->setSpacing(10);
   auto* addAudio = new QPushButton(theme::icon(QStringLiteral("plus")), QStringLiteral("オーディオを追加"), audioPage);
   addAudio->setFocusPolicy(Qt::TabFocus);
   // 一覧に登録するだけ（タイムラインには置かない）。置くのは、一覧からドラッグするか、ダブルクリック
-  connect(addAudio, &QPushButton::clicked, this, [this] { pickAndImport(this, true, false); });
+  QObject::connect(addAudio, &QPushButton::clicked, audioPage, [audioPage] { pickAndImport(audioPage, true, false); });
   av->addWidget(addAudio);
-  audioList_ = new AssetList(AssetList::Kind::Audio, audioPage);
-  av->addWidget(audioList_, 1);
-  tabs->addTab(audioPage, QStringLiteral("オーディオ"));
+  av->addWidget(new AssetList(AssetList::Kind::Audio, audioPage), 1);
+  return audioPage;
+}
 
-  // テキスト
-  auto* scroll = new QScrollArea(tabs);
+QWidget* LibraryPanel::createTextView(QWidget* parent) {
+  auto* scroll = new QScrollArea(parent);
+  scroll->setMinimumWidth(kViewMinWidth);
   scroll->setWidgetResizable(true);
   scroll->setFrameShape(QFrame::NoFrame);
   auto* textPage = new QWidget(scroll);
@@ -430,7 +401,7 @@ LibraryPanel::LibraryPanel(QWidget* parent) : QWidget(parent) {
     b->setStyleSheet(b->styleSheet() + QStringLiteral("QToolButton:checked{border-color:#2680eb;color:#ffffff}"));
     makeTextPresetDraggable(b, preset);
     const QString label = preset.label;
-    connect(b, &QToolButton::clicked, this, [label] {
+    QObject::connect(b, &QToolButton::clicked, b, [label] {
       editor().toast(QStringLiteral("「%1」をタイムラインへドラッグすると、好きな位置に追加できます").arg(label));
     });
     grid->addWidget(b, i / 2, i % 2);
@@ -438,7 +409,7 @@ LibraryPanel::LibraryPanel(QWidget* parent) : QWidget(parent) {
   }
   grid->setRowStretch(i / 2 + 1, 1);
   scroll->setWidget(textPage);
-  tabs->addTab(scroll, QStringLiteral("テキスト"));
+  return scroll;
 }
 
 }  // namespace kv

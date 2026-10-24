@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QAbstractScrollArea>
+#include <QElapsedTimer>
+#include <QPair>
 #include <QPixmap>
 #include <QSlider>
 #include <QTimer>
@@ -25,9 +27,20 @@ class TimelineView : public QAbstractScrollArea {
     std::map<QString, int> lane;
     int count = 1;
   };
+  /** 前回のオーディオの段の割り当て（段と、そのときの時間）。並べ直すときに、動いていない物の段を変えないために使う */
+  struct LaneMemo {
+    int lane = 0;
+    double start = 0;
+    double end = 0;
+  };
 
   explicit TimelineView(QWidget* parent = nullptr);
   void fitAll();
+
+  /** クリップ・テキスト・オーディオ（や音量キーフレーム）をドラッグして動かしている最中か（再生位置の赤い線のドラッグは含めない） */
+  bool isDragging() const;
+  /** その最中のドラッグをやめて、元の位置・長さに戻す（履歴には残さない）。ドラッグ中でなければ false */
+  bool cancelDrag();
 
  signals:
   void requestTextFocus();
@@ -81,6 +94,46 @@ class TimelineView : public QAbstractScrollArea {
   void zoomAt(double factor, double mouseX);
   void scrubTo(double x, bool snapOn);
 
+  /** マウスの位置に合わせて、ドラッグの途中経過を反映する（押した位置の時間からの差で動かす） */
+  void dragTo(QPointF pos, Qt::KeyboardModifiers mods);
+  /** 音量キーフレームの点を、マウスの位置へ動かす */
+  void keyMoveTo(QPointF pos);
+  /** 最後のマウスの位置で、今のドラッグの途中経過を引き直す（自動スクロールのたびに呼ぶ） */
+  void dragStep();
+  /** ドラッグを終える（離した位置 pos で確定する）。離した合図を受け取りそこねたときも、これで終える */
+  void finishDrag(QPointF pos);
+  /**
+   * ドラッグで使うマウスの横位置。見出しの列の上やタイムラインの外にあるときは、見えている編集領域の端にとどめる
+   * （ドラッグしている物が見出しの下に隠れたり、表示の外へ飛んだりしない。離したときも、見えている端の時間に置く）
+   */
+  double dragX(double x) const;
+  /** ドラッグ（タイムラインの中の物、または外から持ってきた物）の途中か */
+  bool dragActive() const;
+  /** 今の表示位置がスクロール範囲の右端になる、内容の終わりの時間（updateScrollBars の計算の逆） */
+  double viewNeedEnd() const;
+  /** ドラッグを終える前に呼ぶ: 中身が短くなっても、今の表示位置をスクロール範囲に残す（終えた瞬間に表示が飛ばない） */
+  void rememberView();
+
+  // ドラッグ中の自動スクロール: マウスが表示領域の左右の端に近づいたら、近いほど速く横へスクロールする。
+  // マウスを止めていても、端にいる間は続ける。スクロールで同じマウス位置の時間が変わるので、そのたびにドラッグの結果を引き直す
+  /** 自動スクロールの左端・右端（表示領域の座標）。ウィンドウが画面からはみ出していれば、画面の端 */
+  QPair<double, double> autoScrollEdges() const;
+  /** 端からの距離に応じた、スクロールの目標の速さ（px/秒。左へは負、右へは正。端から遠いときは 0） */
+  double autoScrollTarget(double x) const;
+  /** 自動スクロールが必要なドラッグ・ドロップの途中なら true にして、そのマウス位置を返す */
+  bool autoScrollSource(QPointF* pos, bool* dragging = nullptr) const;
+  /**
+   * 自動スクロールの「構え」。ドラッグを始めた（外から入ってきた）位置が端の近くだったときは、その端の方へ動かすか、
+   * 一度内側へ出るまでは、その端ではスクロールしない（端の近くの物を押しただけ・通りかかっただけで、勝手に流れないように）
+   */
+  void armAutoScroll(double x);
+  void updateArming(double x);
+  void startAutoScroll();
+  void stopAutoScroll();
+  void autoScrollTick();
+  /** 素材一覧から動画・写真などをドラッグしてきているときの、置く位置の表示を引き直す */
+  void refreshLibraryDrop(QPointF pos);
+
   void paintRuler(QPainter& p, const QRect& area);
   void paintVideo(QPainter& p);
   void paintItems(QPainter& p, Selection::Type type);
@@ -112,7 +165,7 @@ class TimelineView : public QAbstractScrollArea {
   void endDrop();
   void dropTextPreset(QDropEvent* e);
   void dropAudioAssets(QDropEvent* e, const std::vector<QString>& ids);
-  /** ドラッグを受け付けるか（見出しの上など、置けない位置では false） */
+  /** ドラッグを受け付けるか（見出しの列の上でも、見えている左端の時間に置けるので受け付ける） */
   bool dropAccepted() const { return drop_ && drop_->valid; }
 
   /** ドラッグ中の、追加予定の 1 つ分 */
@@ -134,9 +187,24 @@ class TimelineView : public QAbstractScrollArea {
   std::optional<DropGhost> drop_;
   QPointF dropPos_;
   QTimer* autoScroll_ = nullptr;
+  QElapsedTimer autoClock_;
+  double scrollVel_ = 0;        // 今の自動スクロールの速さ（px/秒）。目標へなめらかに近づける
+  double scrollRemainder_ = 0;  // スクロールバーは整数なので、端数は次に持ち越す
+  /** 素材一覧から動画・写真・オーディオなどをドラッグしてきている最中 */
+  bool libDrag_ = false;
+  /** ドラッグ・ドロップ中の物の終わりの時間。ここまでスクロールできるよう、スクロール範囲を広げる（0 は広げない） */
+  double dragReach_ = 0;
+  /** ドラッグを終えたときの表示位置を保つための、内容の終わりの時間（0 は保たない）。表示を左へ戻すと縮める */
+  double keepEnd_ = 0;
+  double armRefX_ = 0;     // ドラッグを始めた（外から入ってきた）ときの横位置
+  bool armedLeft_ = true;  // 左端・右端で自動スクロールしてよいか
+  bool armedRight_ = true;
 
   Lanes textLanes_;
   Lanes audioLanes_;
+  std::map<QString, LaneMemo> audioMemo_;  // 前回のオーディオの段の割り当て
+  QString laneHoldId_;                     // ドラッグ中のオーディオ。ドラッグを始めたときの段（laneHold_）にとどめる
+  int laneHold_ = -1;
   std::map<QString, std::vector<QPixmap>> thumbCache_;
 
   // ドラッグの状態
@@ -152,6 +220,9 @@ class TimelineView : public QAbstractScrollArea {
   TextItem origText_;
   AudioItem origAudio_;
   std::vector<double> dragSnap_;
+  QPointF dragPos_;                    // ドラッグ中の、最後のマウスの位置
+  Qt::KeyboardModifiers dragMods_;     // そのときの修飾キー（自動スクロールで引き直すときに使う）
+  bool dragSession_ = false;           // ドラッグのために編集データの「取り消せる作業のまとまり」を始めた（キャンセルで元に戻せる）
   std::optional<double> snapMark_;  // 吸着している時刻（目印を描く）。吸着していないときは空
   double dragDx_ = 0;
   int dragIndex_ = -1;

@@ -90,16 +90,16 @@ class Editor : public QObject {
 
   /** fn が true を返したときだけ変更として記録する。merge が前回と同じなら 1 回の操作にまとめる */
   void commit(const std::function<bool(ProjectData&)>& fn, const QString& merge = QString());
-  // ---- 文字の直接編集（プレビュー上） ----------------------------------------------------
-  // 文字を 1 文字ずつ編集データに反映しながら、元に戻す履歴は 1 つの編集操作にまとめる（merge が同じ間は 1 回）。
+  // ---- 取り消せる作業のまとまり（プレビュー上の文字の直接編集、タイムラインのドラッグなど） ----------------
+  // 編集データに反映しながら続ける作業を、元に戻す履歴の 1 つの編集操作にまとめる（merge が同じ間は 1 回）。
   // 始めるときの状態を覚えておき、キャンセルすると、履歴に残さずその状態に戻す。
   /** 始める。これまでの変更とは別の操作として記録し、キャンセルのために今の状態を覚える */
-  void beginTextEdit();
+  void beginEditSession();
   /** 始めたときの状態に戻す（履歴には残さない）。始めてから何も変えていなければ何もしない */
-  void cancelTextEdit();
+  void cancelEditSession();
   /** 確定する。変更は、始めてからの 1 つの編集操作として履歴に残っている */
-  void endTextEdit();
-  bool textEditing() const { return textEdit_.active; }
+  void endEditSession();
+  bool editSessionActive() const { return editSession_.active; }
 
   /** スライダーを離したときなど、次の変更を別の操作として記録する */
   void endMerge() {
@@ -325,8 +325,8 @@ class Editor : public QObject {
   int seekToken_ = 0;
   bool playing_ = false;
 
-  /** 文字の直接編集を始めたときの状態（キャンセルで戻す） */
-  struct TextEditSession {
+  /** 取り消せる作業を始めたときの状態（キャンセルで戻す） */
+  struct EditSession {
     bool active = false;
     int uid = 0;
     int revision = 0;
@@ -337,7 +337,7 @@ class Editor : public QObject {
     std::optional<ProjectData> droppedFront;
     std::vector<ProjectData> future;
   };
-  TextEditSession textEdit_;
+  EditSession editSession_;
 
   bool autoKey_ = true;
   struct ClipKey {

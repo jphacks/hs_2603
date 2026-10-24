@@ -15,6 +15,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
@@ -47,6 +48,7 @@
 #include "ui/inspector.h"
 #include "ui/keymap.h"
 #include "ui/librarypanel.h"
+#include "ui/perspective.h"
 #include "ui/previewwidget.h"
 #include "ui/serverstatus.h"
 #include "ui/shortcutsdialog.h"
@@ -64,20 +66,26 @@ MainWindow::MainWindow() {
   setMinimumSize(1100, 680);
 
   engine_ = new PreviewEngine(this);
-  library_ = new LibraryPanel(this);
   preview_ = new PreviewPanel(engine_, this);
   inspector_ = new Inspector(this);
   timeline_ = new TimelineWidget(this);
-  library_->setMinimumWidth(220);
   inspector_->setMinimumWidth(280);
   // AI アシスタントは右端の欄。はじめはしまっておき、右上の「AI」で出す
   aiPanel_ = new AiPanel(this);
 
+  // 左右の欄のビュー（メディア・オーディオ・テキスト・プロパティ）。パースペクティブで、置く欄・順番・開くかを変えられる
+  using Side = PerspectiveManager::Side;
+  perspective_ = new PerspectiveManager(this);
+  perspective_->addView(QStringLiteral("media"), QStringLiteral("メディア"), LibraryPanel::createMediaView(this), Side::Left);
+  perspective_->addView(QStringLiteral("audio"), QStringLiteral("オーディオ"), LibraryPanel::createAudioView(this), Side::Left);
+  perspective_->addView(QStringLiteral("text"), QStringLiteral("テキスト"), LibraryPanel::createTextView(this), Side::Left);
+  perspective_->addView(QStringLiteral("properties"), QStringLiteral("プロパティ"), inspector_, Side::Right);
+
   auto* top = new QSplitter(Qt::Horizontal, this);
   top_ = top;
-  top->addWidget(library_);
+  top->addWidget(perspective_->area(Side::Left));
   top->addWidget(preview_);
-  top->addWidget(inspector_);
+  top->addWidget(perspective_->area(Side::Right));
   top->addWidget(aiPanel_);
   top->setStretchFactor(0, 0);
   top->setStretchFactor(1, 1);
@@ -86,6 +94,9 @@ MainWindow::MainWindow() {
   top->setSizes({264, 860, 316, 0});
   top->setChildrenCollapsible(false);
   aiPanel_->hide();
+  // 前回のパースペクティブ（ビューの並びと欄の幅）に戻す
+  perspective_->attach(top, 0, 1, 2);
+  perspective_->restore();
   connect(aiPanel_, &AiPanel::closeRequested, this, [this] { setAiVisible(false); });
   auto* main = new QSplitter(Qt::Vertical, this);
   main->addWidget(top);
@@ -151,7 +162,11 @@ MainWindow::MainWindow() {
   autosave_.setInterval(1200);
   connect(&autosave_, &QTimer::timeout, this, [] { writeAutosave(); });
 
-  auto focusText = [this] { inspector_->focusText(); };
+  auto focusText = [this] {
+    // 文字を入力する欄はプロパティのビューにあるので、裏にいたり閉じていたりしたら前に出す
+    perspective_->showView(QStringLiteral("properties"));
+    inspector_->focusText();
+  };
   connect(timeline_, &TimelineWidget::requestTextFocus, this, focusText);
   connect(preview_->stage(), &PreviewStage::requestTextFocus, this, focusText);
 
@@ -245,6 +260,7 @@ void MainWindow::buildMenus() {
   edit->addSeparator();
   bindCommand(QStringLiteral("edit.addText"), edit->addAction(QStringLiteral("テキストを追加"), this, [this] {
     editor().addText(QStringLiteral("basic"));
+    perspective_->showView(QStringLiteral("properties"));
     inspector_->focusText();
   }));
 
@@ -287,6 +303,14 @@ void MainWindow::buildMenus() {
   aiAction_ = view->addAction(QStringLiteral("AI アシスタント"), this, [this] { setAiVisible(!aiPanel_->isVisible()); });
   aiAction_->setCheckable(true);
   bindCommand(QStringLiteral("view.ai"), aiAction_);
+  view->addSeparator();
+  // 左右の欄の並び（Eclipse のパースペクティブのように、名前を付けて保存・切り替え・リセットができる）
+  QMenu* perspectiveMenu = view->addMenu(QStringLiteral("パースペクティブ"));
+  connect(perspectiveMenu, &QMenu::aboutToShow, this, [this, perspectiveMenu] { perspective_->fillPerspectiveMenu(perspectiveMenu); });
+  perspective_->fillPerspectiveMenu(perspectiveMenu);
+  QMenu* viewsMenu = view->addMenu(QStringLiteral("ビュー"));
+  connect(viewsMenu, &QMenu::aboutToShow, this, [this, viewsMenu] { perspective_->fillViewMenu(viewsMenu); });
+  perspective_->fillViewMenu(viewsMenu);
   view->addSeparator();
   bindCommand(QStringLiteral("view.nextTab"), view->addAction(QStringLiteral("次のタブ"), this, [] {
     const int n = editor().workspaceCount();
@@ -634,6 +658,8 @@ void MainWindow::closeEvent(QCloseEvent* e) {
   // 全部のタブについて保存するかどうかを決めたので、前回の編集内容の自動保存は残さない
   clearAutosave();
   ed.pause();
+  // 左右の欄の並びと幅を、次に起動したときのために残す
+  perspective_->storeNow();
   e->accept();
 }
 
@@ -695,6 +721,15 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* e) {
         if (e->type() == QEvent::ShortcutOverride) e->accept();
         return false;
       }
+    }
+    // タイムラインでクリップなどをドラッグしている最中の Esc は、ドラッグをやめて元の位置・長さに戻す
+    if (ke->key() == Qt::Key_Escape && !(ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) && timeline_->view()->isDragging()) {
+      if (e->type() == QEvent::ShortcutOverride) {
+        e->accept();
+        return false;
+      }
+      timeline_->view()->cancelDrag();
+      return true;
     }
     if (isTextInput(QApplication::focusWidget())) return false;
     if (e->type() == QEvent::ShortcutOverride) {

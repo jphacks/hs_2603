@@ -184,9 +184,9 @@ ProjectData Editor::tryChanges(const std::function<void()>& fn) {
   return result;
 }
 
-void Editor::beginTextEdit() {
+void Editor::beginEditSession() {
   endMerge();  // これまでの変更とは別の操作にする
-  TextEditSession s;
+  EditSession s;
   s.active = true;
   s.uid = ws().uid;
   s.revision = ws().revision;
@@ -195,13 +195,13 @@ void Editor::beginTextEdit() {
   s.pastSize = ws().past.size();
   if (ws().past.size() >= kHistoryLimit) s.droppedFront = ws().past.front();
   s.future = ws().future;
-  textEdit_ = std::move(s);
+  editSession_ = std::move(s);
 }
 
-void Editor::cancelTextEdit() {
-  if (!textEdit_.active) return;
-  TextEditSession s = std::move(textEdit_);
-  textEdit_ = TextEditSession();
+void Editor::cancelEditSession() {
+  if (!editSession_.active) return;
+  EditSession s = std::move(editSession_);
+  editSession_ = EditSession();
   if (ws().uid != s.uid || ws().revision == s.revision) return;  // 別の編集場所になった / 何も変えていない
   ws().project = s.project;
   // 始めたあとに足された履歴を取り除く（いっぱいで押し出された先頭は戻す）
@@ -216,10 +216,10 @@ void Editor::cancelTextEdit() {
   setDirty(s.dirty);
 }
 
-void Editor::endTextEdit() {
-  if (!textEdit_.active) return;
-  const TextEditSession s = std::move(textEdit_);
-  textEdit_ = TextEditSession();
+void Editor::endEditSession() {
+  if (!editSession_.active) return;
+  const EditSession s = std::move(editSession_);
+  editSession_ = EditSession();
   // 何かの拍子に変更のまとまりが途切れて、履歴が 2 つ以上に分かれていたら、始めてからの変更を 1 つにまとめる
   // （最初に足された履歴が、始める前の状態。履歴がいっぱいで押し出された場合は、位置がずれるので何もしない）
   if (ws().uid == s.uid && !s.droppedFront && ws().past.size() > s.pastSize + 1) {

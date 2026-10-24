@@ -33,20 +33,24 @@ class AssetList : public QListWidget {
   Kind kind_;
 };
 
-class LibraryPanel : public QWidget {
-  Q_OBJECT
+/**
+ * 素材の欄（メディア・オーディオ・テキスト）。どれも 1 つのビューとして、パースペクティブ（ui/perspective.h）で
+ * 左右どちらの欄にも置ける
+ */
+class LibraryPanel {
  public:
-  explicit LibraryPanel(QWidget* parent = nullptr);
+  /** メディア（動画・写真）の一覧 */
+  static QWidget* createMediaView(QWidget* parent = nullptr);
+  /** オーディオ（BGM・効果音・ナレーションなど）の一覧 */
+  static QWidget* createAudioView(QWidget* parent = nullptr);
+  /** テキストのスタイル */
+  static QWidget* createTextView(QWidget* parent = nullptr);
   /**
    * 素材を選ぶダイアログを開いて読み込む。audioOnly ならオーディオだけを選べる。
    * addToTimeline が true なら、読み込んだものをそのままタイムラインに置く（オーディオは再生位置から）。
    * false なら一覧に登録するだけ
    */
   static void pickAndImport(QWidget* parent, bool audioOnly = false, bool addToTimeline = true);
-
- private:
-  AssetList* list_;
-  AssetList* audioList_;
 };
 
 }  // namespace kv
