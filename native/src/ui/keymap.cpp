@@ -28,6 +28,7 @@ const std::vector<Command>& commands() {
     const QString file = QStringLiteral("ファイル");
     const QString edit = QStringLiteral("編集");
     const QString play = QStringLiteral("再生・移動");
+    const QString range = QStringLiteral("書き出す範囲");
     const QString view = QStringLiteral("表示");
     const QString help = QStringLiteral("ヘルプ");
     return std::vector<Command>{
@@ -47,9 +48,13 @@ const std::vector<Command>& commands() {
         {QStringLiteral("edit.deselect"), edit, QStringLiteral("選択を解除"), seqs({"Esc"})},
         {QStringLiteral("edit.copyKeys"), edit, QStringLiteral("キーフレームをコピー"), seqs({"Ctrl+Shift+C"})},
         {QStringLiteral("edit.pasteKeys"), edit, QStringLiteral("キーフレームを貼り付け"), seqs({"Ctrl+Shift+V"})},
-        {QStringLiteral("edit.textUp"), edit, QStringLiteral("選んだテキストを上の段へ"), seqs({"Alt+Up"})},
-        {QStringLiteral("edit.textDown"), edit, QStringLiteral("選んだテキストを下の段へ"), seqs({"Alt+Down"})},
+        {QStringLiteral("edit.textUp"), edit, QStringLiteral("選んだテキスト・重ねる映像を上の段へ"), seqs({"Alt+Up"})},
+        {QStringLiteral("edit.textDown"), edit, QStringLiteral("選んだテキスト・重ねる映像を下の段へ"), seqs({"Alt+Down"})},
+        {QStringLiteral("edit.group"), edit, QStringLiteral("グループ化（一緒に選んだものをまとめる）"), seqs({"Ctrl+G"})},
+        {QStringLiteral("edit.ungroup"), edit, QStringLiteral("グループ解除"), seqs({"Ctrl+Shift+G"})},
         {QStringLiteral("edit.addText"), edit, QStringLiteral("テキストを追加"), seqs({"T"})},
+        {QStringLiteral("edit.prevObject"), edit, QStringLiteral("前のオブジェクトを選ぶ"), seqs({"Up"})},
+        {QStringLiteral("edit.nextObject"), edit, QStringLiteral("次のオブジェクトを選ぶ"), seqs({"Down"})},
         {QStringLiteral("play.toggle"), play, QStringLiteral("再生 / 一時停止"), seqs({"Space"})},
         {QStringLiteral("play.prevFrame"), play, QStringLiteral("1フレーム戻る"), seqs({"Left"})},
         {QStringLiteral("play.nextFrame"), play, QStringLiteral("1フレーム進む"), seqs({"Right"})},
@@ -57,9 +62,15 @@ const std::vector<Command>& commands() {
         {QStringLiteral("play.forward1s"), play, QStringLiteral("1秒進む"), seqs({"Shift+Right"})},
         {QStringLiteral("play.start"), play, QStringLiteral("先頭へ移動"), seqs({"Home"})},
         {QStringLiteral("play.end"), play, QStringLiteral("末尾へ移動"), seqs({"End"})},
+        {QStringLiteral("range.in"), range, QStringLiteral("書き出す範囲の開始を再生位置に"), seqs({"I"})},
+        {QStringLiteral("range.out"), range, QStringLiteral("書き出す範囲の終了を再生位置に"), seqs({"O"})},
+        {QStringLiteral("range.clear"), range, QStringLiteral("書き出す範囲を解除"), seqs({"Ctrl+Shift+X"})},
         {QStringLiteral("view.zoomIn"), view, QStringLiteral("タイムラインを拡大"), seqs({"Ctrl+="})},
         {QStringLiteral("view.zoomOut"), view, QStringLiteral("タイムラインを縮小"), seqs({"Ctrl+-"})},
         {QStringLiteral("view.fitAll"), view, QStringLiteral("全体を表示"), seqs({"Ctrl+0"})},
+        {QStringLiteral("view.tracksTaller"), view, QStringLiteral("タイムラインの段を高く"), seqs({"Ctrl+Shift+Up"})},
+        {QStringLiteral("view.tracksShorter"), view, QStringLiteral("タイムラインの段を低く"), seqs({"Ctrl+Shift+Down"})},
+        {QStringLiteral("view.tracksReset"), view, QStringLiteral("タイムラインの段の高さを元に戻す"), QList<QKeySequence>{}},
         {QStringLiteral("view.fullScreen"), view, QStringLiteral("プレビューを全画面表示"), seqs({"F", "F11"})},
         {QStringLiteral("view.ai"), view, QStringLiteral("AI アシスタントを出す / しまう"), seqs({"Ctrl+Shift+A"})},
         {QStringLiteral("view.nextTab"), view, QStringLiteral("次のタブへ切り替え"), seqs({"Ctrl+PgDown"})},

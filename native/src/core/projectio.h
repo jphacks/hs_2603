@@ -13,6 +13,10 @@ namespace kv {
 
 /** 編集データを、プロジェクトファイルと同じ形の JSON にする（2 つの状態が同じかを比べるのにも使う） */
 QJsonObject projectToJson(const ProjectData& p);
+/** テキスト 1 つ（プロジェクトファイルと同じ形。テキストのテンプレートの保存にも使う） */
+QJsonObject textToJson(const TextItem& t);
+/** hasTrack には、段（track）が書いてあったかを返す */
+TextItem textFromJson(const QJsonObject& o, bool* hasTrack = nullptr);
 
 /** 今の編集場所 1 つを、プロジェクトファイル (.kvproj) の中身にする */
 QByteArray serializeProject();

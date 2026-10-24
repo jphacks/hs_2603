@@ -9,6 +9,7 @@
 #include <QTranslator>
 
 #include "core/editor.h"
+#include "core/fontlibrary.h"
 #include "media/mediamanager.h"
 #include "ui/mainwindow.h"
 #include "ui/theme.h"
@@ -68,6 +69,8 @@ int main(int argc, char** argv) {
   // 一時的: 動作確認
   const int uiTest = int(args.indexOf(QStringLiteral("--ui-test")));
   if (uiTest >= 0) prepareUiTest(args.value(uiTest + 1), args.value(uiTest + 2));
+  // 文字に使えるフォント（同梱のフォントと、自分で読み込んだフォント）を登録する（画面を作る前に。フォントの一覧に出す）
+  fontLibrary().loadAll();
   MainWindow window;
   QObject::connect(&server, &QLocalServer::newConnection, &window, [&] {
     QLocalSocket* s = server.nextPendingConnection();

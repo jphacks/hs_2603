@@ -5,8 +5,11 @@
 #include <QColorDialog>
 #include <QDateTime>
 #include <QDrag>
+#include <QInputDialog>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMessageBox>
 #include <QTimer>
 #include <QWheelEvent>
 #include <QMimeData>
@@ -21,6 +24,7 @@
 #include <cmath>
 
 #include "core/textstyles.h"
+#include "core/texttemplates.h"
 #include "render/textrender.h"
 #include "ui/theme.h"
 
@@ -133,6 +137,31 @@ class PresetDragFilter : public QObject {
 void makeTextPresetDraggable(QToolButton* button, const TextPreset& preset) {
   button->installEventFilter(new PresetDragFilter(button, preset.id));
   button->setCursor(Qt::OpenHandCursor);
+}
+
+void execTemplateMenu(QWidget* parent, const QString& templateId, const QPoint& globalPos) {
+  const TextPreset* t = textTemplates().find(templateId);
+  if (!t) return;
+  const QString label = t->label;
+  QMenu menu(parent);
+  QAction* rename = menu.addAction(QStringLiteral("名前を変更…"));
+  QAction* remove = menu.addAction(theme::icon(QStringLiteral("trash")), QStringLiteral("削除"));
+  QAction* chosen = menu.exec(globalPos);
+  // メニューを閉じたあとは、テンプレートの一覧が作り直されて parent が消えることがあるので、ダイアログはウィンドウに出す
+  QWidget* owner = parent ? parent->window() : nullptr;
+  if (chosen == rename) {
+    bool ok = false;
+    const QString name = QInputDialog::getText(owner, QStringLiteral("テンプレートの名前"), QStringLiteral("新しい名前"), QLineEdit::Normal, label, &ok);
+    if (ok && !textTemplates().rename(templateId, name)) {
+      QMessageBox::warning(owner, QStringLiteral("テンプレート"), QStringLiteral("名前を変更できませんでした"));
+    }
+  } else if (chosen == remove) {
+    if (QMessageBox::question(owner, QStringLiteral("テンプレートを削除"),
+                              QStringLiteral("テンプレート「%1」を削除しますか？\n（このテンプレートで作った文字は、そのまま残ります）").arg(label)) != QMessageBox::Yes) {
+      return;
+    }
+    if (!textTemplates().remove(templateId)) QMessageBox::warning(owner, QStringLiteral("テンプレート"), QStringLiteral("削除できませんでした"));
+  }
 }
 
 namespace {

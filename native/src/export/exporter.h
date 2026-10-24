@@ -26,8 +26,11 @@ class Exporter : public QObject {
   explicit Exporter(QObject* parent = nullptr);
   ~Exporter() override;
   bool running() const { return proc_ != nullptr; }
-  /** 書き出しを始める。始められなかったときは error に理由を入れて false */
-  bool start(const QString& outputPath, ExportQuality quality, int shortSide, QString* error = nullptr);
+  /**
+   * 書き出しを始める。始められなかったときは error に理由を入れて false。
+   * rangeOnly のときは、決めてある書き出す範囲（Editor::exportRange）だけを書き出す
+   */
+  bool start(const QString& outputPath, ExportQuality quality, int shortSide, QString* error = nullptr, bool rangeOnly = false);
   void cancel();
 
  signals:

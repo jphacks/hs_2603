@@ -51,6 +51,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $build 'build.ninja'))) {
 }
 Invoke-Tool $KantanTools.CMake @('--build', $build) 'ビルド'
 if ($NoDeploy) { return }
+# アプリに同梱する文字のフォント（無ければ、ここでダウンロードする。初回だけ）
+if (-not (Test-KantanTool 'Fonts')) {
+  $env:TEMP, $env:TMP = $userTemp
+  & (Join-Path $here 'tools\setup.ps1')
+  $env:TEMP = $env:TMP = Join-Path $KantanDev 'tmp'
+}
 
 # 動かすのに必要なファイルを集める
 $out = Join-Path $here 'dist\kantan-video-editor'
@@ -79,6 +85,15 @@ New-Item -ItemType Directory -Force -Path $lic | Out-Null
 Copy-Item -LiteralPath (Join-Path $ffmpeg 'LICENSE.txt') -Destination (Join-Path $lic 'FFmpeg-LICENSE.txt') -Force
 Copy-Item -LiteralPath (Join-Path $here 'third_party\miniaudio\LICENSE') -Destination (Join-Path $lic 'miniaudio-LICENSE.txt') -Force
 Copy-Item -LiteralPath (Join-Path $here 'resources\icons\LICENSE-lucide.txt') -Destination (Join-Path $lic 'lucide-LICENSE.txt') -Force
+# 文字のフォント（アプリが起動するときに fonts の中を登録する）と、その使用許諾
+$fontsOut = Join-Path $out 'fonts'
+$fontLic = Join-Path $lic 'fonts'
+New-Item -ItemType Directory -Force -Path $fontsOut, $fontLic | Out-Null
+foreach ($f in $KantanFonts) {
+  $src = Join-Path $KantanTools.Fonts $f.File
+  $dest = if ($f.File -match '\.(ttf|otf|ttc|otc)$') { $fontsOut } else { $fontLic }
+  Copy-Item -LiteralPath $src -Destination $dest -Force
+}
 Write-Host "できあがり: $exe"
 if ($Run) {
   $env:TEMP, $env:TMP = $userTemp

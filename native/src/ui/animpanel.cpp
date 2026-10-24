@@ -236,9 +236,8 @@ VolumeKeyControls::VolumeKeyControls(QWidget* parent) : QWidget(parent) {
     if (const AudioItem* a = ed.audio(id_)) {
       dur = audioDuration(*a);
     } else {
-      for (const auto& l : ed.layout().items) {
-        if (l.clip.id == id_) dur = l.duration;
-      }
+      double s = 0;
+      ed.clipSpan(id_, &s, &dur);  // メインのビデオクリップも、重ねるトラックの映像も
     }
     const double local = ed.currentTime() - start;
     if (local < -1e-6 || local > dur + 1e-6) {
@@ -289,9 +288,8 @@ const std::vector<VolumePoint>* VolumeKeyControls::points(double* start) const {
     return &a->volumePoints;
   }
   if (const VideoClip* c = ed.clip(id_)) {
-    for (const auto& l : ed.layout().items) {
-      if (l.clip.id == id_) *start = l.start;
-    }
+    double dur = 0;
+    ed.clipSpan(id_, start, &dur);  // メインのビデオクリップも、重ねるトラックの映像も
     return &c->volumePoints;
   }
   return nullptr;

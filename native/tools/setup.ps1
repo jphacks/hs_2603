@@ -1,4 +1,4 @@
-﻿# 開発用ツール（Qt・MinGW・FFmpeg・CMake・Ninja・NSIS）をダウンロードする。
+﻿# 開発用ツール（Qt・MinGW・FFmpeg・CMake・Ninja・NSIS）と、アプリに同梱する文字のフォントをダウンロードする。
 #   powershell -ExecutionPolicy Bypass -File native\tools\setup.ps1
 # 入る場所は %USERPROFILE%\kantan-dev（環境変数 KANTAN_DEV で変えられる）。システムには何も入れないので、
 # いらなくなったらこのフォルダーを消せば元に戻る。そろっているものは飛ばす。
@@ -8,7 +8,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 . (Join-Path $PSScriptRoot 'common.ps1')
 
-$all = @('CMake', 'Ninja', 'Qt', 'MinGW', 'FFmpeg', 'NSIS')
+$all = @('CMake', 'Ninja', 'Qt', 'MinGW', 'FFmpeg', 'NSIS', 'Fonts')
 $need = @($all | Where-Object { -not (Test-KantanTool $_) })
 if ($need.Count -eq 0) {
   Write-Host "開発用ツールはそろっています: $KantanDev"
@@ -119,6 +119,25 @@ if ($need -contains 'NSIS') {
   Write-Host 'NSIS 3（インストーラーを作るときに使う）'
   $x = Expand-Download 'https://github.com/electron-userland/electron-builder-binaries/releases/download/nsis-3.0.4.1/nsis-3.0.4.1.7z' '9877df902530f96357d13a7a31ae2b9df67f48b11ffc9a1700a7c961574ec5fa'
   Move-Folder $x (Split-Path $KantanTools.NSIS)
+}
+
+if ($need -contains 'Fonts') {
+  # アプリに同梱する文字のフォント（無料で配ってよいもの）と、その使用許諾。そろっているファイルは飛ばす
+  Write-Host '文字のフォント（Noto Sans JP・M PLUS Rounded 1c・Zen丸ゴシック ほか。合わせて 50MB ほど）'
+  New-Item -ItemType Directory -Force -Path $KantanTools.Fonts | Out-Null
+  foreach ($f in $KantanFonts) {
+    $dest = Join-Path $KantanTools.Fonts $f.File
+    if (Test-Path -LiteralPath $dest) { continue }
+    $file = Get-Download $f.Url $f.Sha256
+    if ($f.Prepend) {
+      # 著作権表示を先頭に付けた使用許諾の文書にする
+      $text = $f.Prepend + "`r`n`r`n" + [System.IO.File]::ReadAllText($file)
+      [System.IO.File]::WriteAllText($dest, $text, (New-Object System.Text.UTF8Encoding($false)))
+      Remove-Item -Force -LiteralPath $file
+    } else {
+      Move-Item -Force -LiteralPath $file -Destination $dest
+    }
+  }
 }
 
 Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue

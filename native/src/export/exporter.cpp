@@ -25,6 +25,7 @@ ExportCheck checkExportable() {
   if (p.clips.empty()) return {false, QStringLiteral("クリップがありません")};
   std::vector<QString> used;
   for (const auto& c : p.clips) used.push_back(c.assetId);
+  for (const auto& o : p.overlays) used.push_back(o.assetId);
   for (const auto& a : p.audios) used.push_back(a.assetId);
   for (const auto& id : used) {
     const Asset* a = ed.asset(id);
@@ -117,7 +118,7 @@ Exporter::~Exporter() {
   }
 }
 
-bool Exporter::start(const QString& outputPath, ExportQuality quality, int shortSide, QString* error) {
+bool Exporter::start(const QString& outputPath, ExportQuality quality, int shortSide, QString* error, bool rangeOnly) {
   if (proc_) {
     if (error) *error = QStringLiteral("別の書き出しを実行中です");
     return false;
@@ -140,27 +141,37 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
   req.fps = p.settings.fps;
   req.quality = quality;
   req.duration = layout.total;
+  req.speed = p.settings.speed;  // 動画全体の再生速度
+  if (rangeOnly) {
+    const std::optional<Editor::TimeRange> range = ed.exportRange();
+    if (!range) {
+      if (error) *error = QStringLiteral("書き出す範囲が決まっていません");
+      return false;
+    }
+    req.rangeStart = range->start;
+    req.rangeEnd = range->end;
+  }
   QHash<QString, QString> colorParams;  // 同じ素材を何度も開かない
-  for (const auto& l : layout.items) {
-    const VideoClip& c = l.clip;
-    const Asset* a = ed.asset(c.assetId);
-    if (!a) continue;
+  // ビデオクリップ 1 つ分（メインのトラックも重ねるトラックも、映像の設定は同じ）
+  auto toExportClip = [&](const VideoClip& c, const Asset* a, double duration, bool forceLayer) {
     ExportClip ec;
     ec.isImage = c.isImage;
     ec.path = QDir::toNativeSeparators(c.isImage && !a->imagePath.isEmpty() ? a->imagePath : a->path);
     ec.hasAudio = a->hasAudio;
     ec.in = c.in;
-    ec.duration = l.duration;
+    ec.duration = duration;
     ec.speed = c.isImage ? 1 : c.speed;
     ec.volume = c.muted ? 0 : c.volume;
     if (!c.muted) ec.points = c.volumePoints;
-    if (!layerIsPlain(c)) {
+    if (forceLayer || !layerIsPlain(c)) {
       ec.layer.transformed = true;
       ec.layer.x = c.x;
       ec.layer.y = c.y;
       ec.layer.scale = c.scale;
       ec.layer.rotation = c.rotation;
       ec.layer.opacity = c.opacity;
+      ec.layer.stretchX = c.stretchX;
+      ec.layer.stretchY = c.stretchY;
       ec.layer.anim = c.anim;
     }
     ec.fadeIn = c.fadeIn;
@@ -172,7 +183,48 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
       if (it == colorParams.end()) it = colorParams.insert(a->path, assumedColorParams(a->path));
       ec.colorParams = *it;
     }
-    req.clips.push_back(ec);
+    ec.cropL = c.cropL;
+    ec.cropT = c.cropT;
+    ec.cropR = c.cropR;
+    ec.cropB = c.cropB;
+    if (c.chroma.enabled) ec.chroma = c.chroma;
+    return ec;
+  };
+  for (const auto& l : layout.items) {
+    const VideoClip& c = l.clip;
+    const Asset* a = ed.asset(c.assetId);
+    if (!a) continue;
+    req.clips.push_back(toExportClip(c, a, l.duration, false));
+  }
+  // 重ねるトラック: 段の順（下の段から）、同じ段は時間の順に重ねる。動画の音も、音量・フェード・キーフレームどおりに鳴らす
+  std::vector<const OverlayItem*> overlays;
+  for (const auto& o : p.overlays) overlays.push_back(&o);
+  std::stable_sort(overlays.begin(), overlays.end(), [](const OverlayItem* a, const OverlayItem* b) {
+    if (a->track != b->track) return a->track < b->track;
+    return a->start < b->start;
+  });
+  for (const OverlayItem* o : overlays) {
+    const Asset* a = ed.asset(o->assetId);
+    if (!a || o->start >= layout.total) continue;
+    const double dur = overlayDuration(*o, p.settings.fps);
+    ExportOverlay eo;
+    eo.clip = toExportClip(*o, a, dur, true);
+    eo.clip.fit = FitMode::Contain;
+    eo.start = o->start;
+    req.overlays.push_back(eo);
+    if (!o->isImage && a->hasAudio && !o->muted && (o->volume > 0.0001 || !o->volumePoints.empty())) {
+      ExportAudio ea;
+      ea.path = QDir::toNativeSeparators(a->path);
+      ea.start = o->start;
+      ea.in = o->in;
+      ea.duration = dur;
+      ea.speed = o->speed;
+      ea.volume = o->volume;
+      ea.points = o->volumePoints;
+      ea.fadeIn = o->fadeIn;
+      ea.fadeOut = o->fadeOut;
+      req.audios.push_back(ea);
+    }
   }
   for (const auto& au : p.audios) {
     const Asset* a = ed.asset(au.assetId);

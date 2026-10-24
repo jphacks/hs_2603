@@ -73,6 +73,10 @@ const ClipLayout* findClipAt(const TimelineLayout& layout, double t) {
   return &items[lo];
 }
 
+double fitFade(double value, double duration, double other) {
+  return std::clamp(value, 0.0, std::max(0.0, std::min(kMaxFade, duration - std::max(0.0, other))));
+}
+
 double fadeFactor(double local, double duration, double fadeIn, double fadeOut) {
   double f = 1;
   if (fadeIn > 0) f = std::min(f, std::max(0.0, local / fadeIn));
@@ -290,7 +294,53 @@ static LayerState layerStateOf(const T& o, double local) {
 }
 
 LayerState layerStateAt(const VideoClip& c, double local) {
-  return layerStateOf(c, local);
+  LayerState s = layerStateOf(c, local);
+  s.stretchX = std::clamp(c.stretchX, kMinStretch, kMaxStretch);
+  s.stretchY = std::clamp(c.stretchY, kMinStretch, kMaxStretch);
+  return s;
+}
+
+// ---- 切り抜き・伸縮 -------------------------------------------------------------------------
+
+bool hasCrop(const VideoClip& c) {
+  return c.cropL > 1e-6 || c.cropT > 1e-6 || c.cropR > 1e-6 || c.cropB > 1e-6;
+}
+
+bool hasStretch(const VideoClip& c) {
+  return std::abs(c.stretchX - 1) > 1e-9 || std::abs(c.stretchY - 1) > 1e-9;
+}
+
+void clampCropStretch(VideoClip& c) {
+  auto fix = [](double& a, double& b) {
+    if (!std::isfinite(a)) a = 0;
+    if (!std::isfinite(b)) b = 0;
+    a = std::clamp(a, 0.0, kMaxCrop);
+    b = std::clamp(b, 0.0, kMaxCrop);
+    // 両側を合わせて kMaxCrop まで（残る幅・高さが無くならないように）
+    if (a + b > kMaxCrop) {
+      const double k = kMaxCrop / (a + b);
+      a *= k;
+      b *= k;
+    }
+  };
+  fix(c.cropL, c.cropR);
+  fix(c.cropT, c.cropB);
+  if (!std::isfinite(c.stretchX)) c.stretchX = 1;
+  if (!std::isfinite(c.stretchY)) c.stretchY = 1;
+  c.stretchX = std::clamp(c.stretchX, kMinStretch, kMaxStretch);
+  c.stretchY = std::clamp(c.stretchY, kMinStretch, kMaxStretch);
+  c.chroma.similarity = std::clamp(c.chroma.similarity, 0.0, kMaxChromaSimilarity);
+  c.chroma.blend = std::clamp(c.chroma.blend, 0.0, kMaxChromaBlend);
+}
+
+QRectF cropSourceRect(const VideoClip& c, QSizeF src) {
+  return {src.width() * c.cropL, src.height() * c.cropT, src.width() * std::max(0.0, 1 - c.cropL - c.cropR),
+          src.height() * std::max(0.0, 1 - c.cropT - c.cropB)};
+}
+
+QRectF cropTargetRect(const VideoClip& c, const QRectF& fitted) {
+  return {fitted.x() + fitted.width() * c.cropL, fitted.y() + fitted.height() * c.cropT, fitted.width() * std::max(0.0, 1 - c.cropL - c.cropR),
+          fitted.height() * std::max(0.0, 1 - c.cropT - c.cropB)};
 }
 
 LayerState layerStateAt(const TextItem& t, double local) {
@@ -301,7 +351,7 @@ LayerState layerStateAt(const TextItem& t, double local) {
 
 bool layerIsPlain(const VideoClip& c) {
   return c.anim.empty() && std::abs(c.x - 0.5) < 1e-9 && std::abs(c.y - 0.5) < 1e-9 && std::abs(c.scale - 1) < 1e-9 &&
-         std::abs(c.rotation) < 1e-9 && std::abs(c.opacity - 1) < 1e-9;
+         std::abs(c.rotation) < 1e-9 && std::abs(c.opacity - 1) < 1e-9 && !hasStretch(c);
 }
 
 bool layerIsPlain(const TextItem& t) {
@@ -444,6 +494,40 @@ void autoAssignTextTracks(std::vector<TextItem>& texts) {
 int textTrackCount(const std::vector<TextItem>& texts) {
   int count = 1;
   for (const auto& t : texts) count = std::max(count, t.track + 1);
+  return count;
+}
+
+double overlayDuration(const OverlayItem& o, int fps) {
+  return clipDuration(o, fps);
+}
+
+bool isOverlayVisible(const OverlayItem& o, double t, int fps) {
+  return t >= o.start - 1e-9 && t < o.start + overlayDuration(o, fps) - 1e-9;
+}
+
+bool overlayTrackFree(const std::vector<OverlayItem>& items, int track, double start, double duration, int fps, const QString& excludeId) {
+  for (const auto& o : items) {
+    if (o.track != track || (!excludeId.isEmpty() && o.id == excludeId)) continue;
+    if (o.start < start + duration - 1e-6 && start < o.start + overlayDuration(o, fps) - 1e-6) return false;
+  }
+  return true;
+}
+
+int freeOverlayTrack(const std::vector<OverlayItem>& items, double start, double duration, int fps, const QString& excludeId) {
+  int maxTrack = -1;
+  for (const auto& o : items) {
+    if (!excludeId.isEmpty() && o.id == excludeId) continue;
+    maxTrack = std::max(maxTrack, o.track);
+  }
+  for (int track = 0; track <= maxTrack; ++track) {
+    if (overlayTrackFree(items, track, start, duration, fps, excludeId)) return track;
+  }
+  return maxTrack + 1;
+}
+
+int overlayTrackCount(const std::vector<OverlayItem>& items) {
+  int count = 1;
+  for (const auto& o : items) count = std::max(count, o.track + 1);
   return count;
 }
 

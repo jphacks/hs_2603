@@ -1,5 +1,6 @@
 #include "ui/librarypanel.h"
 
+#include <QButtonGroup>
 #include <QContextMenuEvent>
 #include <QFileDialog>
 #include <QGridLayout>
@@ -17,6 +18,7 @@
 
 #include "core/editor.h"
 #include "core/textstyles.h"
+#include "core/texttemplates.h"
 #include "media/audiopreview.h"
 #include "media/mediamanager.h"
 #include "render/textrender.h"
@@ -305,11 +307,18 @@ void AssetList::contextMenuEvent(QContextMenuEvent* e) {
   }
   QAction* add = menu.addAction(QStringLiteral("タイムラインに追加"));
   add->setEnabled(usable);
+  // 動画・写真は、メインの映像の上に重ねることもできる（再生位置から。タイムラインの「重ねる」の段へドラッグしても同じ）
+  QAction* overlay = nullptr;
+  if (kind_ == Kind::Media) {
+    overlay = menu.addAction(QStringLiteral("重ねて追加（再生位置から）"));
+    overlay->setEnabled(usable);
+  }
   QAction* remove = menu.addAction(QStringLiteral("一覧から削除"));
   QAction* chosen = menu.exec(e->globalPos());
   if (!chosen) return;
   if (chosen == play) audioPreview().toggle(id);
   else if (chosen == add) editor().addToTimeline({id});
+  else if (overlay && chosen == overlay) editor().addOverlays({id});
   else if (chosen == remove) removeFromList(id);
 }
 
@@ -380,34 +389,82 @@ QWidget* LibraryPanel::createAudioView(QWidget* parent) {
   return audioPage;
 }
 
+/** テキストのスタイル・テンプレートのカード（タイムラインへドラッグして追加する） */
+static QToolButton* makeTextCard(const TextPreset& preset, QWidget* parent, QButtonGroup* group) {
+  const QSize presetSize(112, 56);
+  auto* b = makeTextPresetButton(preset, presetSize, parent);
+  const bool user = TextTemplates::isUserId(preset.id);
+  b->setAccessibleName(QStringLiteral("テキストスタイル: %1（タイムラインへドラッグして追加）").arg(preset.label));
+  b->setToolTip(user ? QStringLiteral("%1（マイテンプレート）\nタイムラインへドラッグして追加。右クリックで名前の変更・削除").arg(preset.label)
+                     : QStringLiteral("%1\nタイムラインへドラッグして追加").arg(preset.label));
+  // クリックでは追加しない。選んだスタイルの枠を強調して確認できるようにするだけ
+  b->setCheckable(true);
+  group->addButton(b);
+  b->setStyleSheet(b->styleSheet() + QStringLiteral("QToolButton:checked{border-color:#2680eb;color:#ffffff}"));
+  makeTextPresetDraggable(b, preset);
+  const QString label = preset.label;
+  QObject::connect(b, &QToolButton::clicked, b, [label] {
+    editor().toast(QStringLiteral("「%1」をタイムラインへドラッグすると、好きな位置に追加できます").arg(label));
+  });
+  if (user) {
+    const QString id = preset.id;
+    b->setContextMenuPolicy(Qt::CustomContextMenu);
+    QObject::connect(b, &QWidget::customContextMenuRequested, b, [b, id](const QPoint& pos) { execTemplateMenu(b, id, b->mapToGlobal(pos)); });
+  }
+  return b;
+}
+
 QWidget* LibraryPanel::createTextView(QWidget* parent) {
   auto* scroll = new QScrollArea(parent);
   scroll->setMinimumWidth(kViewMinWidth);
   scroll->setWidgetResizable(true);
   scroll->setFrameShape(QFrame::NoFrame);
   auto* textPage = new QWidget(scroll);
-  auto* grid = new QGridLayout(textPage);
-  grid->setContentsMargins(10, 10, 10, 10);
+  auto* v = new QVBoxLayout(textPage);
+  v->setContentsMargins(10, 10, 10, 10);
+  v->setSpacing(8);
+  // カードは 1 つだけ選んだ見た目にする（組み込みのスタイルとテンプレートをまたいで）
+  auto* group = new QButtonGroup(textPage);
+  group->setExclusive(true);
+  auto* grid = new QGridLayout();
   grid->setSpacing(6);
-  const QSize presetSize(112, 56);
   int i = 0;
   for (const auto& preset : textPresets()) {
-    auto* b = makeTextPresetButton(preset, presetSize, textPage);
-    b->setAccessibleName(QStringLiteral("テキストスタイル: %1（タイムラインへドラッグして追加）").arg(preset.label));
-    b->setToolTip(QStringLiteral("%1\nタイムラインへドラッグして追加").arg(preset.label));
-    // クリックでは追加しない。選んだスタイルの枠を強調して確認できるようにするだけ
-    b->setCheckable(true);
-    b->setAutoExclusive(true);
-    b->setStyleSheet(b->styleSheet() + QStringLiteral("QToolButton:checked{border-color:#2680eb;color:#ffffff}"));
-    makeTextPresetDraggable(b, preset);
-    const QString label = preset.label;
-    QObject::connect(b, &QToolButton::clicked, b, [label] {
-      editor().toast(QStringLiteral("「%1」をタイムラインへドラッグすると、好きな位置に追加できます").arg(label));
-    });
-    grid->addWidget(b, i / 2, i % 2);
+    grid->addWidget(makeTextCard(preset, textPage, group), i / 2, i % 2);
     ++i;
   }
-  grid->setRowStretch(i / 2 + 1, 1);
+  v->addLayout(grid);
+  // 自分で保存したテンプレート（右の設定欄の「テンプレートに保存」で増える）
+  v->addWidget(makeSeparator(textPage));
+  v->addWidget(makeLabel(QStringLiteral("マイテンプレート"), "muted", textPage));
+  auto* userBox = new QWidget(textPage);
+  auto* userGrid = new QGridLayout(userBox);
+  userGrid->setContentsMargins(0, 0, 0, 0);
+  userGrid->setSpacing(6);
+  v->addWidget(userBox);
+  auto* hint = makeLabel(QStringLiteral("テキストを選んで、右の設定欄の「今の見た目をテンプレートに保存」を押すと、ここに並びます。"
+                                        "フォント・色・登場のアニメーション・キーフレームを、何度でも使えます"),
+                         "dim", textPage);
+  hint->setWordWrap(true);
+  v->addWidget(hint);
+  v->addStretch(1);
+  auto rebuild = [userBox, userGrid, group, hint] {
+    while (QLayoutItem* it = userGrid->takeAt(0)) {
+      if (QWidget* w = it->widget()) {
+        if (auto* b = qobject_cast<QAbstractButton*>(w)) group->removeButton(b);
+        w->deleteLater();
+      }
+      delete it;
+    }
+    int k = 0;
+    for (const auto& p : textTemplates().list()) {
+      userGrid->addWidget(makeTextCard(p, userBox, group), k / 2, k % 2);
+      ++k;
+    }
+    hint->setVisible(k == 0);
+  };
+  rebuild();
+  QObject::connect(&textTemplates(), &TextTemplates::changed, userBox, rebuild);
   scroll->setWidget(textPage);
   return scroll;
 }

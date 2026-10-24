@@ -1,6 +1,7 @@
 #pragma once
 // タイムラインの計算。プレビュー・書き出しの両方で同じ関数を使う。
 
+#include <QRectF>
 #include <QSize>
 #include <QString>
 #include <vector>
@@ -46,6 +47,11 @@ const ClipLayout* findClipAt(const TimelineLayout& layout, double t);
 
 /** フェードの係数 (0〜1)。ffmpeg の fade / afade と同じ直線的な変化 */
 double fadeFactor(double local, double duration, double fadeIn, double fadeOut);
+/**
+ * フェードの長さを 0〜kMaxFade 秒と、オブジェクトの長さに収める。イン・アウトは重ならないよう、
+ * もう一方（other）の残りまでにする。設定欄のスライダー・タイムラインのつまみ・右クリックメニューで同じ決まりを使う
+ */
+double fitFade(double value, double duration, double other);
 double audioDuration(const AudioItem& a);
 
 // ---- 音量キーフレーム ---------------------------------------------------------
@@ -112,9 +118,25 @@ struct LayerState {
   double opacity = 1;
   /** 字間（文字だけ。基準解像度の px） */
   double letterSpacing = 0;
+  /** 伸縮（映像だけ。幅・高さだけの倍率で、拡大率に掛ける。アニメーションはしない） */
+  double stretchX = 1;
+  double stretchY = 1;
 };
 LayerState layerStateAt(const VideoClip& c, double local);
 LayerState layerStateAt(const TextItem& t, double local);
+// ---- 切り抜き・伸縮 -------------------------------------------------------------------------
+
+/** 切り抜いているか */
+bool hasCrop(const VideoClip& c);
+/** 伸縮しているか（幅・高さの倍率が 1 でない） */
+bool hasStretch(const VideoClip& c);
+/** 切り抜き・伸縮の値を範囲に収める（左右・上下を合わせても kMaxCrop まで） */
+void clampCropStretch(VideoClip& c);
+/** 素材（大きさ src）の中で、残す部分（切り抜いたあと）の四角 */
+QRectF cropSourceRect(const VideoClip& c, QSizeF src);
+/** 素材を fitted の四角に収めて描くときの、残す部分の四角（切り抜いても、その場所のまま） */
+QRectF cropTargetRect(const VideoClip& c, const QRectF& fitted);
+
 /** 静的な値（キーフレームが無いときの値） */
 double baseProp(const VideoClip& c, AnimProp p);
 double baseProp(const TextItem& t, AnimProp p);
@@ -176,6 +198,20 @@ int freeTextTrack(const std::vector<TextItem>& texts, double start, double durat
 void autoAssignTextTracks(std::vector<TextItem>& texts);
 /** 使っている段の数（空の段は数えないが、間が空いていれば間の段も含む）。1 以上 */
 int textTrackCount(const std::vector<TextItem>& texts);
+
+// ---- 重ねるトラック ------------------------------------------------------------------------
+// 段は OverlayItem::track に持つ（0 がメインの映像のすぐ上。数字が大きいほど前）。テキストの段と同じく、
+// 追加するときに一度だけ決め、段を移す操作と上下のドラッグのときだけ変える。
+
+/** タイムライン上の長さ（ビデオクリップと同じ数え方。フレームにそろえる） */
+double overlayDuration(const OverlayItem& o, int fps);
+bool isOverlayVisible(const OverlayItem& o, double t, int fps);
+bool overlayTrackFree(const std::vector<OverlayItem>& items, int track, double start, double duration, int fps,
+                      const QString& excludeId = QString());
+/** 追加するものを入れる段: 重ならない一番下（メインに近い）の段。どの段も重なるなら、一番上にひとつ増やした段 */
+int freeOverlayTrack(const std::vector<OverlayItem>& items, double start, double duration, int fps, const QString& excludeId = QString());
+/** 使っている段の数（1 以上。間が空いていれば間の段も含む） */
+int overlayTrackCount(const std::vector<OverlayItem>& items);
 
 /** atempo は 0.5〜2.0 の範囲で掛け合わせる */
 std::vector<double> atempoFactors(double speed);

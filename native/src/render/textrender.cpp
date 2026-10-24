@@ -7,14 +7,20 @@
 #include <algorithm>
 #include <cmath>
 
+#include "core/fontlibrary.h"
 #include "core/textstyles.h"
 #include "render/imageops.h"
 
 namespace kv {
 
-QFont textFont(const TextItem& item, int pixelSize) {
+QFont spanFont(const TextItem& item, FontId font, const QString& family, int pixelSize) {
   QFont f;
-  f.setFamilies(fontFamilies(item.font));
+  QStringList families = fontFamilies(font, family);
+  // 太字のファイルが別のファミリー名で登録される同梱のフォント（M PLUS Rounded 1c など）は、太字のときにそのファイルで描く
+  if (item.bold && !family.isEmpty()) {
+    if (const QString bold = fontLibrary().boldFamily(family); !bold.isEmpty()) families.prepend(bold);
+  }
+  f.setFamilies(families);
   f.setPixelSize(std::max(4, pixelSize));
   f.setWeight(item.bold ? QFont::Bold : QFont::Normal);
   f.setHintingPreference(QFont::PreferNoHinting);
@@ -25,13 +31,49 @@ QFont textFont(const TextItem& item, int pixelSize) {
   return f;
 }
 
+QFont textFont(const TextItem& item, int pixelSize) {
+  return spanFont(item, item.font, item.fontFamily, pixelSize);
+}
+
+namespace {
+/**
+ * 文字の幅の測り方。一部だけ別のフォントにした文字があるときは、同じフォントが続く部分（ひと続き）ごとに、
+ * そのフォントで測って足す（描くときも、同じひと続きごとに同じフォントで描くので、配置と描画が一致する）
+ */
+struct Measure {
+  const TextLayout& L;
+  QString text;  // charFont の位置で引く文字列（item.text）
+  std::vector<QFontMetricsF> metrics;
+  explicit Measure(const TextLayout& layout, const QString& t) : L(layout), text(t) {
+    for (const QFont& f : L.fonts) metrics.emplace_back(f);
+    if (metrics.empty()) metrics.emplace_back(L.font);
+  }
+  int fontAt(int i) const { return L.charFont.isEmpty() || i < 0 || i >= L.charFont.size() ? 0 : L.charFont[i]; }
+  /** text[from, to) の幅（Qt と同じく、各文字の後ろに字間を足した幅） */
+  double advance(int from, int to) const {
+    if (to <= from) return 0;
+    if (L.charFont.isEmpty()) return metrics[0].horizontalAdvance(text.mid(from, to - from));
+    double w = 0;
+    int a = from;
+    while (a < to) {
+      const int f = fontAt(a);
+      int b = a + 1;
+      while (b < to && fontAt(b) == f) ++b;
+      w += metrics[size_t(std::clamp(f, 0, int(metrics.size()) - 1))].horizontalAdvance(text.mid(a, b - a));
+      a = b;
+    }
+    return w;
+  }
+};
+}  // namespace
+
 /**
  * 1 行の見た目の幅。Qt は字間を各文字の後ろに足すので、行の最後の文字の後ろに付く 1 回分は引く
  * （引かないと、字間が広いほど右に余白が付いて、中央揃え・右揃えがずれる）
  */
-static double lineAdvance(const QFontMetricsF& fm, const QString& line, double spacing) {
-  if (line.isEmpty()) return 0;
-  return std::max(0.0, fm.horizontalAdvance(line) - spacing);
+static double lineAdvance(const Measure& m, int from, int to, double spacing) {
+  if (to <= from) return 0;
+  return std::max(0.0, m.advance(from, to) - spacing);
 }
 
 // 行頭に来てはいけない文字（禁則処理の簡易版）
@@ -44,8 +86,11 @@ static bool isAlnum(QChar c) {
   return c.isLetterOrNumber() && c.unicode() < 0x80;
 }
 
-/** starts には、各行の先頭が text の何文字目（UTF-16）かを入れる（入力位置と行の対応づけに使う） */
-static QStringList wrapLines(const QFontMetricsF& fm, const QString& text, double maxWidth, double spacing, QList<int>* starts) {
+/**
+ * starts には、各行の先頭が text の何文字目（UTF-16）かを入れる（入力位置と行の対応づけに使う）。
+ * 行はいつも text のひと続きの部分（text.mid(行の先頭, 行の長さ)）なので、幅は text の位置で測る
+ */
+static QStringList wrapLines(const Measure& fm, const QString& text, double maxWidth, double spacing, QList<int>* starts) {
   QStringList out;
   int paraStart = 0;
   for (const QString& para : text.split(QLatin1Char('\n'))) {
@@ -62,7 +107,7 @@ static QStringList wrapLines(const QFontMetricsF& fm, const QString& text, doubl
     for (uint cp : codepoints) {
       const QString ch = QString::fromUcs4(reinterpret_cast<const char32_t*>(&cp), 1);
       const QString test = line + ch;
-      if (!line.isEmpty() && lineAdvance(fm, test, spacing) > maxWidth && !noLineStart(ch.front())) {
+      if (!line.isEmpty() && lineAdvance(fm, lineStartIdx, lineStartIdx + int(test.size()), spacing) > maxWidth && !noLineStart(ch.front())) {
         const int space = int(line.lastIndexOf(QLatin1Char(' ')));
         if (space > 0 && isAlnum(ch.front()) && isAlnum(line.back())) {
           // 英単語は途中で切らない（行の最後の空白は、行に入れずに捨てる）
@@ -94,17 +139,40 @@ TextLayout layoutText(const TextItem& item, double W, double H) {
   TextLayout L;
   L.fontPx = std::max(4.0, std::round(item.size * H));
   L.font = textFont(item, int(L.fontPx));
+  L.fonts << L.font;
+  // 一部だけ別のフォントにした文字: フォントごとに番号を付け、1 文字ごとの番号を持つ
+  if (!item.fontSpans.empty() && !item.text.isEmpty()) {
+    L.charFont = QList<int>(item.text.size(), 0);
+    std::vector<std::pair<FontId, QString>> seen;
+    for (const auto& s : item.fontSpans) {
+      int idx = -1;
+      for (size_t k = 0; k < seen.size(); ++k) {
+        if (seen[k].first == s.font && seen[k].second == s.family) idx = int(k) + 1;
+      }
+      if (idx < 0) {
+        seen.push_back({s.font, s.family});
+        L.fonts << spanFont(item, s.font, s.family, int(L.fontPx));
+        idx = int(L.fonts.size()) - 1;
+      }
+      const int a = std::clamp(s.start, 0, int(item.text.size()));
+      const int b = std::clamp(s.start + s.length, a, int(item.text.size()));
+      for (int i = a; i < b; ++i) L.charFont[i] = idx;
+    }
+  }
   const QFontMetricsF fm(L.font);
+  const QString text = item.text.isEmpty() ? QStringLiteral(" ") : item.text;
+  const Measure measure(L, text);
   const bool hasBox = item.boxOpacity > 0.001;
   const double padX = hasBox ? L.fontPx * 0.45 : 0;
   const double padY = hasBox ? L.fontPx * 0.2 : 0;
-  L.lines = wrapLines(fm, item.text.isEmpty() ? QStringLiteral(" ") : item.text, W * 0.92 - padX * 2, item.letterSpacing, &L.lineStart);
+  L.lines = wrapLines(measure, text, W * 0.92 - padX * 2, item.letterSpacing, &L.lineStart);
   L.lineHeight = L.fontPx * 1.3;
   L.ascent = fm.ascent();
   L.descent = fm.descent();
   L.blockW = L.fontPx * 0.5;
-  for (const auto& l : L.lines) {
-    const double w = lineAdvance(fm, l, item.letterSpacing);
+  for (int i = 0; i < L.lines.size(); ++i) {
+    const int ls = L.lineStart.value(i);
+    const double w = lineAdvance(measure, ls, ls + int(L.lines[i].size()), item.letterSpacing);
     L.lineWidths << w;
     L.blockW = std::max(L.blockW, w);
   }
@@ -138,7 +206,26 @@ static double lineBaseline(const TextLayout& L, int i) {
 
 static QPainterPath linePath(const TextItem& item, const TextLayout& L, int i) {
   QPainterPath path;
-  path.addText(QPointF(lineOriginX(item, L, L.lineWidths.value(i)), lineBaseline(L, i)), L.font, L.lines[i]);
+  const QPointF origin(lineOriginX(item, L, L.lineWidths.value(i)), lineBaseline(L, i));
+  if (L.charFont.isEmpty()) {
+    path.addText(origin, L.font, L.lines[i]);
+    return path;
+  }
+  // 同じフォントが続く部分ごとに、そのフォントで描く（幅は配置と同じ測り方で進める）
+  const Measure m(L, item.text);
+  const QString& line = L.lines[i];
+  const int ls = L.lineStart.value(i);
+  double x = origin.x();
+  int a = 0;
+  while (a < line.size()) {
+    const int f = m.fontAt(ls + a);
+    int b = a + 1;
+    while (b < line.size() && m.fontAt(ls + b) == f) ++b;
+    const QFont& font = L.fonts.value(f, L.font);
+    path.addText(QPointF(x, origin.y()), font, line.mid(a, b - a));
+    x += m.metrics[size_t(std::clamp(f, 0, int(m.metrics.size()) - 1))].horizontalAdvance(line.mid(a, b - a));
+    a = b;
+  }
   return path;
 }
 
@@ -179,15 +266,15 @@ static LinePos locateIndex(const TextItem& item, const TextLayout& L, int index,
   return {li, std::clamp(index - L.lineStart.value(li), 0, len)};
 }
 
-static double prefixAdvance(const QFontMetricsF& fm, const QString& line, int offset) {
-  return offset <= 0 ? 0.0 : fm.horizontalAdvance(line.left(offset));
+/** 行（先頭が text の lineStart 文字目）の、先頭から offset 文字分の幅（描くときと同じ、フォントのひと続きごとの測り方） */
+static double prefixAdvance(const Measure& m, int lineStart, int offset) {
+  return offset <= 0 ? 0.0 : m.advance(lineStart, lineStart + offset);
 }
 
 QLineF textCaretLine(const TextItem& item, const TextLayout& L, int index, bool upstream) {
   const LinePos lp = locateIndex(item, L, index, upstream);
-  const QFontMetricsF fm(L.font);
-  const QString line = editLineText(item, L, lp.line);
-  const double x = lineOriginX(item, L, editLineWidth(item, L, lp.line)) + prefixAdvance(fm, line, lp.offset);
+  const Measure m(L, item.text);
+  const double x = lineOriginX(item, L, editLineWidth(item, L, lp.line)) + prefixAdvance(m, L.lineStart.value(lp.line), lp.offset);
   const double base = lineBaseline(L, lp.line);
   return QLineF(x, base - L.ascent, x, base + L.descent);
 }
@@ -197,14 +284,15 @@ int textIndexAt(const TextItem& item, const TextLayout& L, QPointF p, bool* upst
   const int n = int(L.lines.size());
   const int li = std::clamp(int(std::floor((p.y() - (L.cy - L.blockH / 2)) / L.lineHeight)), 0, std::max(0, n - 1));
   const QString line = editLineText(item, L, li);
-  const QFontMetricsF fm(L.font);
+  const Measure m(L, item.text);
+  const int ls = L.lineStart.value(li);
   const double rel = p.x() - lineOriginX(item, L, editLineWidth(item, L, li));
   // 文字の境目ごとの x を調べて、いちばん近い境目を選ぶ（合字や結合文字の途中には置かない）
   int best = 0;
   double bestD = std::abs(rel);
   QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, line);
   for (int pos = finder.toNextBoundary(); pos != -1; pos = finder.toNextBoundary()) {
-    const double d = std::abs(rel - fm.horizontalAdvance(line.left(pos)));
+    const double d = std::abs(rel - m.advance(ls, ls + pos));
     if (d < bestD) {
       bestD = d;
       best = pos;
@@ -218,7 +306,7 @@ int textIndexAt(const TextItem& item, const TextLayout& L, QPointF p, bool* upst
 QList<QRectF> textRangeRects(const TextItem& item, const TextLayout& L, int from, int to) {
   QList<QRectF> out;
   if (from > to) std::swap(from, to);
-  const QFontMetricsF fm(L.font);
+  const Measure m(L, item.text);
   const int n = int(L.lines.size());
   for (int i = 0; i < n; ++i) {
     const QString line = editLineText(item, L, i);
@@ -230,8 +318,8 @@ QList<QRectF> textRangeRects(const TextItem& item, const TextLayout& L, int from
     const bool newline = i + 1 < n && to > le && from <= le && L.lineStart.value(i + 1) > le && item.text.mid(le, 1) == QStringLiteral("\n");
     if (s >= e && !newline) continue;
     const double ox = lineOriginX(item, L, editLineWidth(item, L, i));
-    const double x0 = ox + prefixAdvance(fm, line, std::max(s, ls) - ls);
-    double x1 = ox + prefixAdvance(fm, line, std::max(e, s) - ls);
+    const double x0 = ox + prefixAdvance(m, ls, std::max(s, ls) - ls);
+    double x1 = ox + prefixAdvance(m, ls, std::max(e, s) - ls);
     if (newline) x1 += L.fontPx * 0.3;
     const double base = lineBaseline(L, i);
     out << QRectF(x0, base - L.ascent, std::max(1.0, x1 - x0), L.ascent + L.descent);
@@ -352,8 +440,10 @@ AnimState previewTextState(const TextItem& item, double t, const QString& editin
 }
 
 QString textSpriteKey(const TextItem& item, QSize canvas) {
-  // 字間も絵柄を決める値（変えたときに、古い画像が残らないようキーに入れる）
-  return QStringLiteral("%1|").arg(QString::number(item.letterSpacing, 'f', 3)) +
+  // 字間・フォントのファミリー・一部だけ変えたフォントも絵柄を決める値（変えたときに、古い画像が残らないようキーに入れる）
+  QString spans;
+  for (const auto& s : item.fontSpans) spans += QStringLiteral("%1,%2,%3,%4;").arg(s.start).arg(s.length).arg(fontToString(s.font), s.family);
+  return QStringLiteral("%1|%2|%3|").arg(QString::number(item.letterSpacing, 'f', 3), item.fontFamily, spans) +
          QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9")
       .arg(item.text, fontToString(item.font), QString::number(item.size), QString::number(item.bold), item.color.name(QColor::HexArgb),
            item.strokeColor.name(QColor::HexArgb), QString::number(item.strokeWidth), item.boxColor.name(QColor::HexArgb),

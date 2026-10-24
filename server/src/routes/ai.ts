@@ -1,8 +1,10 @@
 // アプリからの AI の依頼を、上限と考える深さを確かめてから Bedrock に送り、使ったトークンを記録する。
+// 送る前に、依頼の形を確かめ、システムプロンプトをサーバーの決まりで挟む（guard.ts）。
 import type { FastifyInstance } from 'fastify';
 import type { AppContext } from '../app.ts';
 import { RateLimiter } from '../auth/ratelimit.ts';
 import { BedrockError, limitsFor, readUsage, reasoningFields, supportsEffort } from '../bedrock.ts';
+import { checkMessages, checkToolConfig, guardSystem } from '../guard.ts';
 import { ApiError, authenticate } from '../http.ts';
 import type { Level } from '../policy.ts';
 import { clampLevel, effectivePolicy, isChoice, isLevel, monthRange, monthUsage } from '../policy.ts';
@@ -23,13 +25,11 @@ export function aiRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     const body = (req.body ?? {}) as Record<string, unknown>;
     const request = body.request as Record<string, unknown> | undefined;
-    if (!request || typeof request !== 'object' || !Array.isArray(request.messages) || request.messages.length === 0 || request.messages.length > 400) {
-      throw new ApiError(400, 'invalid', '送る内容（messages）が正しくありません');
-    }
-    if (request.system !== undefined && !Array.isArray(request.system)) throw new ApiError(400, 'invalid', 'system が正しくありません');
-    if (request.toolConfig !== undefined && (typeof request.toolConfig !== 'object' || Array.isArray(request.toolConfig))) {
-      throw new ApiError(400, 'invalid', 'toolConfig が正しくありません');
-    }
+    if (!request || typeof request !== 'object' || Array.isArray(request)) throw new ApiError(400, 'invalid', '送る内容（messages）が正しくありません');
+    // アプリが送らない種類の内容は断る。システムプロンプトは、アプリから届いたものをサーバーの決まりで挟む
+    const messages = checkMessages(request.messages);
+    const system = guardSystem(request.system);
+    const toolConfig = checkToolConfig(request.toolConfig);
 
     // 今月の上限（1 回の依頼が残りを少し超えることはある。超えたら次から受け付けない）
     const range = await monthRange(ctx.db, ctx.config.timezone);
@@ -50,13 +50,13 @@ export function aiRoutes(app: FastifyInstance, ctx: AppContext): void {
     const limits = limitsFor(level);
     const reasoning = reasoningFields(model, level);
 
-    // 送るものは、ここで組み立て直す（モデル・上限・深さはサーバーが決める）
+    // 送るものは、ここで組み立て直す（モデル・上限・深さ・システムプロンプトの決まりはサーバーが決める）
     const converse: Record<string, unknown> = {
-      messages: request.messages,
+      system,
+      messages,
       inferenceConfig: { maxTokens: limits.maxTokens },
     };
-    if (request.system !== undefined) converse.system = request.system;
-    if (request.toolConfig !== undefined) converse.toolConfig = request.toolConfig;
+    if (toolConfig) converse.toolConfig = toolConfig;
     if (reasoning) converse.additionalModelRequestFields = reasoning;
 
     const started = Date.now();

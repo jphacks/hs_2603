@@ -24,6 +24,17 @@ ProjectData emptyProject() {
 
 Editor::Editor() {
   ws_.push_back(makeWorkspace());
+  // スポイト: ほかのものを選んだ・再生を始めた・編集場所を切り替えた・その映像が無くなったら、やめる
+  connect(this, &Editor::selectionChanged, this, [this] {
+    if (!chromaPick_.isEmpty() && selection().id != chromaPick_) setChromaPick({});
+  });
+  connect(this, &Editor::playingChanged, this, [this] {
+    if (playing_) setChromaPick({});
+  });
+  connect(this, &Editor::workspaceAboutToChange, this, [this] { setChromaPick({}); });
+  connect(this, &Editor::projectChanged, this, [this] {
+    if (!chromaPick_.isEmpty() && !clip(chromaPick_)) setChromaPick({});
+  });
 }
 
 Editor& Editor::instance() {
@@ -47,6 +58,16 @@ static VideoClip makeClip(const Asset& a, Aspect aspect) {
   c.fit = defaultFit(a, aspect);
   c.color = ColorAdjust{};
   return c;
+}
+
+/** 重ねるトラックに置く映像・画像。はじめは画面の半分の大きさで、中央に置く（重なっているのが分かるように） */
+static OverlayItem makeOverlay(const Asset& a, double start) {
+  OverlayItem o;
+  static_cast<VideoClip&>(o) = makeClip(a, Aspect::R16_9);
+  o.fit = FitMode::Contain;
+  o.scale = 0.5;
+  o.start = std::max(0.0, start);
+  return o;
 }
 
 static AudioItem makeAudioItem(const Asset& a, double start) {
@@ -76,6 +97,59 @@ static const T* findById(const std::vector<T>& list, const QString& id) {
   return nullptr;
 }
 
+/** メインのビデオクリップか、重ねるトラックの映像・画像（映像の設定は同じ形） */
+static VideoClip* findClipAny(ProjectData& p, const QString& id) {
+  if (VideoClip* c = findById(p.clips, id)) return c;
+  if (OverlayItem* o = findById(p.overlays, id)) return o;
+  return nullptr;
+}
+
+/** そのものの開始と長さ（テキスト・オーディオ・重ねるトラック）。見つからなければ false */
+static bool itemSpan(const ProjectData& p, const Selection& s, double* start, double* duration) {
+  if (s.type == Selection::Text) {
+    if (const TextItem* t = findById(p.texts, s.id)) {
+      *start = t->start;
+      *duration = t->duration;
+      return true;
+    }
+  } else if (s.type == Selection::Audio) {
+    if (const AudioItem* a = findById(p.audios, s.id)) {
+      *start = a->start;
+      *duration = audioDuration(*a);
+      return true;
+    }
+  } else if (s.type == Selection::Overlay) {
+    if (const OverlayItem* o = findById(p.overlays, s.id)) {
+      *start = o->start;
+      *duration = overlayDuration(*o, p.settings.fps);
+      return true;
+    }
+  }
+  return false;
+}
+
+static QString* groupField(ProjectData& p, const Selection& s) {
+  if (s.type == Selection::Text) {
+    if (TextItem* t = findById(p.texts, s.id)) return &t->group;
+  } else if (s.type == Selection::Audio) {
+    if (AudioItem* a = findById(p.audios, s.id)) return &a->group;
+  } else if (s.type == Selection::Overlay) {
+    if (OverlayItem* o = findById(p.overlays, s.id)) return &o->group;
+  }
+  return nullptr;
+}
+
+static QString groupValue(const ProjectData& p, const Selection& s) {
+  if (s.type == Selection::Text) {
+    if (const TextItem* t = findById(p.texts, s.id)) return t->group;
+  } else if (s.type == Selection::Audio) {
+    if (const AudioItem* a = findById(p.audios, s.id)) return a->group;
+  } else if (s.type == Selection::Overlay) {
+    if (const OverlayItem* o = findById(p.overlays, s.id)) return o->group;
+  }
+  return {};
+}
+
 const TimelineLayout& Editor::layout() const {
   if (ws().layoutRevision != ws().revision) {
     ws().layout = layoutClips(ws().project.clips, ws().project.settings.fps);
@@ -86,6 +160,7 @@ const TimelineLayout& Editor::layout() const {
 
 double Editor::contentEnd() const {
   double end = layout().total;
+  for (const auto& o : ws().project.overlays) end = std::max(end, o.start + overlayDuration(o, ws().project.settings.fps));
   for (const auto& t : ws().project.texts) end = std::max(end, t.start + t.duration);
   for (const auto& a : ws().project.audios) end = std::max(end, a.start + audioDuration(a));
   return end;
@@ -100,6 +175,7 @@ Selection Editor::validSelection(const Selection& s) const {
   if (s.type == Selection::Clip && findById(ws().project.clips, s.id)) return s;
   if (s.type == Selection::Text && findById(ws().project.texts, s.id)) return s;
   if (s.type == Selection::Audio && findById(ws().project.audios, s.id)) return s;
+  if (s.type == Selection::Overlay && findById(ws().project.overlays, s.id)) return s;
   return {};
 }
 
@@ -112,9 +188,19 @@ void Editor::setDirty(bool d) {
 
 void Editor::afterProjectChange() {
   ++ws().revision;
-  const Selection sel = validSelection(ws().selection);
-  const bool selChanged = !(sel == ws().selection);
+  Selection sel = validSelection(ws().selection);
+  // 一緒に選んでいたもののうち、無くなったものは外す（主に選んでいたものが無くなったら、残りの最後のものを主にする）
+  std::vector<Selection> extra;
+  for (const auto& e : ws().extra) {
+    if (validSelection(e) && !(e == sel)) extra.push_back(e);
+  }
+  if (!sel && !extra.empty()) {
+    sel = extra.back();
+    extra.pop_back();
+  }
+  const bool selChanged = !(sel == ws().selection) || extra.size() != ws().extra.size();
   ws().selection = sel;
+  ws().extra = std::move(extra);
   setDirty(true);
   emit projectChanged();
   if (selChanged) emit selectionChanged();
@@ -122,7 +208,7 @@ void Editor::afterProjectChange() {
 
 /** どの操作で変えても、音量は 0〜100% の範囲に収める */
 static void clampVolumes(ProjectData& p) {
-  for (auto& c : p.clips) {
+  auto fixClip = [](VideoClip& c) {
     c.volume = std::clamp(c.volume, 0.0, kMaxVolume);
     for (auto& pt : c.volumePoints) pt.volume = std::clamp(pt.volume, 0.0, kMaxVolume);
     c.x = clampProp(AnimProp::X, c.x);
@@ -130,6 +216,14 @@ static void clampVolumes(ProjectData& p) {
     c.scale = clampProp(AnimProp::Scale, c.scale);
     c.rotation = clampProp(AnimProp::Rotation, c.rotation);
     c.opacity = clampProp(AnimProp::Opacity, c.opacity);
+    clampCropStretch(c);  // 切り抜き・伸縮・クロマキーの値も範囲に収める
+  };
+  for (auto& c : p.clips) fixClip(c);
+  for (auto& o : p.overlays) {
+    fixClip(o);
+    o.fit = FitMode::Contain;  // 重ねるトラックは、いつも全体表示（余白は透明）
+    o.start = std::max(0.0, o.start);
+    o.track = std::max(0, o.track);
   }
   for (auto& t : p.texts) {
     t.x = clampProp(AnimProp::X, t.x);
@@ -149,6 +243,13 @@ void Editor::commit(const std::function<bool(ProjectData&)>& fn, const QString& 
   ProjectData next = ws().project;
   if (!fn(next)) return;
   clampVolumes(next);
+  // 文字を書き換えたテキストは、一部だけ別のフォントにした範囲を、書き換えた所に合わせて付け直す
+  // （どこから書き換えても同じ。範囲そのものを変えた操作は、そのまま）
+  for (auto& t : next.texts) {
+    const TextItem* before = findById(ws().project.texts, t.id);
+    if (before && before->text != t.text && before->fontSpans == t.fontSpans) adjustFontSpans(before->text, t.text, t.fontSpans);
+    normalizeFontSpans(t);
+  }
   const bool mergeable = !merge.isEmpty() && merge == ws().lastMerge;
   if (!mergeable) {
     ws().past.push_back(ws().project);
@@ -250,9 +351,156 @@ void Editor::redo() {
 
 void Editor::select(const Selection& sel) {
   ws().lastMerge.clear();
-  if (sel == ws().selection) return;
+  if (sel == ws().selection && ws().extra.empty()) return;
   ws().selection = sel;
+  ws().extra.clear();
   emit selectionChanged();
+}
+
+void Editor::toggleSelect(const Selection& sel) {
+  ws().lastMerge.clear();
+  Workspace& w = ws();
+  if (!groupable(sel.type) || !validSelection(sel)) {
+    select(sel);
+    return;
+  }
+  if (!groupable(w.selection.type)) {
+    // メインのビデオクリップは一緒に選べないので、選び直す
+    select(sel);
+    return;
+  }
+  auto it = std::find(w.extra.begin(), w.extra.end(), sel);
+  if (sel == w.selection) {
+    // 主に選んでいたものを外す: 一緒に選んでいた最後のものを、主にする
+    if (w.extra.empty()) {
+      w.selection = {};
+    } else {
+      w.selection = w.extra.back();
+      w.extra.pop_back();
+    }
+  } else if (it != w.extra.end()) {
+    w.extra.erase(it);
+  } else {
+    // 加える: 今まで主に選んでいたものは一緒に選ぶものへ回し、押したものを主にする（設定欄に出す）
+    if (w.selection) w.extra.push_back(w.selection);
+    w.selection = sel;
+  }
+  emit selectionChanged();
+}
+
+void Editor::focusInSelection(const Selection& sel) {
+  Workspace& w = ws();
+  if (sel == w.selection) return;
+  auto it = std::find(w.extra.begin(), w.extra.end(), sel);
+  if (it == w.extra.end()) {
+    // 一緒に選んでいたものでなければ（同じグループのものなど）、そのまま主にする（一緒に選んでいたものは残す）
+    if (!inSelectionSet(sel)) {
+      select(sel);
+      return;
+    }
+    if (w.selection) w.extra.push_back(w.selection);
+    w.selection = sel;
+  } else {
+    *it = w.selection;
+    w.selection = sel;
+  }
+  ws().lastMerge.clear();
+  emit selectionChanged();
+}
+
+std::vector<Selection> Editor::selectionSet() const {
+  const Workspace& w = ws();
+  std::vector<Selection> out;
+  if (!w.selection) return out;
+  out.push_back(w.selection);
+  if (!groupable(w.selection.type)) return out;  // メインのビデオクリップは 1 つずつ
+  for (const auto& e : w.extra) {
+    if (std::find(out.begin(), out.end(), e) == out.end()) out.push_back(e);
+  }
+  // 選んだものと同じグループのもの
+  std::set<QString> groups;
+  for (const auto& s : out) {
+    const QString g = groupValue(w.project, s);
+    if (!g.isEmpty()) groups.insert(g);
+  }
+  if (!groups.empty()) {
+    auto addIf = [&](Selection::Type type, const QString& id, const QString& g) {
+      if (g.isEmpty() || !groups.count(g)) return;
+      const Selection s{type, id};
+      if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(s);
+    };
+    for (const auto& t : w.project.texts) addIf(Selection::Text, t.id, t.group);
+    for (const auto& o : w.project.overlays) addIf(Selection::Overlay, o.id, o.group);
+    for (const auto& a : w.project.audios) addIf(Selection::Audio, a.id, a.group);
+  }
+  return out;
+}
+
+bool Editor::inSelectionSet(const Selection& sel) const {
+  if (!sel) return false;
+  const std::vector<Selection> set = selectionSet();
+  return std::find(set.begin(), set.end(), sel) != set.end();
+}
+
+QString Editor::groupOf(const Selection& sel) const {
+  return groupValue(ws().project, sel);
+}
+
+bool Editor::canGroup() const {
+  const std::vector<Selection> set = selectionSet();
+  if (set.size() < 2) return false;
+  // すでに全部が 1 つのグループなら、まとめ直すことはない
+  const QString g = groupOf(set.front());
+  if (g.isEmpty()) return true;
+  for (const auto& s : set) {
+    if (groupOf(s) != g) return true;
+  }
+  return false;
+}
+
+bool Editor::canUngroup() const {
+  for (const auto& s : selectionSet()) {
+    if (!groupOf(s).isEmpty()) return true;
+  }
+  return false;
+}
+
+bool Editor::groupSelection() {
+  if (!canGroup()) return false;
+  const std::vector<Selection> set = selectionSet();
+  const QString g = newId();
+  commit([&](ProjectData& p) {
+    bool changed = false;
+    for (const auto& s : set) {
+      if (QString* f = groupField(p, s)) {
+        *f = g;
+        changed = true;
+      }
+    }
+    return changed;
+  });
+  toast(QStringLiteral("%1 個をグループにしました。一緒に動かす・削除・複製できます").arg(set.size()), ToastKind::Success);
+  emit selectionChanged();  // 選んでいるものの見た目（グループの印）を描き直す
+  return true;
+}
+
+bool Editor::ungroupSelection() {
+  if (!canUngroup()) return false;
+  const std::vector<Selection> set = selectionSet();
+  commit([&](ProjectData& p) {
+    bool changed = false;
+    for (const auto& s : set) {
+      if (QString* f = groupField(p, s); f && !f->isEmpty()) {
+        f->clear();
+        changed = true;
+      }
+    }
+    return changed;
+  });
+  // グループを解いたあとは、主に選んでいたものだけを選ぶ
+  select(ws().selection);
+  toast(QStringLiteral("グループを解きました"));
+  return true;
 }
 
 void Editor::seek(double t) {
@@ -260,6 +508,53 @@ void Editor::seek(double t) {
   ws().currentTime = std::clamp(t, 0.0, std::max(0.0, end));
   ++seekToken_;
   emit timeChanged();
+}
+
+// ---- 書き出す範囲 ----------------------------------------------------------------
+
+std::optional<Editor::TimeRange> Editor::exportRange() const {
+  if (!ws().range) return std::nullopt;
+  // 書き出せるのはビデオの終わりまで。範囲を決めたあとで短くなっていたら、そこまでに収める
+  const double total = layout().total;
+  const double frame = 1.0 / std::max(1, ws().project.settings.fps);
+  TimeRange r = *ws().range;
+  r.start = std::clamp(r.start, 0.0, total);
+  r.end = std::clamp(r.end, 0.0, total);
+  if (r.end - r.start < frame - 1e-9) return std::nullopt;
+  return r;
+}
+
+void Editor::setRange(double a, double b) {
+  const int fps = ws().project.settings.fps;
+  const double total = layout().total;
+  double s = frameRound(std::clamp(std::min(a, b), 0.0, total), fps);
+  double e = frameRound(std::clamp(std::max(a, b), 0.0, total), fps);
+  // 1 フレームより短い範囲は作らない
+  if (e - s < 1.0 / fps - 1e-9) {
+    toast(QStringLiteral("範囲が短すぎます。開始と終了を 1 フレーム以上離してください"));
+    return;
+  }
+  ws().range = TimeRange{s, e};
+  emit rangeChanged();
+}
+
+void Editor::setRangeStart(double t) {
+  const std::optional<TimeRange> r = exportRange();
+  const double total = layout().total;
+  if (r && t < r->end) setRange(t, r->end);
+  else setRange(t, total);
+}
+
+void Editor::setRangeEnd(double t) {
+  const std::optional<TimeRange> r = exportRange();
+  if (r && t > r->start) setRange(r->start, t);
+  else setRange(0, t);
+}
+
+void Editor::clearRange() {
+  if (!ws().range) return;
+  ws().range.reset();
+  emit rangeChanged();
 }
 
 void Editor::setTimeFromEngine(double t) {
@@ -342,6 +637,9 @@ static bool usesAsset(const ProjectData& p, const QString& id) {
   for (const auto& c : p.clips) {
     if (c.assetId == id) return true;
   }
+  for (const auto& o : p.overlays) {
+    if (o.assetId == id) return true;
+  }
   for (const auto& a : p.audios) {
     if (a.assetId == id) return true;
   }
@@ -353,6 +651,7 @@ bool Editor::removeAsset(const QString& id) {
     // タイムラインで使っている素材は、一覧からも外さない（外すと、タイムラインのクリップが素材を失うため）
     int uses = 0;
     for (const auto& c : ws().project.clips) uses += c.assetId == id;
+    for (const auto& o : ws().project.overlays) uses += o.assetId == id;
     for (const auto& a : ws().project.audios) uses += a.assetId == id;
     const Asset* a = asset(id);
     toast(QStringLiteral("「%1」はタイムラインで %2 か所使っているため、一覧から削除できません。先にタイムラインから外してください")
@@ -435,7 +734,8 @@ void Editor::addToTimeline(const std::vector<QString>& assetIds, std::optional<i
 
 void Editor::updateClip(const QString& id, const std::function<void(VideoClip&)>& fn, const QString& merge) {
   commit([&](ProjectData& p) {
-    VideoClip* c = findById(p.clips, id);
+    // 重ねるトラックの映像・画像も、映像の設定は同じ形なので、同じ操作で変える
+    VideoClip* c = findClipAny(p, id);
     if (!c) return false;
     fn(*c);
     return true;
@@ -476,9 +776,9 @@ void Editor::moveTextTrack(const QString& id, int delta) {
   });
 }
 
-double Editor::newTextDuration(double start) const {
+double Editor::newTextDuration(double start, double wanted) const {
   const double total = layout().total;
-  double duration = kDefaultTextDuration;
+  double duration = std::max(kMinTextDuration, wanted);
   // 動画の終わりをまたぐときだけ、終わりまでに縮める（終わりより後ろに置いたときは、そのままの長さ）
   if (total > 1 && start < total && start + duration > total) duration = std::max(kMinTextDuration, total - start);
   return duration;
@@ -486,7 +786,8 @@ double Editor::newTextDuration(double start) const {
 
 QString Editor::addTextAt(const QString& presetId, double start) {
   TextItem item = makeText(presetId, frameRound(std::max(0.0, start), ws().project.settings.fps));
-  item.duration = newTextDuration(item.start);
+  // 長さは、テンプレートなら保存したときの長さ、組み込みのスタイルなら決まった長さ（動画の終わりをまたぐときは終わりまで）
+  item.duration = newTextDuration(item.start, item.duration);
   commit([&](ProjectData& p) {
     // 新しいテキストの段は、ここで一度だけ決める。ほかのテキストの段は変えない
     item.track = freeTextTrack(p.texts, item.start, item.duration);
@@ -501,8 +802,61 @@ QString Editor::addText(const QString& presetId, std::optional<double> at) {
   // ボタン・キー・ダブルクリックで追加するときは、動画の終わりぎわなら少し手前にずらして、見える位置に置く
   const double total = layout().total;
   double start = at.value_or(ws().currentTime);
-  if (total > 0 && start >= total - 0.3) start = std::max(0.0, total - kDefaultTextDuration);
+  if (total > 0 && start >= total - 0.3) start = std::max(0.0, total - presetDuration(presetId));
   return addTextAt(presetId, start);
+}
+
+QString Editor::addOverlays(const std::vector<QString>& assetIds, std::optional<double> at, std::optional<int> track) {
+  std::vector<Asset> visual;
+  for (const auto& id : assetIds) {
+    const Asset* a = asset(id);
+    if (!a || a->status == AssetStatus::Error || a->kind == AssetKind::Audio) continue;
+    visual.push_back(*a);
+  }
+  if (visual.empty()) return {};
+  const int fps = ws().project.settings.fps;
+  QString first;
+  commit([&](ProjectData& p) {
+    double pos = frameRound(std::max(0.0, at.value_or(ws().currentTime)), fps);
+    for (const auto& a : visual) {
+      OverlayItem o = makeOverlay(a, pos);
+      const double dur = overlayDuration(o, fps);
+      // 指定の段が空いていればそこへ。ふさがっていれば（指定が無ければ）、重ならない段へ（ほかのものの段は変えない）
+      if (track && *track >= 0 && overlayTrackFree(p.overlays, *track, o.start, dur, fps)) o.track = *track;
+      else o.track = freeOverlayTrack(p.overlays, o.start, dur, fps);
+      if (first.isEmpty()) first = o.id;
+      p.overlays.push_back(o);
+      pos += dur;
+    }
+    return true;
+  });
+  if (!first.isEmpty()) select({Selection::Overlay, first});
+  return first;
+}
+
+void Editor::updateOverlay(const QString& id, const std::function<void(OverlayItem&)>& fn, const QString& merge) {
+  commit([&](ProjectData& p) {
+    OverlayItem* o = findById(p.overlays, id);
+    if (!o) return false;
+    fn(*o);
+    return true;
+  }, merge);
+}
+
+void Editor::moveOverlayTrack(const QString& id, int delta) {
+  commit([&](ProjectData& p) {
+    OverlayItem* o = findById(p.overlays, id);
+    if (!o || delta == 0) return false;
+    // 一番上の段のさらに上へ 1 段だけ増やせる（自分だけの段をどんどん上へ送ることはできない）
+    int lastOther = -1;
+    for (const auto& x : p.overlays) {
+      if (x.id != id) lastOther = std::max(lastOther, x.track);
+    }
+    const int next = std::clamp(o->track + delta, 0, lastOther + 1);
+    if (next == o->track) return false;
+    o->track = next;
+    return true;
+  });
 }
 
 void Editor::updateText(const QString& id, const std::function<void(TextItem&)>& fn, const QString& merge) {
@@ -543,6 +897,12 @@ static VolumeTarget volumeTarget(ProjectData& p, const QString& id) {
         t.duration = l.duration;
       }
     }
+  } else if (OverlayItem* o = findById(p.overlays, id)) {
+    t.points = &o->volumePoints;
+    t.volume = o->volume;
+    t.base = &o->volume;
+    t.start = o->start;
+    t.duration = overlayDuration(*o, p.settings.fps);
   }
   return t;
 }
@@ -655,17 +1015,23 @@ void Editor::updateAudio(const QString& id, const std::function<void(AudioItem&)
 }
 
 void Editor::deleteSelection() {
-  const Selection sel = ws().selection;
-  if (!sel) return;
+  // 一緒に選んでいるものと、同じグループのものも、まとめて消す（メインのビデオクリップは 1 つずつ）
+  const std::vector<Selection> set = selectionSet();
+  if (set.empty()) return;
   commit([&](ProjectData& p) {
-    auto erase = [&](auto& list) {
+    bool changed = false;
+    auto erase = [&](auto& list, Selection::Type type) {
       const auto before = list.size();
-      list.erase(std::remove_if(list.begin(), list.end(), [&](const auto& x) { return x.id == sel.id; }), list.end());
-      return list.size() != before;
+      list.erase(std::remove_if(list.begin(), list.end(),
+                                [&](const auto& x) { return std::find(set.begin(), set.end(), Selection{type, x.id}) != set.end(); }),
+                 list.end());
+      changed |= list.size() != before;
     };
-    if (sel.type == Selection::Clip) return erase(p.clips);
-    if (sel.type == Selection::Text) return erase(p.texts);
-    return erase(p.audios);
+    erase(p.clips, Selection::Clip);
+    erase(p.overlays, Selection::Overlay);
+    erase(p.texts, Selection::Text);
+    erase(p.audios, Selection::Audio);
+    return changed;
   });
   select({});
   // 再生位置が終わりより後ろになったら戻す
@@ -675,6 +1041,74 @@ void Editor::deleteSelection() {
 void Editor::duplicateSelection() {
   const Selection sel = ws().selection;
   if (!sel) return;
+  const std::vector<Selection> set = selectionSet();
+  const int fps = ws().project.settings.fps;
+  if (set.size() > 1) {
+    // まとめて複製: 全体の終わりのすぐ後ろへ、並びと間隔をそのままに写す。グループは、写したもの同士の新しいグループにする
+    double first = 1e18;
+    double last = 0;
+    for (const auto& s : set) {
+      double st = 0, du = 0;
+      if (itemSpan(ws().project, s, &st, &du)) {
+        first = std::min(first, st);
+        last = std::max(last, st + du);
+      }
+    }
+    if (first > last) return;
+    const double shift = frameRound(last - first, fps);
+    std::map<QString, QString> groups;  // 元のグループ → 写したもののグループ
+    auto mapGroup = [&](const QString& g) {
+      if (g.isEmpty()) return QString();
+      auto it = groups.find(g);
+      if (it == groups.end()) it = groups.insert({g, newId()}).first;
+      return it->second;
+    };
+    std::vector<Selection> copies;
+    commit([&](ProjectData& p) {
+      for (const auto& s : set) {
+        const QString nid = newId();
+        if (s.type == Selection::Text) {
+          const TextItem* t = findById(p.texts, s.id);
+          if (!t) continue;
+          TextItem copy = *t;
+          copy.id = nid;
+          copy.start = t->start + shift;
+          copy.group = mapGroup(t->group);
+          if (!textTrackFree(p.texts, copy.track, copy.start, copy.duration)) copy.track = freeTextTrack(p.texts, copy.start, copy.duration);
+          p.texts.push_back(copy);
+        } else if (s.type == Selection::Audio) {
+          const AudioItem* a = findById(p.audios, s.id);
+          if (!a) continue;
+          AudioItem copy = *a;
+          copy.id = nid;
+          copy.start = a->start + shift;
+          copy.group = mapGroup(a->group);
+          p.audios.push_back(copy);
+        } else if (s.type == Selection::Overlay) {
+          const OverlayItem* o = findById(p.overlays, s.id);
+          if (!o) continue;
+          OverlayItem copy = *o;
+          copy.id = nid;
+          copy.start = o->start + shift;
+          copy.group = mapGroup(o->group);
+          const double dur = overlayDuration(copy, fps);
+          if (!overlayTrackFree(p.overlays, copy.track, copy.start, dur, fps)) copy.track = freeOverlayTrack(p.overlays, copy.start, dur, fps);
+          p.overlays.push_back(copy);
+        } else {
+          continue;
+        }
+        copies.push_back({s.type, nid});
+      }
+      return !copies.empty();
+    });
+    if (copies.empty()) return;
+    // 写したものを選ぶ（主に選んでいたものの写しを主に）
+    ws().selection = copies.front();
+    ws().extra.assign(copies.begin() + 1, copies.end());
+    ws().lastMerge.clear();
+    emit selectionChanged();
+    return;
+  }
   const QString newIdValue = newId();
   bool done = false;
   commit([&](ProjectData& p) {
@@ -690,15 +1124,27 @@ void Editor::duplicateSelection() {
       TextItem copy = *t;
       copy.id = newIdValue;
       copy.start = t->start + t->duration;
+      copy.group.clear();  // 1 つだけ写したものは、元のグループに入れない
       // 元と同じ段が空いていればそこへ。ふさがっていれば、重ならない段へ（元のテキストの段は変えない）
       if (!textTrackFree(p.texts, t->track, copy.start, copy.duration)) copy.track = freeTextTrack(p.texts, copy.start, copy.duration);
       p.texts.push_back(copy);
+    } else if (sel.type == Selection::Overlay) {
+      const OverlayItem* o = findById(p.overlays, sel.id);
+      if (!o) return false;
+      OverlayItem copy = *o;
+      copy.id = newIdValue;
+      copy.start = o->start + overlayDuration(*o, fps);
+      copy.group.clear();
+      const double dur = overlayDuration(copy, fps);
+      if (!overlayTrackFree(p.overlays, copy.track, copy.start, dur, fps)) copy.track = freeOverlayTrack(p.overlays, copy.start, dur, fps);
+      p.overlays.push_back(copy);
     } else {
       const AudioItem* a = findById(p.audios, sel.id);
       if (!a) return false;
       AudioItem copy = *a;
       copy.id = newIdValue;
       copy.start = a->start + audioDuration(*a);
+      copy.group.clear();
       p.audios.push_back(copy);
     }
     done = true;
@@ -764,6 +1210,41 @@ void Editor::splitAtPlayhead() {
     }
   }
 
+  if (sel.type == Selection::Overlay) {
+    const OverlayItem* item = overlay(sel.id);
+    if (!item) return;
+    const double dur = overlayDuration(*item, fps);
+    const int localFrames = int(std::floor((t - item->start) * fps + 0.5));
+    const int totalFrames = int(std::floor(dur * fps + 0.5));
+    if (localFrames < 1 || localFrames > totalFrames - 1) {
+      toast(QStringLiteral("再生ヘッドの位置が、選んでいる映像の中にありません"));
+      return;
+    }
+    const double local = double(localFrames) / fps;
+    const OverlayItem orig = *item;
+    const double cut = orig.isImage ? orig.in + local : orig.in + local * orig.speed;
+    commit([&](ProjectData& p) {
+      for (size_t i = 0; i < p.overlays.size(); ++i) {
+        if (p.overlays[i].id != orig.id) continue;
+        OverlayItem second = orig;
+        second.id = newIdValue;
+        second.start = orig.start + local;
+        second.in = cut;
+        second.fadeIn = 0;
+        p.overlays[i].out = cut;
+        p.overlays[i].fadeOut = 0;
+        // キーフレームは前半・後半に振り分ける（分け目の値は、どちらにも残す）
+        splitAnimation(orig.anim, local, p.overlays[i].anim, second.anim);
+        splitVolumePointList(orig.volumePoints, orig.volume, local, p.overlays[i].volumePoints, second.volumePoints);
+        p.overlays.insert(p.overlays.begin() + i + 1, second);
+        return true;
+      }
+      return false;
+    });
+    select({Selection::Overlay, newIdValue});
+    return;
+  }
+
   const TimelineLayout& lay = layout();
   const ClipLayout* hit = nullptr;
   if (sel.type == Selection::Clip) {
@@ -827,8 +1308,37 @@ void Editor::setFps(int fps) {
   });
 }
 
+void Editor::setProjectSpeed(double speed) {
+  const double s = std::clamp(speed, kMinProjectSpeed, kMaxProjectSpeed);
+  commit([&](ProjectData& p) {
+    if (std::abs(p.settings.speed - s) < 1e-9) return false;
+    p.settings.speed = s;
+    return true;
+  });
+}
+
 const VideoClip* Editor::clip(const QString& id) const {
-  return findById(ws().project.clips, id);
+  if (const VideoClip* c = findById(ws().project.clips, id)) return c;
+  return findById(ws().project.overlays, id);
+}
+
+const OverlayItem* Editor::overlay(const QString& id) const {
+  return findById(ws().project.overlays, id);
+}
+
+bool Editor::clipSpan(const QString& id, double* start, double* duration) const {
+  for (const auto& l : layout().items) {
+    if (l.clip.id != id) continue;
+    *start = l.start;
+    *duration = l.duration;
+    return true;
+  }
+  if (const OverlayItem* o = overlay(id)) {
+    *start = o->start;
+    *duration = overlayDuration(*o, ws().project.settings.fps);
+    return true;
+  }
+  return false;
 }
 
 const TextItem* Editor::text(const QString& id) const {
@@ -878,6 +1388,13 @@ static AnimTarget animTarget(ProjectData& p, const Selection& sel) {
         t.duration = l.duration;
       }
     }
+  } else if (sel.type == Selection::Overlay) {
+    OverlayItem* o = findById(p.overlays, sel.id);
+    if (!o) return {};
+    t.clip = o;
+    t.anim = &o->anim;
+    t.start = o->start;
+    t.duration = overlayDuration(*o, p.settings.fps);
   } else if (sel.type == Selection::Text) {
     t.text = findById(p.texts, sel.id);
     if (!t.text) return {};
@@ -890,12 +1407,12 @@ static AnimTarget animTarget(ProjectData& p, const Selection& sel) {
 
 bool Editor::animatable() const {
   const Selection& s = ws().selection;
-  return s.type == Selection::Clip || s.type == Selection::Text;
+  return s.type == Selection::Clip || s.type == Selection::Text || s.type == Selection::Overlay;
 }
 
 const Animation* Editor::animation() const {
   const Selection& s = ws().selection;
-  if (s.type == Selection::Clip) {
+  if (s.type == Selection::Clip || s.type == Selection::Overlay) {
     const VideoClip* c = clip(s.id);
     return c ? &c->anim : nullptr;
   }
@@ -908,10 +1425,9 @@ const Animation* Editor::animation() const {
 
 double Editor::objectStart() const {
   const Selection& s = ws().selection;
-  if (s.type == Selection::Clip) {
-    for (const auto& l : layout().items) {
-      if (l.clip.id == s.id) return l.start;
-    }
+  if (s.type == Selection::Clip || s.type == Selection::Overlay) {
+    double start = 0, duration = 0;
+    if (clipSpan(s.id, &start, &duration)) return start;
   } else if (s.type == Selection::Text) {
     if (const TextItem* t = text(s.id)) return t->start;
   }
@@ -920,10 +1436,9 @@ double Editor::objectStart() const {
 
 double Editor::objectDuration() const {
   const Selection& s = ws().selection;
-  if (s.type == Selection::Clip) {
-    for (const auto& l : layout().items) {
-      if (l.clip.id == s.id) return l.duration;
-    }
+  if (s.type == Selection::Clip || s.type == Selection::Overlay) {
+    double start = 0, duration = 0;
+    if (clipSpan(s.id, &start, &duration)) return duration;
   } else if (s.type == Selection::Text) {
     if (const TextItem* t = text(s.id)) return t->duration;
   }
@@ -933,7 +1448,7 @@ double Editor::objectDuration() const {
 LayerState Editor::currentLayerState() const {
   const Selection& s = ws().selection;
   const double local = std::clamp(currentTime() - objectStart(), 0.0, std::max(0.0, objectDuration()));
-  if (s.type == Selection::Clip) {
+  if (s.type == Selection::Clip || s.type == Selection::Overlay) {
     if (const VideoClip* c = clip(s.id)) return layerStateAt(*c, local);
   } else if (s.type == Selection::Text) {
     if (const TextItem* t = text(s.id)) return layerStateAt(*t, local);
@@ -945,6 +1460,13 @@ void Editor::setAutoKey(bool on) {
   if (autoKey_ == on) return;
   autoKey_ = on;
   emit autoKeyChanged();
+}
+
+void Editor::setChromaPick(const QString& clipId) {
+  if (chromaPick_ == clipId) return;
+  if (!clipId.isEmpty()) pause();  // 止めた画面から選ぶ
+  chromaPick_ = clipId;
+  emit chromaPickChanged();
 }
 
 bool Editor::setPropValue(AnimProp prop, double value, const QString& merge) {
@@ -1277,16 +1799,15 @@ bool Editor::applyAnimPreset(const QString& id) {
 
 // ---- 編集場所 ---------------------------------------------------------------
 
-bool Editor::hasAnyContent() const {
-  for (const auto& w : ws_) {
-    const ProjectData& p = w.project;
-    if (!p.clips.empty() || !p.texts.empty() || !p.audios.empty()) return true;
-  }
-  return false;
+static bool hasContent(const ProjectData& p) {
+  return !p.clips.empty() || !p.overlays.empty() || !p.texts.empty() || !p.audios.empty();
 }
 
-static bool hasContent(const ProjectData& p) {
-  return !p.clips.empty() || !p.texts.empty() || !p.audios.empty();
+bool Editor::hasAnyContent() const {
+  for (const auto& w : ws_) {
+    if (hasContent(w.project)) return true;
+  }
+  return false;
 }
 
 WorkspaceData Editor::snapshotOf(int index) const {
@@ -1307,6 +1828,7 @@ WorkspaceData Editor::snapshotOf(int index) const {
   };
   for (const auto& id : w.assetOrder) add(id);
   for (const auto& c : w.project.clips) add(c.assetId);
+  for (const auto& o : w.project.overlays) add(o.assetId);
   for (const auto& a : w.project.audios) add(a.assetId);
   return out;
 }
@@ -1393,6 +1915,7 @@ void Editor::announceActivated() {
   ++seekToken_;
   // 先に編集場所が変わったことを知らせ、そのあと表示に必要なものを順に更新させる
   emit workspaceChanged(active_);
+  emit rangeChanged();  // 範囲は編集場所ごと
   emit projectChanged();
   emit assetsChanged();
   emit selectionChanged();
@@ -1430,6 +1953,10 @@ static void remapIds(WorkspaceData& d) {
   for (auto& c : d.project.clips) {
     c.id = newId();
     mapAsset(c.assetId);
+  }
+  for (auto& o : d.project.overlays) {
+    o.id = newId();
+    mapAsset(o.assetId);
   }
   for (auto& t : d.project.texts) t.id = newId();
   for (auto& a : d.project.audios) {

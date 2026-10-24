@@ -1108,6 +1108,11 @@ void AiPanel::refreshStatus() {
 
 bool AiPanel::ask(const QString& request, const QString& shown) {
   if (assistant_->busy()) return false;
+  // 送れない依頼（長すぎる など）は、会話の欄に出さずに理由だけを出す（入力欄の文は消さずに残る）
+  if (const QString problem = ai::Assistant::requestProblem(request); !problem.isEmpty()) {
+    addError(problem);
+    return false;
+  }
   addUser(shown.isEmpty() ? request : shown);
   return assistant_->send(request);
 }

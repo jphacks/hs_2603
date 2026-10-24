@@ -12,7 +12,11 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QDir>
+#include <QFileInfo>
 #include <QScrollBar>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
@@ -23,6 +27,7 @@
 #include "core/timeline.h"
 #include "media/mediamanager.h"
 #include "ui/librarypanel.h"
+#include "ui/objectmenu.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -30,9 +35,19 @@ namespace kv {
 
 static constexpr int kHeadW = 108;
 static constexpr int kRulerH = 26;
+// 段の高さの、はじめの値と範囲（左の見出しの列の境目をドラッグするか、キーで変えられる）
 static constexpr int kVideoH = 66;
 static constexpr int kTextLaneH = 28;
+static constexpr int kOverlayLaneH = 44;  // 重ねるトラックの 1 段（サムネイルが見える高さ）
 static constexpr int kAudioLaneH = 52;  // 音量ラインを動かしやすいよう、少し高くする
+static constexpr int kMinVideoH = 40;
+static constexpr int kMaxVideoH = 200;
+static constexpr int kMinTextLaneH = 20;
+static constexpr int kMaxTextLaneH = 64;
+static constexpr int kMinOverlayLaneH = 28;
+static constexpr int kMaxOverlayLaneH = 120;
+static constexpr int kMinAudioLaneH = 36;
+static constexpr int kMaxAudioLaneH = 140;
 static constexpr double kSnapPx = 8;
 static constexpr double kZoomMin = 4;
 static constexpr double kZoomMax = 400;
@@ -59,6 +74,8 @@ TimelineView::TimelineView(QWidget* parent) : QAbstractScrollArea(parent) {
     viewport()->update();
   });
   connect(&ed, &Editor::waveformChanged, this, [this] { viewport()->update(); });
+  connect(&ed, &Editor::rangeChanged, this, [this] { viewport()->update(); });
+  loadTrackHeights();  // 前回の段の高さ
   connect(&ed, &Editor::timeChanged, this, [this] {
     followPlayhead();
     viewport()->update();
@@ -177,6 +194,10 @@ static TimelineView::Lanes stableLanes(const std::vector<LaneSpan>& items, const
 void TimelineView::relayout() {
   const ProjectData& p = editor().project();
   textLanes_ = textLanesOf(p.texts);
+  // 重ねるトラックの段も、各映像が持つ段（track）をそのまま使う
+  overlayLanes_ = Lanes();
+  for (const auto& o : p.overlays) overlayLanes_.lane[o.id] = o.track;
+  overlayLanes_.count = overlayTrackCount(p.overlays);
   std::vector<LaneSpan> a;
   for (const auto& x : p.audios) a.push_back({x.id, x.start, x.start + audioDuration(x)});
   audioLanes_ = stableLanes(a, audioMemo_, laneHoldId_, laneHold_);
@@ -186,20 +207,51 @@ void TimelineView::relayout() {
   updateScrollBars();
 }
 
+int TimelineView::textLaneAt(double y) const {
+  // テキストの段の中だけ（一番下の段のさらに下へ移せるよう、下の段に少しはみ出したところまで）。外なら -1
+  if (y < textY() || y >= overlayY() + std::max(8, int(textLaneH_ * 0.6))) return -1;
+  int lastOther = -1;
+  for (const auto& t : editor().project().texts) {
+    if (t.id != dragId_) lastOther = std::max(lastOther, t.track);
+  }
+  const int lane = int(std::floor((y - textY() - 2) / textLaneH_));
+  return std::clamp(lane, 0, lastOther + 1);
+}
+
+int TimelineView::overlayLaneAt(double y) const {
+  // 重ねるトラックの段の中だけ（一番上の段のさらに上へ移せるよう、テキストの段に少しはみ出したところまで）。外なら -1
+  const int tol = std::max(8, int(overlayLaneH_ * 0.6));
+  if (y < overlayY() - tol || y >= videoY()) return -1;
+  int lastOther = -1;
+  for (const auto& o : editor().project().overlays) {
+    if (o.id != dragId_) lastOther = std::max(lastOther, o.track);
+  }
+  // 段は下から 0, 1, 2 …（上の段ほど前に重なる）
+  const int fromTop = int(std::floor((y - overlayY() - 2) / overlayLaneH_));
+  const int lane = overlayLanes_.count - 1 - fromTop;
+  return std::clamp(lane, 0, lastOther + 1);
+}
+
 int TimelineView::textH() const {
-  return textLanes_.count * kTextLaneH + 4;
+  return textLanes_.count * textLaneH_ + 4;
+}
+int TimelineView::overlayH() const {
+  return overlayLanes_.count * overlayLaneH_ + 4;
 }
 int TimelineView::audioH() const {
-  return audioLanes_.count * kAudioLaneH + 4;
+  return audioLanes_.count * audioLaneH_ + 4;
 }
 int TimelineView::textY() const {
   return kRulerH - verticalScrollBar()->value();
 }
-int TimelineView::videoY() const {
+int TimelineView::overlayY() const {
   return textY() + textH();
 }
+int TimelineView::videoY() const {
+  return overlayY() + overlayH();
+}
 int TimelineView::audioY() const {
-  return videoY() + kVideoH;
+  return videoY() + videoH_;
 }
 
 double TimelineView::xOf(double t) const {
@@ -222,7 +274,7 @@ void TimelineView::updateScrollBars() {
   if (dragActive()) maxX = std::max(maxX, horizontalScrollBar()->value());
   horizontalScrollBar()->setPageStep(std::max(1, viewW));
   horizontalScrollBar()->setRange(0, maxX);
-  const int contentH = kRulerH + textH() + kVideoH + audioH();
+  const int contentH = kRulerH + textH() + overlayH() + videoH_ + audioH();
   verticalScrollBar()->setPageStep(viewport()->height());
   verticalScrollBar()->setRange(0, std::max(0, contentH - viewport()->height()));
 }
@@ -265,6 +317,88 @@ void TimelineView::fitAll() {
   horizontalScrollBar()->setValue(0);
 }
 
+// ---- 段の高さ ----------------------------------------------------------------------
+
+// AI の設定・キーの割り当てと同じ settings.ini に覚える（アプリ全体の設定。プロジェクトには保存しない）
+static QString timelineSettingsPath() {
+  return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(QStringLiteral("settings.ini"));
+}
+
+void TimelineView::setTrackHeights(int textLane, int overlayLane, int video, int audioLane) {
+  textLane = std::clamp(textLane, kMinTextLaneH, kMaxTextLaneH);
+  overlayLane = std::clamp(overlayLane, kMinOverlayLaneH, kMaxOverlayLaneH);
+  video = std::clamp(video, kMinVideoH, kMaxVideoH);
+  audioLane = std::clamp(audioLane, kMinAudioLaneH, kMaxAudioLaneH);
+  if (textLane == textLaneH_ && overlayLane == overlayLaneH_ && video == videoH_ && audioLane == audioLaneH_) return;
+  textLaneH_ = textLane;
+  overlayLaneH_ = overlayLane;
+  videoH_ = video;
+  audioLaneH_ = audioLane;
+  updateScrollBars();
+  viewport()->update();
+}
+
+void TimelineView::loadTrackHeights() {
+  QSettings s(timelineSettingsPath(), QSettings::IniFormat);
+  setTrackHeights(s.value(QStringLiteral("timeline/textLaneHeight"), kTextLaneH).toInt(),
+                  s.value(QStringLiteral("timeline/overlayLaneHeight"), kOverlayLaneH).toInt(),
+                  s.value(QStringLiteral("timeline/videoHeight"), kVideoH).toInt(),
+                  s.value(QStringLiteral("timeline/audioLaneHeight"), kAudioLaneH).toInt());
+}
+
+void TimelineView::saveTrackHeights() const {
+  QDir().mkpath(QFileInfo(timelineSettingsPath()).absolutePath());
+  QSettings s(timelineSettingsPath(), QSettings::IniFormat);
+  s.setValue(QStringLiteral("timeline/textLaneHeight"), textLaneH_);
+  s.setValue(QStringLiteral("timeline/overlayLaneHeight"), overlayLaneH_);
+  s.setValue(QStringLiteral("timeline/videoHeight"), videoH_);
+  s.setValue(QStringLiteral("timeline/audioLaneHeight"), audioLaneH_);
+}
+
+void TimelineView::scaleTrackHeights(double factor) {
+  setTrackHeights(int(std::lround(textLaneH_ * factor)), int(std::lround(overlayLaneH_ * factor)), int(std::lround(videoH_ * factor)),
+                  int(std::lround(audioLaneH_ * factor)));
+  saveTrackHeights();
+}
+
+void TimelineView::resetTrackHeights() {
+  setTrackHeights(kTextLaneH, kOverlayLaneH, kVideoH, kAudioLaneH);
+  saveTrackHeights();
+}
+
+int TimelineView::trackBorderAt(QPointF pos) const {
+  if (pos.x() >= kHeadW || pos.y() < kRulerH) return -1;
+  const int borders[4] = {overlayY(), videoY(), audioY(), audioY() + audioH()};
+  for (int i = 0; i < 4; ++i) {
+    if (std::abs(pos.y() - borders[i]) <= 4) return i;
+  }
+  return -1;
+}
+
+void TimelineView::execHeaderMenu(const QPoint& globalPos) {
+  QMenu menu(this);
+  // 見出しの「重ねる」の列: 動画・写真を重ねる方法の案内
+  if (rowAt(viewport()->mapFromGlobal(globalPos).y()) == Row::Overlay) {
+    QAction* info = menu.addAction(QStringLiteral("左の「メディア」から、この段へ動画・写真をドラッグすると、映像の上に重ねられます"));
+    info->setEnabled(false);
+    menu.addSeparator();
+  }
+  menu.addAction(QStringLiteral("段を高くする"), this, [this] { scaleTrackHeights(1.2); });
+  menu.addAction(QStringLiteral("段を低くする"), this, [this] { scaleTrackHeights(1 / 1.2); });
+  menu.addAction(QStringLiteral("段の高さを元に戻す"), this, [this] { resetTrackHeights(); });
+  menu.addSeparator();
+  QAction* hint = menu.addAction(QStringLiteral("見出しの段の境目をドラッグしても、高さを変えられます"));
+  hint->setEnabled(false);
+  menu.exec(globalPos);
+}
+
+void TimelineView::revealTime(double t) {
+  const double x = xOf(t);
+  if (x >= kHeadW + 24 && x <= viewport()->width() - 48) return;
+  // 見えている幅の左から 1/3 あたりに来るようにする
+  horizontalScrollBar()->setValue(int(std::lround(t * pps() - (viewport()->width() - kHeadW) / 3.0)));
+}
+
 void TimelineView::followPlayhead() {
   if (!editor().playing()) return;
   const double x = editor().currentTime() * pps();
@@ -283,20 +417,66 @@ void TimelineView::zoomAt(double factor, double mouseX) {
 
 TimelineView::Row TimelineView::rowAt(double y) const {
   if (y < kRulerH) return Row::Ruler;
-  if (y < videoY()) return Row::Text;
+  if (y < overlayY()) return Row::Text;
+  if (y < videoY()) return Row::Overlay;
   if (y < audioY()) return Row::Video;
   if (y < audioY() + audioH()) return Row::Audio;
   return Row::None;
 }
 
 QRectF TimelineView::clipRect(const ClipLayout& l) const {
-  return {xOf(l.start), double(videoY() + 4), std::max(2.0, l.duration * pps()), double(kVideoH - 8)};
+  return {xOf(l.start), double(videoY() + 4), std::max(2.0, l.duration * pps()), double(videoH_ - 8)};
 }
 
 QRectF TimelineView::itemRect(Selection::Type type, double start, double duration, int lane) const {
-  const int laneH = type == Selection::Text ? kTextLaneH : kAudioLaneH;
+  if (type == Selection::Overlay) {
+    // 重ねるトラックは、下の段（メインに近い）から 0, 1, 2 …
+    const int row = std::max(0, overlayLanes_.count - 1 - lane);
+    return {xOf(start), double(overlayY() + 2 + row * overlayLaneH_), std::max(6.0, duration * pps()), double(overlayLaneH_ - 4)};
+  }
+  const int laneH = type == Selection::Text ? textLaneH_ : audioLaneH_;
   const int top = type == Selection::Text ? textY() : audioY();
   return {xOf(start), double(top + 2 + lane * laneH), std::max(6.0, duration * pps()), double(laneH - 4)};
+}
+
+QRectF TimelineView::overlayRect(const OverlayItem& o) const {
+  return itemRect(Selection::Overlay, o.start, overlayDuration(o, editor().project().settings.fps),
+                  overlayLanes_.lane.count(o.id) ? overlayLanes_.lane.at(o.id) : 0);
+}
+
+std::vector<QString> TimelineView::coSelectedIds() const {
+  std::vector<QString> out;
+  const Editor& ed = editor();
+  for (const auto& s : ed.selectionSet()) {
+    if (!(s == ed.selection())) out.push_back(s.id);
+  }
+  return out;
+}
+
+/** グループの色（グループごとに違う色。同じグループは同じ色） */
+static QColor groupColor(const QString& g) {
+  return QColor::fromHsv(int(qHash(g) % 360), 150, 235);
+}
+
+void TimelineView::paintGroupMarks(QPainter& p, const QRectF& r, const QString& group, bool coSelected) {
+  if (group.isEmpty() && !coSelected) return;
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  if (!group.isEmpty()) {
+    // バーの下の端に、グループの色の線
+    QPainterPath shape;
+    shape.addRoundedRect(r, 3, 3);
+    p.setClipPath(shape);
+    p.fillRect(QRectF(r.left(), r.bottom() - 3, r.width(), 3), groupColor(group));
+    p.setClipping(false);
+  }
+  if (coSelected) {
+    // 一緒に扱うもの: 白い点線の枠
+    p.setPen(QPen(QColor(255, 255, 255, 220), 1.4, Qt::DashLine));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 3, 3);
+  }
+  p.restore();
 }
 
 // ---- 音量キーフレーム --------------------------------------------------------
@@ -445,6 +625,9 @@ void TimelineView::paintKeyMarkers(QPainter& p) {
   for (const auto& l : ed.layout().items) {
     if (!l.clip.anim.empty()) marks(l.clip.anim, l.start, l.duration, clipRect(l));
   }
+  for (const auto& o : ed.project().overlays) {
+    if (!o.anim.empty()) marks(o.anim, o.start, overlayDuration(o, ed.project().settings.fps), overlayRect(o));
+  }
   for (const auto& t : ed.project().texts) {
     if (t.anim.empty()) continue;
     const QRectF r = itemRect(Selection::Text, t.start, t.duration, textLanes_.lane.count(t.id) ? textLanes_.lane.at(t.id) : 0);
@@ -479,6 +662,15 @@ TimelineView::Hit TimelineView::hitTest(QPointF p) const {
       if (r.contains(p)) {
         h.type = Selection::Text;
         h.id = t.id;
+        h.handle = handleOf(r);
+      }
+    }
+  } else if (h.row == Row::Overlay) {
+    for (const auto& o : ed.project().overlays) {
+      const QRectF r = overlayRect(o);
+      if (r.contains(p)) {
+        h.type = Selection::Overlay;
+        h.id = o.id;
         h.handle = handleOf(r);
       }
     }
@@ -524,6 +716,11 @@ std::vector<double> TimelineView::snapPoints(const QString& exclude, bool withPl
     pts.push_back(l.start);
     pts.push_back(l.end);
   }
+  for (const auto& o : ed.project().overlays) {
+    if (o.id == exclude) continue;
+    pts.push_back(o.start);
+    pts.push_back(o.start + overlayDuration(o, ed.project().settings.fps));
+  }
   for (const auto& t : ed.project().texts) {
     if (t.id == exclude) continue;
     pts.push_back(t.start);
@@ -559,14 +756,16 @@ std::optional<double> TimelineView::snap(double t, const std::vector<double>& po
 }
 
 const std::vector<QPixmap>& TimelineView::thumbPixmaps(const QString& assetId, int height) {
-  auto it = thumbCache_.find(assetId);
-  if (it != thumbCache_.end() && (it->second.empty() || it->second.front().height() == height)) return it->second;
+  auto& byHeight = thumbCache_[assetId];
+  auto it = byHeight.find(height);
+  if (it != byHeight.end()) return it->second;
+  // 段の高さを変えると高さの違う画像が増えるので、古い高さのものは少しだけ残す
+  if (byHeight.size() > 3) byHeight.clear();
   std::vector<QPixmap> out;
   if (const auto* imgs = editor().thumbs(assetId)) {
     for (const QImage& img : *imgs) out.push_back(QPixmap::fromImage(img.scaledToHeight(height, Qt::SmoothTransformation)));
   }
-  thumbCache_[assetId] = out;
-  return thumbCache_[assetId];
+  return byHeight[height] = std::move(out);
 }
 
 // ---- 描画 -------------------------------------------------------------------
@@ -614,7 +813,7 @@ void TimelineView::paintRuler(QPainter& p, const QRect& area) {
 void TimelineView::paintVideo(QPainter& p) {
   const Editor& ed = editor();
   const QString selected = ed.selection().type == Selection::Clip ? ed.selection().id : QString();
-  const int innerH = kVideoH - 8 - 4;
+  const int innerH = videoH_ - 8 - 4;
   for (const auto& l : ed.layout().items) {
     const VideoClip& c = l.clip;
     const Asset* a = ed.asset(c.assetId);
@@ -656,16 +855,16 @@ void TimelineView::paintVideo(QPainter& p) {
         }
       }
     }
-    // フェード
+    // フェード（イン・アウトは重ならない長さにしてあるので、それぞれバーの幅まで描く）
     if (c.fadeIn > 0) {
-      const double w = std::min(r.width() / 2, c.fadeIn * pps());
+      const double w = std::min(r.width(), c.fadeIn * pps());
       QLinearGradient g(r.left(), 0, r.left() + w, 0);
       g.setColorAt(0, QColor(0, 0, 0, 190));
       g.setColorAt(1, QColor(0, 0, 0, 0));
       p.fillRect(QRectF(r.left(), r.top(), w, r.height()), g);
     }
     if (c.fadeOut > 0) {
-      const double w = std::min(r.width() / 2, c.fadeOut * pps());
+      const double w = std::min(r.width(), c.fadeOut * pps());
       QLinearGradient g(r.right() - w, 0, r.right(), 0);
       g.setColorAt(0, QColor(0, 0, 0, 0));
       g.setColorAt(1, QColor(0, 0, 0, 190));
@@ -730,17 +929,21 @@ void TimelineView::paintVideo(QPainter& p) {
       }
     }
     p.restore();
+    // フェードのつまみ（選んでいるクリップと、カーソルの下のクリップ。動かしている途中のクリップには出さない）
+    const bool moving = drag_ == Drag::ClipMove && dragMoved_ && c.id == dragId_;
+    if (!moving && !broken) paintFadeHandles(p, r, c.fadeIn, c.fadeOut, sel || c.id == hoverId_);
   }
 }
 
 void TimelineView::paintItems(QPainter& p, Selection::Type type) {
   const Editor& ed = editor();
   const QString selected = ed.selection().type == type ? ed.selection().id : QString();
+  const std::vector<QString> co = coSelectedIds();
   QFont f = font();
   f.setPointSizeF(8);
   p.setFont(f);
   const QFontMetricsF fm(f);
-  auto drawOne = [&](const QString& id, double start, double dur, int lane, const QString& label, const AudioItem* audio) {
+  auto drawOne = [&](const QString& id, double start, double dur, int lane, const QString& label, const AudioItem* audio, const QString& group) {
     const QRectF r = itemRect(type, start, dur, lane);
     if (r.right() < kHeadW || r.left() > viewport()->width()) return;
     const bool sel = id == selected;
@@ -781,14 +984,14 @@ void TimelineView::paintItems(QPainter& p, Selection::Type type) {
         }
       }
       if (audio->fadeIn > 0) {
-        const double w2 = std::min(r.width() / 2, audio->fadeIn * pps());
+        const double w2 = std::min(r.width(), audio->fadeIn * pps());
         QLinearGradient g(r.left(), 0, r.left() + w2, 0);
         g.setColorAt(0, QColor(0, 0, 0, 190));
         g.setColorAt(1, QColor(0, 0, 0, 0));
         p.fillRect(QRectF(r.left(), r.top(), w2, r.height()), g);
       }
       if (audio->fadeOut > 0) {
-        const double w2 = std::min(r.width() / 2, audio->fadeOut * pps());
+        const double w2 = std::min(r.width(), audio->fadeOut * pps());
         QLinearGradient g(r.right() - w2, 0, r.right(), 0);
         g.setColorAt(0, QColor(0, 0, 0, 0));
         g.setColorAt(1, QColor(0, 0, 0, 190));
@@ -822,20 +1025,138 @@ void TimelineView::paintItems(QPainter& p, Selection::Type type) {
       }
     }
     p.restore();
+    // グループの印・一緒に選んでいるものの枠
+    paintGroupMarks(p, r, group, std::find(co.begin(), co.end(), id) != co.end());
+    // フェードのつまみ（オーディオだけ。選んでいる物と、カーソルの下の物）
+    if (audio) paintFadeHandles(p, r, audio->fadeIn, audio->fadeOut, sel || id == hoverId_);
   };
   if (type == Selection::Text) {
     for (const auto& t : ed.project().texts) {
       QString label = t.text;
       label.replace(QLatin1Char('\n'), QLatin1Char(' '));
       if (label.isEmpty()) label = QStringLiteral("テキスト");
-      drawOne(t.id, t.start, t.duration, textLanes_.lane.count(t.id) ? textLanes_.lane.at(t.id) : 0, label, nullptr);
+      drawOne(t.id, t.start, t.duration, textLanes_.lane.count(t.id) ? textLanes_.lane.at(t.id) : 0, label, nullptr, t.group);
     }
   } else {
     for (const auto& a : ed.project().audios) {
       const Asset* as = ed.asset(a.assetId);
       drawOne(a.id, a.start, audioDuration(a), audioLanes_.lane.count(a.id) ? audioLanes_.lane.at(a.id) : 0,
-              as ? as->name : QStringLiteral("ファイルが見つかりません"), &a);
+              as ? as->name : QStringLiteral("ファイルが見つかりません"), &a, a.group);
     }
+  }
+}
+
+void TimelineView::paintOverlays(QPainter& p) {
+  const Editor& ed = editor();
+  const QString selected = ed.selection().type == Selection::Overlay ? ed.selection().id : QString();
+  const std::vector<QString> co = coSelectedIds();
+  const int innerH = std::max(8, overlayLaneH_ - 4 - 4);
+  QFont f = font();
+  f.setPointSizeF(8);
+  p.setFont(f);
+  const QFontMetricsF fm(f);
+  for (const auto& o : ed.project().overlays) {
+    const Asset* a = ed.asset(o.assetId);
+    const QRectF r = overlayRect(o);
+    if (r.right() < kHeadW || r.left() > viewport()->width()) continue;
+    const bool sel = o.id == selected;
+    const bool broken = !a || a->status == AssetStatus::Missing || a->status == AssetStatus::Error;
+    QPainterPath shape;
+    shape.addRoundedRect(r, 3, 3);
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setClipPath(shape);
+    p.fillRect(r, broken ? QColor(0x4a, 0x20, 0x26) : QColor(0x3d, 0x2f, 0x5c));
+    // サムネイルを並べる（メインのビデオと同じ）
+    if (a && !broken) {
+      const auto& thumbs = thumbPixmaps(o.assetId, innerH);
+      if (!thumbs.empty()) {
+        const double ratio = a->width > 0 && a->height > 0 ? double(a->width) / a->height : 16.0 / 9;
+        const int tileW = std::max(20, int(std::lround(innerH * std::clamp(ratio, 0.5, 2.2))));
+        const int n = std::min(400, std::max(1, int(std::ceil(r.width() / tileW))));
+        for (int k = 0; k < n; ++k) {
+          const double tx = r.left() + k * tileW;
+          if (tx + tileW < kHeadW || tx > viewport()->width()) continue;
+          size_t idx = 0;
+          if (!o.isImage && a->duration > 0) {
+            const double local = (k + 0.5) * tileW / pps();
+            const double src = o.in + local * o.speed;
+            idx = size_t(std::clamp(int(std::floor(src / a->duration * double(thumbs.size()))), 0, int(thumbs.size()) - 1));
+          }
+          const QPixmap& pm = thumbs[idx];
+          const QRectF dst(tx, r.top() + 2, tileW, innerH);
+          const QRectF srcR = QRectF(QPointF(0, 0), QSizeF(pm.size()) / pm.devicePixelRatio());
+          const double k2 = std::max(dst.width() / srcR.width(), dst.height() / srcR.height());
+          const QSizeF sz(dst.width() / k2, dst.height() / k2);
+          p.setOpacity(0.85);
+          p.drawPixmap(dst, pm, QRectF((srcR.width() - sz.width()) / 2, (srcR.height() - sz.height()) / 2, sz.width(), sz.height()));
+          p.setOpacity(1);
+        }
+      }
+    }
+    // フェード
+    if (o.fadeIn > 0) {
+      const double w = std::min(r.width(), o.fadeIn * pps());
+      QLinearGradient g(r.left(), 0, r.left() + w, 0);
+      g.setColorAt(0, QColor(0, 0, 0, 190));
+      g.setColorAt(1, QColor(0, 0, 0, 0));
+      p.fillRect(QRectF(r.left(), r.top(), w, r.height()), g);
+    }
+    if (o.fadeOut > 0) {
+      const double w = std::min(r.width(), o.fadeOut * pps());
+      QLinearGradient g(r.right() - w, 0, r.right(), 0);
+      g.setColorAt(0, QColor(0, 0, 0, 0));
+      g.setColorAt(1, QColor(0, 0, 0, 190));
+      p.fillRect(QRectF(r.right() - w, r.top(), w, r.height()), g);
+    }
+    // 名前（クロマキー・速度の印も）
+    if (r.width() > 40) {
+      QString badge;
+      if (o.chroma.enabled) badge += QStringLiteral("キー ");
+      if (!o.isImage && std::abs(o.speed - 1) > 1e-9) badge += num6(o.speed) + QLatin1Char('x');
+      QString label = a ? a->name : QStringLiteral("ファイルが見つかりません");
+      const double lx = r.left() + 6;
+      double avail = r.right() - 6 - lx - 16;
+      if (!badge.isEmpty()) avail -= fm.horizontalAdvance(badge) + 10;
+      label = fm.elidedText(label, Qt::ElideRight, std::max(0.0, avail - 8));
+      double x = lx;
+      p.drawPixmap(QPointF(x, r.top() + 4), theme::iconPixmap(o.isImage ? QStringLiteral("image") : QStringLiteral("film"), 12, Qt::white, devicePixelRatioF()));
+      x += 16;
+      if (!label.isEmpty()) {
+        const QRectF br(x, r.top() + 3, fm.horizontalAdvance(label) + 8, 15);
+        p.fillRect(br, QColor(0, 0, 0, 140));
+        p.setPen(Qt::white);
+        p.drawText(br, Qt::AlignCenter, label);
+        x = br.right() + 4;
+      }
+      if (!badge.isEmpty()) {
+        const QString b = badge.trimmed();
+        const QRectF br(x, r.top() + 3, fm.horizontalAdvance(b) + 8, 15);
+        p.fillRect(br, QColor(0x26, 0x80, 0xeb, 200));
+        p.setPen(Qt::white);
+        p.drawText(br, Qt::AlignCenter, b);
+      }
+    }
+    p.restore();
+    // 枠と端のつまみ
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(sel ? QColor(Qt::white) : broken ? QColor(0x93, 0x34, 0x3f) : QColor(0x6b, 0x55, 0x9e), sel ? 2 : 1));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3);
+    if (sel) {
+      p.setPen(Qt::NoPen);
+      for (int side : {-1, 1}) {
+        const QRectF hr = side < 0 ? QRectF(r.left(), r.top(), 8, r.height()) : QRectF(r.right() - 8, r.top(), 8, r.height());
+        p.setBrush(Qt::white);
+        p.drawRect(hr);
+        p.setBrush(QColor(0x77, 0x77, 0x77));
+        p.drawRect(QRectF(hr.center().x() - 1, hr.center().y() - 5, 2, 10));
+      }
+    }
+    p.restore();
+    paintGroupMarks(p, r, o.group, std::find(co.begin(), co.end(), o.id) != co.end());
+    if (!broken) paintFadeHandles(p, r, o.fadeIn, o.fadeOut, sel || o.id == hoverId_);
   }
 }
 
@@ -846,26 +1167,44 @@ void TimelineView::paintEvent(QPaintEvent*) {
   p.fillRect(area, QColor(0x15, 0x15, 0x15));
   // トラックの背景
   const int ty = textY();
+  const int oy = overlayY();
   const int vy = videoY();
   const int ay = audioY();
   if (audioDropHover_) p.fillRect(QRect(kHeadW, ay, area.width(), audioH()), QColor(63, 182, 123, 30));
-  p.fillRect(QRect(kHeadW, vy, area.width(), kVideoH), QColor(0x12, 0x12, 0x12));
-  for (int y : {vy, ay, ay + audioH()}) p.fillRect(QRect(0, y - 1, area.width(), 1), theme::border);
+  p.fillRect(QRect(kHeadW, oy, area.width(), overlayH()), QColor(0x17, 0x14, 0x1d));
+  if (overlayDropT_) p.fillRect(QRect(kHeadW, oy, area.width(), overlayH()), QColor(0x8a, 0x6c, 0xd8, 36));
+  p.fillRect(QRect(kHeadW, vy, area.width(), videoH_), QColor(0x12, 0x12, 0x12));
+  for (int y : {oy, vy, ay, ay + audioH()}) p.fillRect(QRect(0, y - 1, area.width(), 1), theme::border);
   if (ed.layout().items.empty()) {
     p.setPen(theme::dim);
-    p.drawText(QRect(kHeadW + 12, vy, 400, kVideoH), Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("メディアをここにドラッグ"));
+    p.drawText(QRect(kHeadW + 12, vy, 400, videoH_), Qt::AlignVCenter | Qt::AlignLeft, QStringLiteral("メディアをここにドラッグ"));
+  }
+  if (ed.project().overlays.empty()) {
+    p.setPen(theme::dim);
+    p.drawText(QRect(kHeadW + 12, oy, std::max(100, area.width() - kHeadW - 24), overlayH()), Qt::AlignVCenter | Qt::AlignLeft,
+               QStringLiteral("写真・動画をここにドラッグすると、映像の上に重ねられます"));
   }
 
   paintItems(p, Selection::Text);
+  paintOverlays(p);
   paintVideo(p);
   paintItems(p, Selection::Audio);
+  // 重ねるトラックへドラッグしてきている素材の、置く時間
+  if (overlayDropT_) {
+    const double x = xOf(*overlayDropT_);
+    if (x >= kHeadW) {
+      p.setPen(QPen(QColor(0xc9, 0xb6, 0xff), 1.5, Qt::DashLine));
+      p.drawLine(QPointF(x, oy), QPointF(x, vy));
+    }
+  }
   paintKeyMarkers(p);
+  paintFadeLabel(p);
 
   // 挿入位置
   std::optional<double> ind;
   if (drag_ == Drag::ClipMove && dragMoved_) ind = indicatorX(dragIndex_, dragId_);
   if (dropX_) ind = dropX_;
-  if (ind) p.fillRect(QRectF(*ind - 1, vy, 2, kVideoH), QColor(0xff, 0xd4, 0x4a));
+  if (ind) p.fillRect(QRectF(*ind - 1, vy, 2, videoH_), QColor(0xff, 0xd4, 0x4a));
 
   // 終わりの位置
   const double total = ed.layout().total;
@@ -893,7 +1232,8 @@ void TimelineView::paintEvent(QPaintEvent*) {
     p.drawText(QRect(29, y, kHeadW - 30, h), Qt::AlignVCenter | Qt::AlignLeft, label);
   };
   head(ty, textH(), QStringLiteral("type"), QStringLiteral("テキスト"));
-  head(vy, kVideoH, QStringLiteral("film"), QStringLiteral("ビデオ"));
+  head(oy, overlayH(), QStringLiteral("image"), QStringLiteral("重ねる"));
+  head(vy, videoH_, QStringLiteral("film"), QStringLiteral("ビデオ"));
   head(ay, audioH(), QStringLiteral("music"), QStringLiteral("オーディオ"));
 
   // 目盛り（上に固定）
@@ -903,6 +1243,13 @@ void TimelineView::paintEvent(QPaintEvent*) {
   p.fillRect(QRect(0, kRulerH - 1, kHeadW, 1), theme::border);
   p.setPen(theme::dim);
   p.drawText(QRect(10, 0, kHeadW - 12, kRulerH), Qt::AlignVCenter | Qt::AlignLeft, formatTime(total, false));
+  // 動画全体の再生速度を変えているときは、左上の角にその速さを出す（タイムラインの時間は元の速さのまま）
+  if (const double sp = ed.project().settings.speed; std::abs(sp - 1) > 1e-9) {
+    p.setPen(theme::accent);
+    p.drawText(QRect(10, 0, kHeadW - 14, kRulerH), Qt::AlignVCenter | Qt::AlignRight, QString::number(sp, 'g', 4) + QLatin1Char('x'));
+  }
+  // 書き出す範囲（目盛りの上の帯と、両端の線）
+  paintRange(p, area);
 
   // 再生ヘッド（見出しの列と左上の角より上に描くので、見出しの上でも画面の左端まで見える）
   const double px = xOf(ed.currentTime());
@@ -953,9 +1300,50 @@ void TimelineView::mousePressEvent(QMouseEvent* e) {
   snapMark_.reset();
   stopAutoScroll();
   merge_ = QStringLiteral("tl-") + newId();
+  // 見出しの列の、段の境目: ドラッグで段の高さを変える
+  if (const int border = trackBorderAt(pos); border >= 0) {
+    resizeWhich_ = border;
+    resizeStartY_ = pos.y();
+    resizeOrig_[0] = textLaneH_;
+    resizeOrig_[1] = overlayLaneH_;
+    resizeOrig_[2] = videoH_;
+    resizeOrig_[3] = audioLaneH_;
+    drag_ = Drag::TrackResize;
+    return;
+  }
   // 見出しの列のクリックは無視する。左上の角（目盛りの行）だけは、目盛りと同じく再生位置を動かす
   if (pos.x() < kHeadW && pos.y() >= kRulerH) return;
   ed.pause();
+  // 目盛りの上: 書き出す範囲の端を掴んだら、その端を動かす。Shift を押しながらなら、新しく範囲を作る
+  if (pos.y() < kRulerH && pos.x() >= kHeadW) {
+    const int edge = rangeEdgeAt(pos);
+    if (edge != 0 || (e->modifiers() & Qt::ShiftModifier)) {
+      origRange_ = ed.exportRange();
+      dragSnap_ = snapPoints(QString(), true);
+      if (edge != 0) {
+        rangeEdge_ = edge;
+        drag_ = Drag::RangeEdge;
+      } else {
+        const double t0 = std::clamp(tOf(pos.x()), 0.0, ed.layout().total);
+        const std::optional<double> s = (e->modifiers() & Qt::AltModifier) ? std::nullopt : snap(t0, dragSnap_);
+        rangeAnchor_ = s.value_or(t0);
+        drag_ = Drag::Range;
+      }
+      viewport()->setCursor(Qt::SizeHorCursor);
+      return;
+    }
+  }
+  // フェードのつまみ（バーの上の角）を掴んだら、フェードの長さを変える
+  if (const FadeHit fh = fadeHitTest(pos); fh.type != Selection::None) {
+    keySel_ = {};
+    ed.select({fh.type, fh.id});
+    dragId_ = fh.id;
+    dragType_ = fh.type;
+    fadeSide_ = fh.side;
+    drag_ = Drag::Fade;
+    viewport()->update();
+    return;
+  }
   // 音量キーフレーム（丸い点）を掴んだら、クリップは動かさずに、点だけを動かす
   if (const KeyHit kh = keyHitTest(pos); kh.index >= 0) {
     ed.select({Selection::Audio, kh.id});
@@ -979,17 +1367,33 @@ void TimelineView::mousePressEvent(QMouseEvent* e) {
     return;
   }
   if (keySel_.id != h.id) keySel_ = {};  // ほかのものを選んだら、キーフレームの選択は外す
-  ed.select({h.type, h.id});
+  const Selection hitSel{h.type, h.id};
+  // Ctrl+クリック: 一緒に選ぶものに加える / 外す（テキスト・オーディオ・重ねるトラック。動かさない）
+  if (e->modifiers() & Qt::ControlModifier) {
+    ed.toggleSelect(hitSel);
+    viewport()->update();
+    return;
+  }
+  // 一緒に選んでいるもの・同じグループのものを押したときは、まとめて動かせるよう、一緒に選んだままにする
+  pressInSet_ = h.handle == 0 && Editor::groupable(h.type) && ed.inSelectionSet(hitSel) && ed.selectionSet().size() > 1;
+  if (pressInSet_) ed.focusInSelection(hitSel);
+  else ed.select(hitSel);
   dragId_ = h.id;
   dragType_ = h.type;
   dragSide_ = h.handle;
   pressTime_ = tOf(pos.x());
   dragSnap_ = snapPoints(h.id, true);
+  companions_.clear();
   if (h.type == Selection::Clip) {
     origClip_ = *ed.clip(h.id);
     drag_ = h.handle != 0 ? Drag::ClipTrim : Drag::ClipMove;
-  } else if (h.type == Selection::Text) {
+    return;
+  }
+  if (h.type == Selection::Text) {
     origText_ = *ed.text(h.id);
+    drag_ = h.handle != 0 ? Drag::ItemTrim : Drag::ItemMove;
+  } else if (h.type == Selection::Overlay) {
+    origOverlay_ = *ed.overlay(h.id);
     drag_ = h.handle != 0 ? Drag::ItemTrim : Drag::ItemMove;
   } else {
     origAudio_ = *ed.audio(h.id);
@@ -998,14 +1402,49 @@ void TimelineView::mousePressEvent(QMouseEvent* e) {
     laneHoldId_ = h.id;
     laneHold_ = audioLanes_.lane.count(h.id) ? audioLanes_.lane.at(h.id) : 0;
   }
+  // 動かすときは、一緒に選んでいるもの・同じグループのものも、同じだけ動かす（端の長さの変更は、押したものだけ）
+  if (drag_ == Drag::ItemMove) {
+    const ProjectData& p = ed.project();
+    for (const Selection& s : ed.selectionSet()) {
+      if (s == hitSel || !Editor::groupable(s.type)) continue;
+      double start = -1, end = -1;
+      if (s.type == Selection::Text) {
+        if (const TextItem* t = ed.text(s.id)) start = t->start, end = t->start + t->duration;
+      } else if (s.type == Selection::Audio) {
+        if (const AudioItem* a = ed.audio(s.id)) start = a->start, end = a->start + audioDuration(*a);
+      } else if (const OverlayItem* o = ed.overlay(s.id)) {
+        start = o->start, end = o->start + overlayDuration(*o, p.settings.fps);
+      }
+      if (start < 0) continue;
+      companions_.push_back({s, start});
+      // 一緒に動くものの端には吸着させない（動いていくので意味がない）
+      dragSnap_.erase(std::remove_if(dragSnap_.begin(), dragSnap_.end(),
+                                     [&](double v) { return std::abs(v - start) < 1e-9 || std::abs(v - end) < 1e-9; }),
+                      dragSnap_.end());
+    }
+  }
 }
 
 void TimelineView::mouseMoveEvent(QMouseEvent* e) {
   const QPointF pos = e->position();
   if (drag_ == Drag::None) {
     const Hit h = hitTest(pos);
-    // 点の上では「動かせる」カーソル（上下で音量、左右で時間）
-    viewport()->setCursor(keyHitTest(pos).index >= 0 ? Qt::SizeAllCursor : h.handle != 0 ? Qt::SizeHorCursor : Qt::ArrowCursor);
+    const FadeHit fh = fadeHitTest(pos);
+    // 点の上では「動かせる」カーソル（上下で音量、左右で時間）。端・フェードのつまみ・範囲の端では左右のカーソル。
+    // 見出しの列の段の境目では、上下のカーソル（段の高さを変える）
+    const bool horizontal = fh.type != Selection::None || h.handle != 0 || rangeEdgeAt(pos) != 0;
+    viewport()->setCursor(trackBorderAt(pos) >= 0 ? Qt::SplitVCursor
+                          : keyHitTest(pos).index >= 0 ? Qt::SizeAllCursor
+                          : horizontal                 ? Qt::SizeHorCursor
+                                                       : Qt::ArrowCursor);
+    // カーソルの下の映像・オーディオには、フェードのつまみを出す
+    const QString hover = fh.type != Selection::None                                                                   ? fh.id
+                          : (h.type == Selection::Clip || h.type == Selection::Audio || h.type == Selection::Overlay) ? h.id
+                                                                                                                       : QString();
+    if (hover != hoverId_) {
+      hoverId_ = hover;
+      viewport()->update();
+    }
     return;
   }
   // ボタンを離した合図を受け取りそこねていた（ドラッグ中にほかの画面が前に出た等）: 最後の位置でドラッグを終える
@@ -1053,13 +1492,17 @@ void TimelineView::dragTo(QPointF pos, Qt::KeyboardModifiers mods) {
   const double x = dragX(pos.x());
   const double dt = tOf(x) - pressTime_;
   const double dx = dt * pps();
-  // 動かし始めの判定は、マウスが実際に動いた量で見る（端の近くで押して外へ出たときも、ちゃんと動かし始める）
+  // 動かし始めの判定は、マウスが実際に動いた量で見る（端の近くで押して外へ出たときも、ちゃんと動かし始める）。
+  // テキストは上下にも動かせる（段を変える）ので、縦の動きでも動かし始める
   const int threshold = drag_ == Drag::ClipMove ? 6 : drag_ == Drag::ItemMove ? 4 : 0;
-  if (!dragMoved_ && std::abs(pos.x() - pressPos_.x()) < threshold) return;
+  const bool vertical = drag_ == Drag::ItemMove && (dragType_ == Selection::Text || dragType_ == Selection::Overlay);
+  const double moved = vertical ? std::max(std::abs(pos.x() - pressPos_.x()), std::abs(pos.y() - pressPos_.y())) : std::abs(pos.x() - pressPos_.x());
+  if (!dragMoved_ && moved < threshold) return;
   const bool first = !dragMoved_;
   dragMoved_ = true;
   // 動かしながら編集データを変えるドラッグは、Esc でやめたときに元に戻せるよう、始めの状態を覚える
-  if (first && (drag_ == Drag::ClipTrim || drag_ == Drag::ItemMove || drag_ == Drag::ItemTrim) && !ed.editSessionActive()) {
+  if (first && (drag_ == Drag::ClipTrim || drag_ == Drag::ItemMove || drag_ == Drag::ItemTrim || drag_ == Drag::Fade) &&
+      !ed.editSessionActive()) {
     ed.beginEditSession();
     dragSession_ = true;
   }
@@ -1070,6 +1513,39 @@ void TimelineView::dragTo(QPointF pos, Qt::KeyboardModifiers mods) {
     case Drag::Scrub:
       scrubTo(x, snapOn);
       break;
+    case Drag::TrackResize: {
+      // 境目を動かした分だけ、その部分の高さを変える（テキスト・重ねるトラック・オーディオは段の数で割って、1 段の高さにする）
+      const double dy = pos.y() - resizeStartY_;
+      int h[4] = {resizeOrig_[0], resizeOrig_[1], resizeOrig_[2], resizeOrig_[3]};
+      if (resizeWhich_ == 0) h[0] = int(std::lround(resizeOrig_[0] + dy / std::max(1, textLanes_.count)));
+      else if (resizeWhich_ == 1) h[1] = int(std::lround(resizeOrig_[1] + dy / std::max(1, overlayLanes_.count)));
+      else if (resizeWhich_ == 2) h[2] = int(std::lround(resizeOrig_[2] + dy));
+      else h[3] = int(std::lround(resizeOrig_[3] + dy / std::max(1, audioLanes_.count)));
+      setTrackHeights(h[0], h[1], h[2], h[3]);
+      break;
+    }
+    case Drag::Fade:
+      fadeTo(pos);
+      break;
+    case Drag::Range:
+    case Drag::RangeEdge: {
+      // 書き出す範囲は、内容の点と再生位置・目盛りの数字に吸着させる（Alt で吸着しない）。1 フレームより短くはしない
+      const double total = ed.layout().total;
+      const double frame = 1.0 / std::max(1, fps);
+      double t = std::clamp(tOf(x), 0.0, total);
+      if (snapOn) {
+        if (const std::optional<double> s = snap(t, dragSnap_)) t = std::clamp(*s, 0.0, total);
+      }
+      if (drag_ == Drag::Range) {
+        const double a = std::clamp(rangeAnchor_, 0.0, total);
+        if (std::abs(t - a) >= frame - 1e-9) ed.setRange(a, t);
+      } else if (origRange_) {
+        const double a = rangeEdge_ < 0 ? std::min(t, origRange_->end - frame) : origRange_->start;
+        const double b = rangeEdge_ < 0 ? origRange_->end : std::max(t, origRange_->start + frame);
+        if (b - a >= frame - 1e-9 && a >= 0 && b <= total + 1e-9) ed.setRange(a, b);
+      }
+      break;
+    }
     case Drag::ClipMove:
       dragDx_ = dx;
       dragIndex_ = insertionIndex(x, dragId_);
@@ -1105,9 +1581,17 @@ void TimelineView::dragTo(QPointF pos, Qt::KeyboardModifiers mods) {
       break;
     }
     case Drag::ItemMove: {
-      const double origStart = dragType_ == Selection::Text ? origText_.start : origAudio_.start;
-      const double dur = dragType_ == Selection::Text ? origText_.duration : audioDuration(origAudio_);
-      double start = std::max(0.0, origStart + dt);
+      const double origStart = dragType_ == Selection::Text      ? origText_.start
+                               : dragType_ == Selection::Overlay ? origOverlay_.start
+                                                                 : origAudio_.start;
+      const double dur = dragType_ == Selection::Text      ? origText_.duration
+                         : dragType_ == Selection::Overlay ? overlayDuration(origOverlay_, fps)
+                                                           : audioDuration(origAudio_);
+      // 一緒に動かすものがあるときは、どれも 0:00 より前へ出ないところまで
+      double minStart = origStart;
+      for (const Companion& c : companions_) minStart = std::min(minStart, c.start);
+      const double floor0 = origStart - minStart;
+      double start = std::max(floor0, origStart + dt);
       // 左端と右端のうち、実際に吸着したほうで、ずれが小さいほうに合わせる
       const std::optional<double> s1 = snapOn ? snap(start, dragSnap_) : std::nullopt;        // 左端の吸着先
       const std::optional<double> s2 = snapOn ? snap(start + dur, dragSnap_) : std::nullopt;  // 右端の吸着先
@@ -1119,9 +1603,43 @@ void TimelineView::dragTo(QPointF pos, Qt::KeyboardModifiers mods) {
         start = *s2 - dur;
         snapMark_ = s2;
       }
-      start = std::max(0.0, start);
-      if (dragType_ == Selection::Text) ed.updateText(dragId_, [&](TextItem& t) { t.start = start; }, merge_);
-      else ed.updateAudio(dragId_, [&](AudioItem& a) { a.start = start; }, merge_);
+      start = std::max(floor0, start);
+      const double delta = start - origStart;
+      // 上下に動かすと、カーソルのある段へ移す（テキストは一番下の段のさらに下へ、重ねるトラックは一番上の段のさらに上へ 1 段だけ
+      // 増やせる）。段の外に出たときは、今の段のまま
+      const int lane = dragType_ == Selection::Text ? textLaneAt(pos.y()) : dragType_ == Selection::Overlay ? overlayLaneAt(pos.y()) : -1;
+      const QString id = dragId_;
+      const Selection::Type type = dragType_;
+      const std::vector<Companion> comps = companions_;
+      ed.commit([&](ProjectData& p) {
+        bool changed = false;
+        auto moveOne = [&](Selection::Type ty, const QString& oid, double s, bool main) {
+          if (ty == Selection::Text) {
+            for (auto& t : p.texts) {
+              if (t.id != oid) continue;
+              t.start = s;
+              if (main && lane >= 0) t.track = lane;
+              changed = true;
+            }
+          } else if (ty == Selection::Overlay) {
+            for (auto& o : p.overlays) {
+              if (o.id != oid) continue;
+              o.start = s;
+              if (main && lane >= 0) o.track = lane;
+              changed = true;
+            }
+          } else if (ty == Selection::Audio) {
+            for (auto& a : p.audios) {
+              if (a.id != oid) continue;
+              a.start = s;
+              changed = true;
+            }
+          }
+        };
+        moveOne(type, id, start, true);
+        for (const Companion& c : comps) moveOne(c.sel.type, c.sel.id, std::max(0.0, c.start + delta), false);
+        return changed;
+      }, merge_);
       break;
     }
     case Drag::ItemTrim: {
@@ -1145,6 +1663,35 @@ void TimelineView::dragTo(QPointF pos, Qt::KeyboardModifiers mods) {
             // 左端を動かしたときは、キーフレームの時間もずらして、同じ時間（タイムライン上）の動きのままにする
             t.anim = trimAnimationStart(o.anim, start - o.start);
             if (s && std::abs(start - *s) < 1e-6) snapMark_ = s;
+          }
+        }, merge_);
+      } else if (dragType_ == Selection::Overlay) {
+        // 重ねるトラック: 右端は長さ（動画は素材の終わりまで）、左端は開始と切り出しの始まりを一緒に動かす（同じ時間に同じ映像が出る）
+        const OverlayItem o = origOverlay_;
+        const Asset* a = ed.asset(o.assetId);
+        const double assetDur = a && a->duration > 0 ? a->duration : o.out;
+        const double origDur = overlayDuration(o, fps);
+        ed.updateOverlay(o.id, [&](OverlayItem& x) {
+          if (dragSide_ > 0) {
+            const double raw = o.start + origDur + dt;
+            const std::optional<double> s = snapOn ? snap(raw, dragSnap_) : std::nullopt;
+            const double nd = std::max(kMinClipDuration, s.value_or(raw) - o.start);
+            if (o.isImage) x.out = o.in + std::min(600.0, nd);
+            else x.out = std::min(assetDur, std::max(o.in + kMinClipDuration * o.speed, o.in + nd * o.speed));
+            if (s && std::abs(x.start + overlayDuration(x, fps) - *s) < 1e-6) snapMark_ = s;
+          } else {
+            const double raw = o.start + dt;
+            const std::optional<double> s = snapOn ? snap(raw, dragSnap_) : std::nullopt;
+            double headCut = s.value_or(raw) - o.start;  // 左端を詰めた長さ（負なら広げた）
+            double lo = -o.start;                        // 0:00 より前には出さない
+            if (!o.isImage) lo = std::max(lo, -o.in / std::max(0.01, o.speed));  // 素材の始まりより前には広げない
+            headCut = std::clamp(headCut, lo, origDur - kMinClipDuration);
+            x.start = o.start + headCut;
+            if (o.isImage) x.out = o.out - headCut;
+            else x.in = o.in + headCut * o.speed;
+            x.anim = trimAnimationStart(o.anim, headCut);
+            x.volumePoints = trimVolumePointsStart(o.volumePoints, o.volume, headCut);
+            if (s && std::abs(x.start - *s) < 1e-6) snapMark_ = s;
           }
         }, merge_);
       } else {
@@ -1196,17 +1743,25 @@ void TimelineView::finishDrag(QPointF pos) {
   Editor& ed = editor();
   stopAutoScroll();  // ドラッグが終わったら、自動スクロールは確実に止める
   if (drag_ != Drag::None) rememberView();  // このあと中身が短くなっても、今の表示位置は動かさない
+  if (drag_ == Drag::TrackResize) saveTrackHeights();
   if (drag_ == Drag::ClipMove) {
     // スクロールしていても、いまの表示でマウスがある位置（そこの時間）に置く。見出しの列の上などで離したときは、見えている端の位置
     if (dragMoved_) ed.moveClip(dragId_, insertionIndex(dragX(pos.x()), dragId_));
     else ed.seek(pressTime_);
   } else if (drag_ == Drag::ItemMove && !dragMoved_) {
+    // 一緒に選んでいたものを押して、動かさずに離した: 押したものだけを選ぶ（同じグループのものは一緒のまま）
+    if (pressInSet_) ed.select({dragType_, dragId_});
     ed.seek(pressTime_);
   }
+  pressInSet_ = false;
+  companions_.clear();
   drag_ = Drag::None;
   dragMoved_ = false;
   dragDx_ = 0;
   dragIndex_ = -1;
+  fadeSide_ = 0;
+  rangeEdge_ = 0;
+  origRange_.reset();
   snapMark_.reset();
   if (dragSession_) {
     dragSession_ = false;
@@ -1220,7 +1775,8 @@ void TimelineView::finishDrag(QPointF pos) {
 }
 
 bool TimelineView::isDragging() const {
-  return drag_ == Drag::ClipMove || drag_ == Drag::ClipTrim || drag_ == Drag::ItemMove || drag_ == Drag::ItemTrim || drag_ == Drag::KeyMove;
+  return drag_ == Drag::ClipMove || drag_ == Drag::ClipTrim || drag_ == Drag::ItemMove || drag_ == Drag::ItemTrim || drag_ == Drag::KeyMove ||
+         drag_ == Drag::Fade || drag_ == Drag::Range || drag_ == Drag::RangeEdge || drag_ == Drag::TrackResize;
 }
 
 bool TimelineView::cancelDrag() {
@@ -1228,10 +1784,22 @@ bool TimelineView::cancelDrag() {
   Editor& ed = editor();
   stopAutoScroll();
   rememberView();  // 元に戻して中身が短くなっても、今の表示位置は動かさない
+  // 書き出す範囲のドラッグは、ドラッグを始める前の範囲に戻す（範囲は編集データではないので、履歴には関係しない）
+  if (drag_ == Drag::Range || drag_ == Drag::RangeEdge) {
+    if (origRange_) ed.setRange(origRange_->start, origRange_->end);
+    else ed.clearRange();
+  }
+  // 段の高さのドラッグは、始める前の高さに戻す
+  if (drag_ == Drag::TrackResize) setTrackHeights(resizeOrig_[0], resizeOrig_[1], resizeOrig_[2], resizeOrig_[3]);
+  pressInSet_ = false;
+  companions_.clear();
   drag_ = Drag::None;
   dragMoved_ = false;
   dragDx_ = 0;
   dragIndex_ = -1;
+  fadeSide_ = 0;
+  rangeEdge_ = 0;
+  origRange_.reset();
   snapMark_.reset();
   // 動かしながら変えていた分は、始める前の状態に戻す（元に戻す履歴には何も残さない）。
   // オーディオは、ドラッグを始めたときの段に戻す（laneHoldId_ を消すのは、戻したあと）
@@ -1323,7 +1891,7 @@ bool TimelineView::autoScrollSource(QPointF* pos, bool* dragging) const {
   if (dragging) *dragging = false;
   // 動かしている最中のもの。再生位置の赤い線（や、空いたところ・目盛りのドラッグ）も、音量キーフレームの点も含める
   const bool dragKind = drag_ == Drag::ClipMove || drag_ == Drag::ClipTrim || drag_ == Drag::ItemMove || drag_ == Drag::ItemTrim ||
-                        drag_ == Drag::Scrub || drag_ == Drag::KeyMove;
+                        drag_ == Drag::Scrub || drag_ == Drag::KeyMove || drag_ == Drag::Fade || drag_ == Drag::Range || drag_ == Drag::RangeEdge;
   if (dragMoved_ && dragKind) {
     *pos = dragPos_;
     if (dragging) *dragging = true;
@@ -1397,14 +1965,35 @@ void TimelineView::refreshLibraryDrop(QPointF pos) {
   // 見出しの列の上では、見えている左端の位置に入れる
   if (row == Row::Video) dropX_ = indicatorX(insertionIndex(dragX(pos.x()), QString()), QString());
   else dropX_.reset();
+  // 重ねるトラックの段の上: 落とした時間から重ねる（その時間に縦線を出す）
+  if (row == Row::Overlay) overlayDropT_ = frameRound(std::max(0.0, tOf(dragX(pos.x()))), editor().project().settings.fps);
+  else overlayDropT_.reset();
   viewport()->update();
 }
 
 void TimelineView::contextMenuEvent(QContextMenuEvent* e) {
   if (drag_ != Drag::None) return;  // ドラッグの途中（左ボタンを押したまま右クリック）では出さない
   const QPointF pos = e->pos();
+  // 目盛りの上: 書き出す範囲のメニュー
+  if (pos.y() < kRulerH && pos.x() >= kHeadW) {
+    execRulerMenu(pos, e->globalPos());
+    return;
+  }
+  // 左の見出しの列: 段の高さのメニュー
+  if (pos.x() < kHeadW && pos.y() >= kRulerH) {
+    execHeaderMenu(e->globalPos());
+    return;
+  }
   const KeyHit kh = keyHitTest(pos);
-  if (kh.index < 0) return;
+  if (kh.index < 0) {
+    // クリップ・テキスト・オーディオの上: そのオブジェクトのメニュー（分割・複製・削除・フェードなど）
+    const Hit h = hitTest(pos);
+    if (h.type == Selection::None) return;
+    keySel_ = {};
+    execObjectMenu(this, {h.type, h.id}, e->globalPos(), ObjectMenuPlace::Timeline);
+    viewport()->update();
+    return;
+  }
   Editor& ed = editor();
   ed.select({Selection::Audio, kh.id});
   keySel_ = kh;
@@ -1422,6 +2011,214 @@ void TimelineView::contextMenuEvent(QContextMenuEvent* e) {
   });
   menu.exec(e->globalPos());
   viewport()->update();
+}
+
+void TimelineView::execRulerMenu(QPointF pos, const QPoint& globalPos) {
+  Editor& ed = editor();
+  const double t = std::clamp(tOf(pos.x()), 0.0, ed.layout().total);
+  QMenu menu(this);
+  menu.addAction(QStringLiteral("ここを書き出す範囲の開始にする"), this, [t] { editor().setRangeStart(t); });
+  menu.addAction(QStringLiteral("ここを書き出す範囲の終了にする"), this, [t] { editor().setRangeEnd(t); });
+  QAction* clear = menu.addAction(QStringLiteral("書き出す範囲を解除"), this, [] { editor().clearRange(); });
+  clear->setEnabled(ed.exportRange().has_value());
+  menu.addSeparator();
+  QAction* hint = menu.addAction(QStringLiteral("Shift を押しながら目盛りをドラッグしても決められます"));
+  hint->setEnabled(false);
+  menu.exec(globalPos);
+}
+
+void TimelineView::leaveEvent(QEvent* e) {
+  QAbstractScrollArea::leaveEvent(e);
+  if (hoverId_.isEmpty()) return;
+  hoverId_.clear();
+  viewport()->update();
+}
+
+// ---- フェードのつまみ -------------------------------------------------------------------
+
+static constexpr double kFadeInset = 11;  // フェードが無いときのつまみの位置（端の長さを変えるつまみと重ならないよう、端から離す）
+static constexpr double kFadeGrab = 6;    // つまみを掴める左右の範囲
+
+bool TimelineView::fadeHandlePos(const QRectF& r, double fadeIn, double fadeOut, int side, QPointF* pos) const {
+  if (r.width() < 2 * kFadeInset + 14) return false;  // バーが狭すぎるときは出さない（設定欄・右クリックで変えられる）
+  const double y = r.top() + 5;
+  if (side < 0) *pos = QPointF(r.left() + std::clamp(fadeIn * pps(), kFadeInset, r.width() - kFadeInset), y);
+  else *pos = QPointF(r.right() - std::clamp(fadeOut * pps(), kFadeInset, r.width() - kFadeInset), y);
+  return true;
+}
+
+TimelineView::FadeHit TimelineView::fadeHitTest(QPointF pos) const {
+  FadeHit best;
+  if (pos.x() < kHeadW) return best;
+  const Editor& ed = editor();
+  double bestD = kFadeGrab + 1;
+  auto test = [&](Selection::Type type, const QString& id, const QRectF& r, double fadeIn, double fadeOut) {
+    // つまみはバーの上の端だけ（その下は、端の長さの変更・音量キーフレームに使う）
+    if (pos.y() < r.top() - 2 || pos.y() > r.top() + 9) return;
+    for (int side : {-1, 1}) {
+      QPointF hp;
+      if (!fadeHandlePos(r, fadeIn, fadeOut, side, &hp)) continue;
+      const double d = std::abs(pos.x() - hp.x());
+      if (d <= kFadeGrab && d < bestD) {
+        bestD = d;
+        best = {type, id, side};
+      }
+    }
+  };
+  const Row row = rowAt(pos.y() + 2);
+  if (row == Row::Video) {
+    for (const auto& l : ed.layout().items) test(Selection::Clip, l.clip.id, clipRect(l), l.clip.fadeIn, l.clip.fadeOut);
+  } else if (row == Row::Overlay) {
+    for (const auto& o : ed.project().overlays) test(Selection::Overlay, o.id, overlayRect(o), o.fadeIn, o.fadeOut);
+  } else if (row == Row::Audio) {
+    for (const auto& a : ed.project().audios) test(Selection::Audio, a.id, audioRect(a), a.fadeIn, a.fadeOut);
+  }
+  return best;
+}
+
+void TimelineView::paintFadeHandles(QPainter& p, const QRectF& r, double fadeIn, double fadeOut, bool active) {
+  if (!active || r.right() < kHeadW || r.left() > viewport()->width()) return;
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setClipRect(QRectF(kHeadW, 0, viewport()->width() - kHeadW, viewport()->height()));
+  for (int side : {-1, 1}) {
+    QPointF hp;
+    if (!fadeHandlePos(r, fadeIn, fadeOut, side, &hp)) continue;
+    const double fade = side < 0 ? fadeIn : fadeOut;
+    // フェードの傾き（バーの下の端から、つまみの位置まで）
+    if (fade > 0) {
+      const double w = std::min(r.width(), fade * pps());
+      const QPointF from = side < 0 ? QPointF(r.left() + 1, r.bottom() - 1) : QPointF(r.right() - 1, r.bottom() - 1);
+      const QPointF to = side < 0 ? QPointF(r.left() + w, r.top() + 1) : QPointF(r.right() - w, r.top() + 1);
+      p.setPen(QPen(QColor(255, 255, 255, 150), 1.2));
+      p.drawLine(from, to);
+    }
+    p.setPen(QPen(QColor(0, 0, 0, 170), 1));
+    p.setBrush(fade > 0 ? QColor(Qt::white) : QColor(0xc8, 0xc8, 0xc8));
+    p.drawEllipse(hp, 4.2, 4.2);
+  }
+  p.restore();
+}
+
+void TimelineView::paintFadeLabel(QPainter& p) {
+  if (drag_ != Drag::Fade || !dragMoved_) return;
+  const Editor& ed = editor();
+  QRectF r;
+  double fadeIn = 0;
+  double fadeOut = 0;
+  if (dragType_ == Selection::Clip) {
+    for (const auto& l : ed.layout().items) {
+      if (l.clip.id != dragId_) continue;
+      r = clipRect(l);
+      fadeIn = l.clip.fadeIn;
+      fadeOut = l.clip.fadeOut;
+    }
+  } else if (const OverlayItem* o = dragType_ == Selection::Overlay ? ed.overlay(dragId_) : nullptr) {
+    r = overlayRect(*o);
+    fadeIn = o->fadeIn;
+    fadeOut = o->fadeOut;
+  } else if (const AudioItem* a = ed.audio(dragId_)) {
+    r = audioRect(*a);
+    fadeIn = a->fadeIn;
+    fadeOut = a->fadeOut;
+  }
+  QPointF hp;
+  if (r.isNull() || !fadeHandlePos(r, fadeIn, fadeOut, fadeSide_, &hp)) return;
+  const double v = fadeSide_ < 0 ? fadeIn : fadeOut;
+  const QString text = QStringLiteral("フェード%1 %2").arg(fadeSide_ < 0 ? QStringLiteral("イン") : QStringLiteral("アウト"),
+                                                          v < 0.005 ? QStringLiteral("なし") : QStringLiteral("%1秒").arg(v, 0, 'f', 2));
+  QFont f = font();
+  f.setPointSizeF(8);
+  p.save();
+  p.setFont(f);
+  const QFontMetricsF fm(f);
+  QRectF box(0, 0, fm.horizontalAdvance(text) + 12, 17);
+  box.moveCenter(QPointF(hp.x(), hp.y() - 15));
+  box.moveLeft(std::clamp(box.left(), double(kHeadW) + 2, std::max(double(kHeadW) + 2, viewport()->width() - box.width() - 2)));
+  if (box.top() < kRulerH) box.moveTop(hp.y() + 9);  // 上に隠れるときは、つまみの下に出す
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setPen(Qt::NoPen);
+  p.setBrush(theme::accent);
+  p.drawRoundedRect(box, 4, 4);
+  p.setPen(Qt::white);
+  p.drawText(box, Qt::AlignCenter, text);
+  p.restore();
+}
+
+void TimelineView::fadeTo(QPointF pos) {
+  Editor& ed = editor();
+  const int fps = std::max(1, ed.project().settings.fps);
+  const double t = tOf(dragX(pos.x()));
+  // フレームにそろえる。長さは 0〜kMaxFade 秒、オブジェクトの長さ（もう一方のフェードの残り）までに収める
+  auto frames = [fps](double v) { return std::round(std::max(0.0, v) * fps) / fps; };
+  if (dragType_ == Selection::Clip || dragType_ == Selection::Overlay) {
+    // メインのビデオクリップも、重ねるトラックの映像も（フェードは映像の設定）
+    double start = 0;
+    double duration = -1;
+    if (!ed.clipSpan(dragId_, &start, &duration)) return;
+    const double raw = frames(fadeSide_ < 0 ? t - start : start + duration - t);
+    const int side = fadeSide_;
+    ed.updateClip(dragId_, [&](VideoClip& c) {
+      if (side < 0) c.fadeIn = fitFade(raw, duration, c.fadeOut);
+      else c.fadeOut = fitFade(raw, duration, c.fadeIn);
+    }, merge_);
+  } else if (dragType_ == Selection::Audio) {
+    const AudioItem* a = ed.audio(dragId_);
+    if (!a) return;
+    const double start = a->start;
+    const double duration = audioDuration(*a);
+    const double raw = frames(fadeSide_ < 0 ? t - start : start + duration - t);
+    const int side = fadeSide_;
+    ed.updateAudio(dragId_, [&](AudioItem& x) {
+      if (side < 0) x.fadeIn = fitFade(raw, duration, x.fadeOut);
+      else x.fadeOut = fitFade(raw, duration, x.fadeIn);
+    }, merge_);
+  }
+  viewport()->update();
+}
+
+// ---- 書き出す範囲 -------------------------------------------------------------------------
+
+int TimelineView::rangeEdgeAt(QPointF pos) const {
+  if (pos.y() >= kRulerH || pos.x() < kHeadW) return 0;
+  const std::optional<Editor::TimeRange> r = editor().exportRange();
+  if (!r) return 0;
+  const double ds = std::abs(pos.x() - xOf(r->start));
+  const double de = std::abs(pos.x() - xOf(r->end));
+  if (ds <= 5 && ds <= de) return -1;
+  if (de <= 5) return 1;
+  return 0;
+}
+
+void TimelineView::paintRange(QPainter& p, const QRect& area) {
+  const std::optional<Editor::TimeRange> r = editor().exportRange();
+  if (!r) return;
+  const double x0 = xOf(r->start);
+  const double x1 = xOf(r->end);
+  if (x1 < kHeadW || x0 > area.width()) return;
+  p.save();
+  p.setClipRect(QRect(kHeadW, 0, area.width() - kHeadW, area.height()));
+  QColor band = theme::accent;
+  band.setAlpha(70);
+  p.fillRect(QRectF(x0, 0, x1 - x0, kRulerH - 1), band);
+  // 両端: 目盛りの上は太く、タイムラインの上は細い線
+  QColor edge = theme::accent;
+  p.fillRect(QRectF(x0 - 1, 0, 2, kRulerH), edge);
+  p.fillRect(QRectF(x1 - 1, 0, 2, kRulerH), edge);
+  edge.setAlpha(150);
+  p.fillRect(QRectF(x0 - 0.5, kRulerH, 1, area.height() - kRulerH), edge);
+  p.fillRect(QRectF(x1 - 0.5, kRulerH, 1, area.height() - kRulerH), edge);
+  // 端のつまみ（目盛りの下の端に、内側へ向けた小さな三角）
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setPen(Qt::NoPen);
+  p.setBrush(theme::accent);
+  QPolygonF a;
+  a << QPointF(x0, kRulerH - 9) << QPointF(x0 + 6, kRulerH - 1) << QPointF(x0, kRulerH - 1);
+  QPolygonF b;
+  b << QPointF(x1, kRulerH - 9) << QPointF(x1 - 6, kRulerH - 1) << QPointF(x1, kRulerH - 1);
+  p.drawPolygon(a);
+  p.drawPolygon(b);
+  p.restore();
 }
 
 void TimelineView::mouseDoubleClickEvent(QMouseEvent* e) {
@@ -1487,7 +2284,7 @@ void TimelineView::updateDrop(QPointF pos) {
   if (g.type == Selection::Text) {
     GhostItem it;
     it.start = start;
-    it.duration = ed.newTextDuration(start);
+    it.duration = ed.newTextDuration(start, presetDuration(g.presetId));
     // 追加したあとに入る段（既存のテキストの段は変わらない）。重なるときは別の段になり、段が足りなければ増える
     it.lane = ed.textTrackFor(it.start, it.duration);
     it.label = defaultText();
@@ -1588,6 +2385,7 @@ void TimelineView::paintDropGhost(QPainter& p) {
 void TimelineView::dropTextPreset(QDropEvent* e) {
   const QString presetId = QString::fromUtf8(e->mimeData()->data(QString::fromLatin1(kTextPresetMime)));
   if (!drop_ || drop_->type != Selection::Text) beginDrop(Selection::Text, {});
+  drop_->presetId = presetId;
   updateDrop(e->position());
   const std::optional<DropGhost> drop = drop_;
   endDrop();
@@ -1633,6 +2431,7 @@ void TimelineView::dragEnterEvent(QDragEnterEvent* e) {
   armAutoScroll(e->position().x());
   if (isTextPresetDrag(e->mimeData())) {
     beginDrop(Selection::Text, {});
+    drop_->presetId = QString::fromUtf8(e->mimeData()->data(QString::fromLatin1(kTextPresetMime)));
     updateDrop(e->position());
     if (dropAccepted()) e->acceptProposedAction();
     else e->ignore();
@@ -1678,6 +2477,7 @@ void TimelineView::dragLeaveEvent(QDragLeaveEvent*) {
   libDrag_ = false;
   endDrop();
   dropX_.reset();
+  overlayDropT_.reset();
   audioDropHover_ = false;
   viewport()->update();
 }
@@ -1694,6 +2494,7 @@ void TimelineView::dropEvent(QDropEvent* e) {
     return;
   }
   dropX_.reset();
+  overlayDropT_.reset();
   audioDropHover_ = false;
   viewport()->update();
   const QByteArray data = e->mimeData()->data(QString::fromLatin1(kAssetMime));
@@ -1703,8 +2504,23 @@ void TimelineView::dropEvent(QDropEvent* e) {
   const Row row = rowAt(e->position().y());
   const double x = dragX(e->position().x());  // 見出しの列の上で落としたときは、見えている左端の位置
   const double t = std::max(0.0, tOf(x));
-  if (row == Row::Video) editor().addToTimeline(ids, insertionIndex(x, QString()), t);
-  else editor().addToTimeline(ids, std::nullopt, t);
+  if (row == Row::Overlay) {
+    // 重ねるトラックの段: 落とした段・時間から重ねる（ふさがっていれば、重ならない段へ）。オーディオは、これまでどおりオーディオに置く
+    std::vector<QString> visual;
+    std::vector<QString> sounds;
+    for (const QString& id : ids) {
+      const Asset* a = editor().asset(id);
+      if (a && a->kind == AssetKind::Audio) sounds.push_back(id);
+      else visual.push_back(id);
+    }
+    const int lane = overlayLaneAt(e->position().y());
+    if (!visual.empty()) editor().addOverlays(visual, t, lane >= 0 ? std::optional<int>(lane) : std::nullopt);
+    if (!sounds.empty()) editor().addToTimeline(sounds, std::nullopt, t);
+  } else if (row == Row::Video) {
+    editor().addToTimeline(ids, insertionIndex(x, QString()), t);
+  } else {
+    editor().addToTimeline(ids, std::nullopt, t);
+  }
   e->acceptProposedAction();
 }
 

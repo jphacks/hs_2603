@@ -75,12 +75,15 @@ class PreviewStage : public QWidget {
   bool event(QEvent*) override;
   void focusOutEvent(QFocusEvent*) override;
   bool focusNextPrevChild(bool next) override;
+  /** 文字・映像の上の右クリック: そのオブジェクトのメニュー（複製・削除・文字の編集・アニメーションなど） */
+  void contextMenuEvent(QContextMenuEvent*) override;
   void dragEnterEvent(QDragEnterEvent*) override;
   void dragLeaveEvent(QDragLeaveEvent*) override;
   void dropEvent(QDropEvent*) override;
 
  private:
-  enum class Grab { None, Move, Scale, Rotate, Select };
+  /** StretchX / StretchY は、映像の枠の辺のつまみ（幅・高さだけを変える） */
+  enum class Grab { None, Move, Scale, Rotate, Select, StretchX, StretchY };
   /** 文字の編集の種類（続けて同じ種類の入力は、元に戻す単位を 1 つにまとめる） */
   enum class EditKind { None, Type, Backspace, Delete, Other };
   struct EditState {
@@ -115,6 +118,16 @@ class PreviewStage : public QWidget {
   void blinkReset();
   void updateCanvasSize();
   QString hitText(QPointF pos) const;
+  /** スポイト（クロマキーの透明にする色を、プレビューのクリックで選ぶ）の間 true */
+  bool picking() const;
+  /** スポイト: pos（ウィジェット座標）に見えている元の色を、その映像の透明にする色にして、スポイトを終える */
+  void pickChromaAt(QPointF pos);
+  /** その位置に見えている、重ねるトラックの映像（前に重なっているものから探す）。無ければ空 */
+  QString hitOverlay(QPointF pos) const;
+  /** 重ねるトラックの映像の枠（基準解像度の座標）。今の時間に出ていなければ false */
+  bool overlayQuad(const OverlayItem& o, double t, QPolygonF* quad) const;
+  /** 選んでいるのが映像（メイン・重ねるトラック）なら、辺のつまみ（幅・高さ）を出す */
+  bool selectionStretchable() const;
   QPointF toWidget(QPointF design) const;
   QPointF toDesign(QPointF widget) const;
   /** 選んでいる映像・テキストの枠（基準解像度の座標、左上・右上・右下・左下の順）。無ければ false */
@@ -134,6 +147,10 @@ class PreviewStage : public QWidget {
   double lastAngle_ = 0;
   double accumRot_ = 0;
   QString dragMerge_;
+  /** 辺のつまみのドラッグ: 始めたときの伸縮と、中心からの（回転を戻した）距離 */
+  double origStretchX_ = 1;
+  double origStretchY_ = 1;
+  double stretchStart_ = 1;
   bool guideV_ = false, guideH_ = false;
   bool dropHover_ = false;
   bool fullScreen_ = false;

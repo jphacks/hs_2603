@@ -2,7 +2,9 @@
 
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QContextMenuEvent>
 #include <QDragEnterEvent>
+#include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QInputMethod>
 #include <QFrame>
@@ -23,15 +25,23 @@
 #include <functional>
 
 #include "core/editor.h"
+#include "core/textstyles.h"
 #include "core/timeline.h"
+#include "media/mediamanager.h"
 #include "render/imageops.h"
 #include "render/previewengine.h"
 #include "render/textrender.h"
 #include "ui/librarypanel.h"
+#include "ui/objectmenu.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
 namespace kv {
+
+/** 画面に出すものが何も無いか（何も無いときは、メディアを追加する案内を出す） */
+static bool projectIsEmpty(const ProjectData& p) {
+  return p.clips.empty() && p.overlays.empty() && p.texts.empty();
+}
 
 PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(parent), engine_(engine) {
   setAcceptDrops(true);
@@ -42,7 +52,7 @@ PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(par
   connect(engine_, &PreviewEngine::frameReady, this, qOverload<>(&QWidget::update));
   Editor& ed = editor();
   connect(&ed, &Editor::projectChanged, this, [this] {
-    const bool isEmpty = editor().project().clips.empty() && editor().project().texts.empty();
+    const bool isEmpty = projectIsEmpty(editor().project());
     empty_->setVisible(isEmpty && !fullScreen_);
     updateCanvasSize();
     if (isEditingText() && !applying_) {
@@ -70,6 +80,19 @@ PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(par
     if (editor().playing()) endTextEdit(true);
   });
   connect(&ed, &Editor::workspaceAboutToChange, this, [this] { endTextEdit(true); });
+  // スポイト: 始めたら、Esc を受け取れるようにこの部品へ入力を向け、カーソルを十字にする
+  connect(&ed, &Editor::chromaPickChanged, this, [this] {
+    if (picking()) {
+      endTextEdit(true);
+      grab_ = Grab::None;
+      guideV_ = guideH_ = false;
+      setCursor(Qt::CrossCursor);
+      setFocus(Qt::OtherFocusReason);
+    } else {
+      unsetCursor();
+    }
+    update();
+  });
   connect(&ed, &Editor::timeChanged, this, [this] {
     if (!isEditingText()) return;
     const TextItem* t = editor().text(editId_);
@@ -95,12 +118,13 @@ PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(par
   hint->setAlignment(Qt::AlignCenter);
   v->addWidget(add, 0, Qt::AlignHCenter);
   v->addWidget(hint, 0, Qt::AlignHCenter);
-  empty_->setVisible(ed.project().clips.empty() && ed.project().texts.empty());
+  empty_->setVisible(projectIsEmpty(ed.project()));
 }
 
 void PreviewStage::setFullScreenMode(bool on) {
   if (fullScreen_ == on) return;
   if (on) endTextEdit(true);  // 全画面では、編集用の表示も操作も出さない
+  if (on) editor().setChromaPick({});
   fullScreen_ = on;
   // 全画面では、編集用の操作（枠・ハンドル・ガイド・ドロップ・案内）はすべて止める。映像の描画は通常のままで、同じ処理を使う
   grab_ = Grab::None;
@@ -108,7 +132,7 @@ void PreviewStage::setFullScreenMode(bool on) {
   dropHover_ = false;
   setAcceptDrops(!on);
   unsetCursor();
-  const bool isEmpty = editor().project().clips.empty() && editor().project().texts.empty();
+  const bool isEmpty = projectIsEmpty(editor().project());
   empty_->setVisible(isEmpty && !on);
   updateCanvasSize();
   update();
@@ -171,17 +195,40 @@ void PreviewStage::paintEvent(QPaintEvent*) {
     p.drawPolygon(w);
     p.setPen(QPen(QColor(255, 255, 255, 230), 1));
     p.drawPolygon(w);
-    // 回転ハンドルへの線と丸
-    const QPointF top = (w[0] + w[1]) / 2;
-    const QPointF rot = rotateHandle(quad);
-    p.setPen(QPen(QColor(255, 255, 255, 200), 1));
-    p.drawLine(top, rot);
-    p.setPen(QPen(QColor(0x1d, 0x4d, 0xb0), 1.2));
-    p.setBrush(QColor(255, 255, 255));
-    p.drawEllipse(rot, 5.5, 5.5);
-    // 四隅の四角（拡大・縮小）
-    p.setBrush(QColor(255, 255, 255));
-    for (const QPointF& c : w) p.drawRect(QRectF(c.x() - 4.5, c.y() - 4.5, 9, 9));
+    // スポイトの間は、どの映像から色を選ぶかがわかる枠だけを出す（動かす・拡大するためのつまみは出さない）
+    if (!picking()) {
+      // 回転ハンドルへの線と丸
+      const QPointF top = (w[0] + w[1]) / 2;
+      const QPointF rot = rotateHandle(quad);
+      p.setPen(QPen(QColor(255, 255, 255, 200), 1));
+      p.drawLine(top, rot);
+      p.setPen(QPen(QColor(0x1d, 0x4d, 0xb0), 1.2));
+      p.setBrush(QColor(255, 255, 255));
+      p.drawEllipse(rot, 5.5, 5.5);
+      // 四隅の四角（拡大・縮小）
+      p.setBrush(QColor(255, 255, 255));
+      for (const QPointF& c : w) p.drawRect(QRectF(c.x() - 4.5, c.y() - 4.5, 9, 9));
+      // 映像は、辺の真ん中の丸（幅・高さだけを変える）
+      if (selectionStretchable()) {
+        for (int i = 0; i < 4; ++i) {
+          const QPointF m = (w[i] + w[(i + 1) % 4]) / 2;
+          p.drawEllipse(m, 4.2, 4.2);
+        }
+      }
+    }
+  }
+  if (picking()) {
+    // スポイトの案内（映像の上の端）
+    const QString msg = QStringLiteral("スポイト: 透明にしたい色（背景など）をクリックしてください　Esc・右クリックでやめる");
+    const QFontMetricsF fm(p.font());
+    const double bw = std::min(r.width() - 16, fm.horizontalAdvance(msg) + 28);
+    const QRectF box(r.center().x() - bw / 2, r.top() + 10, bw, fm.height() + 14);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0, 0, 0, 200));
+    p.drawRoundedRect(box, 7, 7);
+    p.setPen(QColor(255, 255, 255));
+    p.drawText(box.adjusted(10, 0, -10, 0), Qt::AlignCenter, fm.elidedText(msg, Qt::ElideRight, bw - 20));
   }
   if (guideV_) p.fillRect(QRectF(r.center().x(), r.top(), 1, r.height()), QColor(0xff, 0x4f, 0xd8));
   if (guideH_) p.fillRect(QRectF(r.left(), r.center().y(), r.width(), 1), QColor(0xff, 0x4f, 0xd8));
@@ -235,6 +282,47 @@ static QPolygonF clipQuad(const VideoClip& c, double local, QSize d) {
   return m.map(poly);
 }
 
+/** 素材の見た目の大きさ（比率だけを使う）。わからなければ 16:9 */
+static QSizeF mediaSizeOf(const VideoClip& c) {
+  if (const Asset* a = editor().asset(c.assetId); a && a->width > 0 && a->height > 0) return QSizeF(a->width, a->height);
+  const QImage img = c.isImage ? media().previewImage(c.assetId) : QImage();
+  if (!img.isNull()) return img.size();
+  return QSizeF(16, 9);
+}
+
+bool PreviewStage::overlayQuad(const OverlayItem& o, double t, QPolygonF* quad) const {
+  const Editor& ed = editor();
+  const int fps = ed.project().settings.fps;
+  if (!isOverlayVisible(o, t, fps)) return false;
+  const QSize d = designSize(ed.project().settings.aspect);
+  const double local = std::clamp(t - o.start, 0.0, overlayDuration(o, fps));
+  *quad = clipMediaQuad(mediaSizeOf(o), cropSourceRect(o, QSizeF(1, 1)), layerStateAt(o, local), d);
+  return quad->size() == 4;
+}
+
+QString PreviewStage::hitOverlay(QPointF pos) const {
+  const Editor& ed = editor();
+  const QPointF dp = toDesign(pos);
+  const double t = ed.currentTime();
+  // 前に重なっているもの（上の段・あとから始まるもの）から探す
+  std::vector<const OverlayItem*> order;
+  for (const auto& o : ed.project().overlays) order.push_back(&o);
+  std::stable_sort(order.begin(), order.end(), [](const OverlayItem* a, const OverlayItem* b) {
+    if (a->track != b->track) return a->track > b->track;
+    return a->start > b->start;
+  });
+  for (const OverlayItem* o : order) {
+    QPolygonF quad;
+    if (overlayQuad(*o, t, &quad) && quad.containsPoint(dp, Qt::WindingFill)) return o->id;
+  }
+  return {};
+}
+
+bool PreviewStage::selectionStretchable() const {
+  const Selection::Type t = editor().selection().type;
+  return t == Selection::Clip || t == Selection::Overlay;
+}
+
 bool PreviewStage::selectedQuad(QPolygonF* quad) const {
   const Editor& ed = editor();
   const Selection& s = ed.selection();
@@ -252,6 +340,10 @@ bool PreviewStage::selectedQuad(QPolygonF* quad) const {
     if (!cur || cur->clip.id != s.id) return false;
     *quad = clipQuad(cur->clip, std::clamp(t - cur->start, 0.0, cur->duration), d);
     return true;
+  }
+  if (s.type == Selection::Overlay) {
+    const OverlayItem* o = ed.overlay(s.id);
+    return o && overlayQuad(*o, t, quad);
   }
   return false;
 }
@@ -279,9 +371,20 @@ PreviewStage::Grab PreviewStage::grabAt(QPointF pos, const QPolygonF& quad) cons
     const QPointF w = toWidget(c);
     if (std::abs(pos.x() - w.x()) <= kHandlePx && std::abs(pos.y() - w.y()) <= kHandlePx) return Grab::Scale;
   }
+  // 映像の枠の辺の真ん中: 幅（左右の辺）・高さ（上下の辺）だけを変える
+  if (selectionStretchable()) {
+    for (int i = 0; i < 4; ++i) {
+      const QPointF m = (toWidget(quad[i]) + toWidget(quad[(i + 1) % 4])) / 2;
+      if (std::abs(pos.x() - m.x()) <= kHandlePx && std::abs(pos.y() - m.y()) <= kHandlePx) return i % 2 == 0 ? Grab::StretchY : Grab::StretchX;
+    }
+  }
   QPolygonF poly;
   for (const QPointF& c : quad) poly << toWidget(c);
   return poly.containsPoint(pos, Qt::WindingFill) ? Grab::Move : Grab::None;
+}
+
+bool PreviewStage::picking() const {
+  return !fullScreen_ && !editor().chromaPick().isEmpty();
 }
 
 QString PreviewStage::hitText(QPointF pos) const {
@@ -304,6 +407,10 @@ void PreviewStage::mousePressEvent(QMouseEvent* e) {
     return;
   }
   if (e->button() != Qt::LeftButton) return;
+  if (picking()) {
+    pickChromaAt(e->position());  // スポイト: クリックした所の色を、透明にする色にする（選択や移動はしない）
+    return;
+  }
   if (isEditingText()) {
     // 文字の編集中: 文字の上のクリック・ドラッグは入力位置と範囲選択（オブジェクトは動かさない）。外側のクリックは編集を確定する
     if (insideEditedText(e->position())) {
@@ -324,7 +431,8 @@ void PreviewStage::mousePressEvent(QMouseEvent* e) {
   if (selectedQuad(&quad)) {
     g = grabAt(e->position(), quad);
     // ハンドル、または選んでいる文字の枠の中: そのまま操作する
-    if (g == Grab::Rotate || g == Grab::Scale || (g == Grab::Move && ed.selection().type == Selection::Text)) {
+    if (g == Grab::Rotate || g == Grab::Scale || g == Grab::StretchX || g == Grab::StretchY ||
+        (g == Grab::Move && ed.selection().type == Selection::Text)) {
       beginGrab(g, e->position());
       return;
     }
@@ -334,6 +442,18 @@ void PreviewStage::mousePressEvent(QMouseEvent* e) {
   if (!id.isEmpty()) {
     ed.pause();
     ed.select({Selection::Text, id});
+    if (selectedQuad(&quad)) beginGrab(Grab::Move, e->position());
+    return;
+  }
+  // 選んでいる重ねるトラックの映像の枠の中: そのまま動かす（下に別の映像があっても、選んでいるものを優先）
+  if (g == Grab::Move && ed.selection().type == Selection::Overlay) {
+    beginGrab(g, e->position());
+    return;
+  }
+  // 重ねるトラックの映像をクリック: 選んで動かせるようにする（メインの映像より前にあるので、こちらが優先）
+  if (const QString ov = hitOverlay(e->position()); !ov.isEmpty()) {
+    ed.pause();
+    ed.select({Selection::Overlay, ov});
     if (selectedQuad(&quad)) beginGrab(Grab::Move, e->position());
     return;
   }
@@ -349,7 +469,14 @@ void PreviewStage::mousePressEvent(QMouseEvent* e) {
     ed.select({Selection::Clip, cur->clip.id});
     return;
   }
-  if (ed.selection().type == Selection::Text || ed.selection().type == Selection::Clip) ed.select({});
+  if (ed.selection().type == Selection::Text || ed.selection().type == Selection::Clip || ed.selection().type == Selection::Overlay) ed.select({});
+}
+
+/** 中心から見た pos の、回転を戻した向きでの位置（幅の向き = x、高さの向き = y） */
+static QPointF unrotated(QPointF pos, QPointF center, double rotationDeg) {
+  const double a = -rotationDeg * M_PI / 180.0;
+  const QPointF v = pos - center;
+  return {v.x() * std::cos(a) - v.y() * std::sin(a), v.x() * std::sin(a) + v.y() * std::cos(a)};
 }
 
 void PreviewStage::beginGrab(Grab g, QPointF pos) {
@@ -365,11 +492,22 @@ void PreviewStage::beginGrab(Grab g, QPointF pos) {
   startAngle_ = std::atan2(pos.y() - center_.y(), pos.x() - center_.x()) * 180.0 / M_PI;
   lastAngle_ = startAngle_;
   accumRot_ = 0;
+  if (g == Grab::StretchX || g == Grab::StretchY) {
+    const VideoClip* c = ed.clip(ed.selection().id);
+    origStretchX_ = c ? c->stretchX : 1;
+    origStretchY_ = c ? c->stretchY : 1;
+    const QPointF u = unrotated(pos, center_, origState_.rotation);
+    stretchStart_ = std::max(1.0, std::abs(g == Grab::StretchX ? u.x() : u.y()));
+  }
 }
 
 void PreviewStage::mouseMoveEvent(QMouseEvent* e) {
   if (fullScreen_) {
     emit activity();  // 再生コントロールを出す合図
+    return;
+  }
+  if (picking()) {
+    setCursor(Qt::CrossCursor);
     return;
   }
   if (isEditingText()) {
@@ -391,6 +529,8 @@ void PreviewStage::mouseMoveEvent(QMouseEvent* e) {
       switch (grabAt(e->position(), quad)) {
         case Grab::Rotate: shape = Qt::CrossCursor; break;
         case Grab::Scale: shape = Qt::SizeFDiagCursor; break;
+        case Grab::StretchX: shape = Qt::SizeHorCursor; break;
+        case Grab::StretchY: shape = Qt::SizeVerCursor; break;
         case Grab::Move: shape = Qt::SizeAllCursor; break;
         default: break;
       }
@@ -413,6 +553,17 @@ void PreviewStage::mouseMoveEvent(QMouseEvent* e) {
     // 中心からの距離の比で、拡大率を変える
     const double dist = std::max(1.0, std::hypot(e->position().x() - center_.x(), e->position().y() - center_.y()));
     ed.setPropValue(AnimProp::Scale, origState_.scale * dist / startDist_, dragMerge_);
+  } else if (grab_ == Grab::StretchX || grab_ == Grab::StretchY) {
+    // 辺のつまみ: 中心からの（回転を戻した向きでの）距離の比で、幅・高さだけを変える（中心は動かさない）
+    const QPointF u = unrotated(e->position(), center_, origState_.rotation);
+    const double now = std::max(1.0, std::abs(grab_ == Grab::StretchX ? u.x() : u.y()));
+    double v = std::clamp((grab_ == Grab::StretchX ? origStretchX_ : origStretchY_) * now / stretchStart_, kMinStretch, kMaxStretch);
+    v = std::round(v * 1000) / 1000;
+    const bool x = grab_ == Grab::StretchX;
+    ed.updateClip(ed.selection().id, [&](VideoClip& c) {
+      if (x) c.stretchX = v;
+      else c.stretchY = v;
+    }, dragMerge_);
   } else if (grab_ == Grab::Rotate) {
     // 中心から見た向きの変化ぶんだけ回す（一周しても途切れないよう、少しずつ足す）。Shift で 15 度刻み
     const double ang = std::atan2(e->position().y() - center_.y(), e->position().x() - center_.x()) * 180.0 / M_PI;
@@ -429,7 +580,7 @@ void PreviewStage::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void PreviewStage::mouseReleaseEvent(QMouseEvent*) {
-  if (fullScreen_) return;
+  if (fullScreen_ || picking()) return;
   if (isEditingText()) {
     // 文字の編集中は、変更の記録（元に戻す履歴のまとまり）を区切らない
     if (grab_ == Grab::Select) grab_ = Grab::None;
@@ -446,7 +597,7 @@ void PreviewStage::mouseDoubleClickEvent(QMouseEvent* e) {
     emit fullScreenToggleRequested();  // 全画面のダブルクリックで、全画面を終える
     return;
   }
-  if (e->button() != Qt::LeftButton) return;
+  if (e->button() != Qt::LeftButton || picking()) return;
   if (isEditingText()) {
     // 編集中のダブルクリック: 文字の上なら単語を選ぶ。外側なら編集を確定する
     if (insideEditedText(e->position())) {
@@ -470,6 +621,40 @@ void PreviewStage::mouseDoubleClickEvent(QMouseEvent* e) {
   bool up = false;
   const int idx = editIndexAt(e->position(), &up);
   moveCaret(idx, false, up);
+}
+
+void PreviewStage::contextMenuEvent(QContextMenuEvent* e) {
+  // スポイトの間の右クリックは、スポイトをやめる
+  if (picking()) {
+    editor().setChromaPick({});
+    return;
+  }
+  // 全画面と、文字を直接編集している間は出さない（編集中の右クリックは、編集の操作と紛らわしい）
+  if (fullScreen_ || isEditingText() || grab_ != Grab::None) return;
+  Editor& ed = editor();
+  const QPointF pos = e->pos();
+  // 文字が優先（左クリックで選ぶときと同じ）。無ければ、今の再生位置の映像（その枠の中のとき）
+  Selection sel;
+  if (const QString id = hitText(pos); !id.isEmpty()) {
+    sel = {Selection::Text, id};
+  } else if (const QString ov = hitOverlay(pos); !ov.isEmpty()) {
+    sel = {Selection::Overlay, ov};
+  } else if (const ClipLayout* cur = findClipAt(ed.layout(), ed.currentTime())) {
+    const QSize d = designSize(ed.project().settings.aspect);
+    const QPolygonF quad = clipQuad(cur->clip, std::clamp(ed.currentTime() - cur->start, 0.0, cur->duration), d);
+    QPolygonF onScreen;
+    for (const QPointF& c : quad) onScreen << toWidget(c);
+    if (onScreen.containsPoint(pos, Qt::WindingFill)) sel = {Selection::Clip, cur->clip.id};
+  }
+  if (!sel) return;
+  const QString id = sel.id;
+  execObjectMenu(this, sel, e->globalPos(), ObjectMenuPlace::Preview, [this, id] {
+    // 文字の終わりに入力位置を置いて、その場で編集する
+    const TextItem* t = editor().text(id);
+    if (!t) return;
+    beginTextEdit(id, int(t->text.size()));
+  });
+  update();
 }
 
 void PreviewStage::dragEnterEvent(QDragEnterEvent* e) {
@@ -548,8 +733,11 @@ TextItem PreviewStage::editedItem() const {
   const TextItem* t = editor().text(editId_);
   if (!t) return {};
   TextItem it = *t;
-  // 変換中の文字は、入力位置に差し込んだ形で見せる
-  if (!preedit_.isEmpty()) it.text = t->text.left(caret_) + preedit_ + t->text.mid(caret_);
+  // 変換中の文字は、入力位置に差し込んだ形で見せる（一部だけ別のフォントにした範囲も、差し込んだ分だけずらす）
+  if (!preedit_.isEmpty()) {
+    it.text = t->text.left(caret_) + preedit_ + t->text.mid(caret_);
+    adjustFontSpans(t->text, it.text, it.fontSpans);
+  }
   return it;
 }
 
@@ -830,6 +1018,11 @@ bool PreviewStage::editsKey(const QKeyEvent* e) const {
 }
 
 bool PreviewStage::event(QEvent* e) {
+  // スポイトの Esc（やめる）は、メニューなどのショートカットより先に受け取る
+  if (picking() && e->type() == QEvent::ShortcutOverride && static_cast<QKeyEvent*>(e)->key() == Qt::Key_Escape) {
+    e->accept();
+    return true;
+  }
   // 編集中に使うキーは、メニューなどのショートカット（Ctrl+Z の「元に戻す」、Delete の「削除」など）より先に受け取る
   if (isEditingText() && e->type() == QEvent::ShortcutOverride) {
     if (editsKey(static_cast<QKeyEvent*>(e))) {
@@ -852,11 +1045,34 @@ void PreviewStage::focusOutEvent(QFocusEvent* e) {
 }
 
 void PreviewStage::keyPressEvent(QKeyEvent* e) {
+  if (picking() && e->key() == Qt::Key_Escape) {
+    editor().setChromaPick({});  // スポイトをやめる
+    e->accept();
+    return;
+  }
   if (!isEditingText()) {
     QWidget::keyPressEvent(e);
     return;
   }
   handleEditKey(e);
+}
+
+void PreviewStage::pickChromaAt(QPointF pos) {
+  Editor& ed = editor();
+  const QString id = ed.chromaPick();
+  const QRectF r = stageRect();
+  if (id.isEmpty() || r.isEmpty() || !r.contains(pos)) return;
+  const QPointF at((pos.x() - r.x()) / r.width(), (pos.y() - r.y()) / r.height());
+  const std::optional<QColor> col = engine_->sampleSource(id, at);
+  if (!col) {
+    ed.toast(QStringLiteral("色を選ぶ映像の上をクリックしてください（今の再生位置に出ている所）"));
+    return;
+  }
+  ed.updateClip(id, [&](VideoClip& c) {
+    c.chroma.color = *col;
+    c.chroma.enabled = true;
+  });
+  ed.setChromaPick({});
 }
 
 void PreviewStage::handleEditKey(QKeyEvent* e) {

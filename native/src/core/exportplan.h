@@ -23,6 +23,9 @@ struct LayerSpec {
   double scale = 1;
   double rotation = 0;
   double opacity = 1;
+  /** 伸縮（幅・高さだけの倍率。回転の前に掛ける。映像だけ） */
+  double stretchX = 1;
+  double stretchY = 1;
   Animation anim;
 };
 
@@ -43,6 +46,20 @@ struct ExportClip {
   std::optional<ColorAdjust> color;
   /** 色の情報が付いていない動画に付ける setparams の値（例 "colorspace=bt709:range=tv"）。付いていれば空 */
   QString colorParams;
+  /** 切り抜き（素材の左・上・右・下から切り落とす割合）。残した部分は、切り抜く前と同じ場所・大きさのまま */
+  double cropL = 0;
+  double cropT = 0;
+  double cropR = 0;
+  double cropB = 0;
+  /** クロマキー（使うときだけ） */
+  std::optional<ChromaKey> chroma;
+};
+
+/** 重ねるトラックの映像・画像（表示方法はいつも全体表示で、余白は透明。位置・拡大などは clip.layer） */
+struct ExportOverlay {
+  ExportClip clip;
+  /** タイムライン上の開始（秒） */
+  double start = 0;
 };
 
 struct PlannedText {
@@ -64,7 +81,10 @@ struct ExportAudio {
   QString path;
   double start = 0;
   double in = 0;
+  /** タイムライン上の長さ（秒） */
   double duration = 0;
+  /** 読み出す速さ（重ねるトラックの動画の音。1 が元の速さ。音程はそのまま） */
+  double speed = 1;
   double volume = 1;
   /** 音量キーフレーム（クリップの先頭からの秒数）。あるときは volume ではなくこちらで音量を変える */
   std::vector<VolumePoint> points;
@@ -80,7 +100,20 @@ struct ExportRequest {
   ExportQuality quality = ExportQuality::Standard;
   double duration = 0;
   std::vector<ExportClip> clips;
+  /** 重ねるトラック（この順に重ねる。後ろのものほど前。文字はその上） */
+  std::vector<ExportOverlay> overlays;
   std::vector<ExportAudio> audios;
+  /**
+   * 書き出す範囲（タイムラインの秒数）。rangeEnd > rangeStart のときだけ、全体を組み立てたあとで、その範囲だけを切り出す
+   * （フレームにそろえる）。そうでなければ全体
+   */
+  double rangeStart = 0;
+  double rangeEnd = 0;
+  /**
+   * 動画全体の再生速度（1 が元の速さ）。全体を組み立てて範囲を切り出したあとで、映像はフレームの時間を 1/speed にして
+   * フレームレートを合わせ直し、音は atempo（音程はそのまま）で、まとめて速さを変える
+   */
+  double speed = 1;
 };
 
 struct ExportPlan {

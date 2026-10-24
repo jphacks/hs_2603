@@ -63,6 +63,8 @@ class MainWindow : public QMainWindow {
   QString plainCommandFor(const QKeyEvent* e) const;
   /** 操作を行う。いま行えなければ false（キーはほかの部品に渡す） */
   bool runCommand(const QString& id);
+  /** 前（dir = -1）・次（1）のオブジェクトを選び、再生位置をその先頭へ動かす（↑↓） */
+  void selectAdjacentObject(int dir);
   /** 保存していない変更があれば保存するか尋ねる。続けてよければ true */
   bool confirmSaveWorkspace(int index);
   void closeWorkspace(int index);

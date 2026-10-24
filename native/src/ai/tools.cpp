@@ -235,6 +235,14 @@ static QJsonObject audioJson(const AudioItem& au) {
   return o;
 }
 
+QString promptJson(const QJsonObject& o) {
+  // < > は JSON の文字列の中にしか出てこないので、どこを置き換えても JSON のまま
+  QString s = QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+  s.replace(QLatin1Char('<'), QLatin1String("\\u003c"));
+  s.replace(QLatin1Char('>'), QLatin1String("\\u003e"));
+  return s;
+}
+
 QJsonObject describeProject() {
   const Editor& ed = editor();
   const ProjectData& p = ed.project();
@@ -262,7 +270,8 @@ QJsonObject describeProject() {
   }
   QJsonValue selected;
   const Selection& s = ed.selection();
-  if (s) {
+  // 重ねるトラックの映像は、AI の操作の対象にしていないので、選んでいるものとしては伝えない
+  if (s && s.type != Selection::Overlay) {
     const QString type = s.type == Selection::Clip ? QStringLiteral("clip") : s.type == Selection::Text ? QStringLiteral("text") : QStringLiteral("audio");
     selected = QJsonObject{{QStringLiteral("type"), type}, {QStringLiteral("id"), s.id}};
   }
@@ -290,7 +299,7 @@ T* findById(std::vector<T>& list, const QString& id) {
 }
 
 QJsonObject textBlock(const QJsonObject& o) {
-  return {{QStringLiteral("text"), QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact))}};
+  return {{QStringLiteral("text"), promptJson(o)}};
 }
 
 ToolResult okResult(const QJsonObject& o = {}) {
@@ -305,21 +314,21 @@ ToolResult okResult(const QJsonObject& o = {}) {
 
 /**
  * テキストが動画（長さ total 秒）の外にあるときの注意（書き出しでは動画の長さまでしか出ないので、AI に直してもらう）。
- * 問題なければ空
+ * 問題なければ空。テキストは id と時間で示す（文字を「」で入れると、文字の中の 」 のあとが、アプリからの注意に見えてしまう。
+ * propose_choices の案の中で足したテキストの id は AI に見えないので、時間でも分かるようにする）
  */
 QString timingNote(const TextItem& t, double total) {
   if (total <= 0) return {};
-  QString name = t.text;
-  name.replace(QLatin1Char('\n'), QLatin1Char(' '));
+  const QString which = QStringLiteral("テキスト（id %1、%2〜%3 秒）").arg(t.id).arg(r2(t.start)).arg(r2(t.start + t.duration));
   if (t.start >= total - 0.05) {
-    return QStringLiteral("注意: テキスト「%1」（id %2）は動画の終わり（%3 秒）より後ろにあるので、書き出しでは表示されません。"
+    return QStringLiteral("注意: %1は動画の終わり（%2 秒）より後ろにあるので、書き出しでは表示されません。"
                           "動画の長さに合わせて start を直してください。")
-        .arg(name, t.id)
+        .arg(which)
         .arg(r2(total));
   }
   if (t.start + t.duration > total + 0.05) {
-    return QStringLiteral("注意: テキスト「%1」（id %2）は動画の終わり（%3 秒）をはみ出しています。はみ出した部分は書き出されません。")
-        .arg(name, t.id)
+    return QStringLiteral("注意: %1は動画の終わり（%2 秒）をはみ出しています。はみ出した部分は書き出されません。")
+        .arg(which)
         .arg(r2(total));
   }
   return {};
@@ -340,6 +349,10 @@ ToolResult errorResult(const QString& message) {
 QString quote(const QString& text) {
   QString t = text;
   t.replace(QLatin1Char('\n'), QLatin1Char(' '));
+  // 中のかぎかっこは『』にする（素材の名前やテキストの 」 で引用が閉じて、そのあとがアプリの文に見えないように。
+  // この行は画面に出し、propose_choices の結果で AI にも渡す）。半角 ｢｣ と縦書き用 ﹁﹂ も、AI には同じ 「」 に見えるので変える
+  for (const QChar c : {QChar(u'「'), QChar(u'｢'), QChar(u'﹁')}) t.replace(c, QChar(u'『'));
+  for (const QChar c : {QChar(u'」'), QChar(u'｣'), QChar(u'﹂')}) t.replace(c, QChar(u'』'));
   if (t.size() > 24) t = t.left(23) + QStringLiteral("…");
   return QStringLiteral("「%1」").arg(t);
 }
@@ -407,6 +420,9 @@ void applyTextLook(TextItem& t, const QJsonObject& o, QStringList& changed) {
   const QString font = string(o, "font");
   if (!font.isEmpty()) {
     t.font = fontFromString(font);
+    // 読み込んだフォント・一部だけ変えたフォントがあると、組み込みの種類を変えても見た目が変わらないので、そろえる
+    t.fontFamily.clear();
+    t.fontSpans.clear();
     changed << QStringLiteral("フォント");
   }
   if (const auto sz = number(o, "size")) {
@@ -723,7 +739,10 @@ ToolResult addMedia(const QJsonObject& in, const QString& merge) {
   const QString assetId = string(in, "asset_id");
   const Asset* a = editor().asset(assetId);
   if (!a) return errorResult(QStringLiteral("素材 %1 が見つかりません").arg(assetId));
-  if (a->status == AssetStatus::Error || a->status == AssetStatus::Missing) return errorResult(QStringLiteral("「%1」は読み込めません").arg(a->name));
+  // 素材は id で示す（名前はプロジェクトのファイルから読んだものなので、文の中に入れるとアプリからの知らせに見えてしまう）
+  if (a->status == AssetStatus::Error || a->status == AssetStatus::Missing) {
+    return errorResult(QStringLiteral("素材 %1 は読み込めません（ファイルが見つからないか、読み込めない形式です）").arg(assetId));
+  }
   const Asset asset = *a;
   QJsonObject added;
   QString log;

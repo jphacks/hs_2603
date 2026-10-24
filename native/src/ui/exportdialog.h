@@ -31,7 +31,13 @@ class ExportDialog : public QDialog {
  private:
   void refreshSummary();
   void begin(const QString& path);
+  /** 範囲を決めてあって、「指定した範囲」を選んでいるか */
+  bool rangeSelected() const;
   QStackedWidget* pages_;
+  /** 書き出す部分（全体 / 指定した範囲）。範囲を決めてあるときだけ出す */
+  QWidget* partBox_;
+  Segmented* part_;
+  QLabel* partNote_;
   Segmented* resolution_;
   Segmented* quality_;
   QLabel* summary_[3];

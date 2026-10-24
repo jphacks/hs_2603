@@ -1,5 +1,6 @@
 #include "ui/mainwindow.h"
 
+#include <QAbstractItemView>
 #include <QAbstractSlider>
 #include <QAbstractSpinBox>
 #include <QAction>
@@ -39,6 +40,7 @@
 #include "ai/assistant.h"
 #include "core/editor.h"
 #include "core/projectio.h"
+#include "core/timeline.h"
 #include "export/exporter.h"
 #include "media/mediamanager.h"
 #include "render/previewengine.h"
@@ -200,6 +202,27 @@ void MainWindow::buildMenus() {
   file->addSeparator();
   bindCommand(QStringLiteral("file.import"), file->addAction(QStringLiteral("メディアを追加..."), this, [this] { LibraryPanel::pickAndImport(this); }));
   bindCommand(QStringLiteral("file.export"), file->addAction(QStringLiteral("書き出し..."), this, &MainWindow::openExport));
+  // 書き出す範囲（タイムラインの一部だけを書き出す）。目盛りを Shift+ドラッグ、または右クリックでも決められる
+  QMenu* rangeMenu = file->addMenu(QStringLiteral("書き出す範囲"));
+  auto rangeToast = [] {
+    if (const auto r = editor().exportRange()) {
+      editor().toast(QStringLiteral("書き出す範囲: %1 〜 %2（書き出しで「指定した範囲」を選べます）").arg(formatTime(r->start), formatTime(r->end)));
+    }
+  };
+  bindCommand(QStringLiteral("range.in"), rangeMenu->addAction(QStringLiteral("開始を再生位置にする"), this, [rangeToast] {
+    editor().setRangeStart(editor().currentTime());
+    rangeToast();
+  }));
+  bindCommand(QStringLiteral("range.out"), rangeMenu->addAction(QStringLiteral("終了を再生位置にする"), this, [rangeToast] {
+    editor().setRangeEnd(editor().currentTime());
+    rangeToast();
+  }));
+  QAction* rangeClear = rangeMenu->addAction(QStringLiteral("範囲を解除"), this, [] { editor().clearRange(); });
+  bindCommand(QStringLiteral("range.clear"), rangeClear);
+  auto refreshRange = [rangeClear] { rangeClear->setEnabled(editor().exportRange().has_value()); };
+  connect(&ed, &Editor::rangeChanged, this, refreshRange);
+  connect(&ed, &Editor::projectChanged, this, refreshRange);
+  refreshRange();
   file->addSeparator();
   bindCommand(QStringLiteral("file.quit"), file->addAction(QStringLiteral("終了"), this, &QWidget::close));
 
@@ -248,15 +271,23 @@ void MainWindow::buildMenus() {
   bindCommand(QStringLiteral("edit.copyKeys"), copyKeys);
   bindCommand(QStringLiteral("edit.pasteKeys"), pasteKeys);
   edit->addSeparator();
-  // テキストの段を変えるのは、移動や長さの変更とは別の、この明示的な操作だけ
+  // テキスト・重ねるトラックの段を変える（タイムラインで上下にドラッグしても変えられる。横に動かすだけでは変わらない）。
+  // テキストは上の段ほど番号が小さく、重ねるトラックは上の段ほど前（番号が大きい）
   auto moveTextTrack = [](int delta) {
     const Selection s = editor().selection();
     if (s.type == Selection::Text) editor().moveTextTrack(s.id, delta);
+    else if (s.type == Selection::Overlay) editor().moveOverlayTrack(s.id, -delta);
   };
-  QAction* trackUp = edit->addAction(QStringLiteral("テキストを上の段へ"), this, [moveTextTrack] { moveTextTrack(-1); });
-  QAction* trackDown = edit->addAction(QStringLiteral("テキストを下の段へ"), this, [moveTextTrack] { moveTextTrack(1); });
+  QAction* trackUp = edit->addAction(QStringLiteral("上の段へ（テキスト・重ねる映像）"), this, [moveTextTrack] { moveTextTrack(-1); });
+  QAction* trackDown = edit->addAction(QStringLiteral("下の段へ（テキスト・重ねる映像）"), this, [moveTextTrack] { moveTextTrack(1); });
   bindCommand(QStringLiteral("edit.textUp"), trackUp);
   bindCommand(QStringLiteral("edit.textDown"), trackDown);
+  edit->addSeparator();
+  // グループ（テキスト・オーディオ・重ねるトラック。Ctrl+クリックで一緒に選んでから）
+  QAction* group = edit->addAction(QStringLiteral("グループ化"), this, [] { editor().groupSelection(); });
+  QAction* ungroup = edit->addAction(QStringLiteral("グループ解除"), this, [] { editor().ungroupSelection(); });
+  bindCommand(QStringLiteral("edit.group"), group, [] { return editor().canGroup(); });
+  bindCommand(QStringLiteral("edit.ungroup"), ungroup, [] { return editor().canUngroup(); });
   edit->addSeparator();
   bindCommand(QStringLiteral("edit.addText"), edit->addAction(QStringLiteral("テキストを追加"), this, [this] {
     editor().addText(QStringLiteral("basic"));
@@ -277,14 +308,25 @@ void MainWindow::buildMenus() {
   addHiddenCommand(QStringLiteral("play.forward1s"), [seekBy] { seekBy(1, false); });
   addHiddenCommand(QStringLiteral("play.start"), [] { editor().seek(0); });
   addHiddenCommand(QStringLiteral("play.end"), [] { editor().seek(editor().playEnd()); });
-  auto refreshEdit = [undo, redo, dup, del, trackUp, trackDown] {
+  // 前・次のオブジェクトを選ぶ（再生位置もその先頭へ）。一覧やプルダウンを選んでいるときは、↑↓ はそちらの操作に使う
+  auto arrowsFree = [] {
+    for (QWidget* w = QApplication::focusWidget(); w; w = w->parentWidget()) {
+      if (qobject_cast<QAbstractItemView*>(w) || qobject_cast<QComboBox*>(w)) return false;
+    }
+    return true;
+  };
+  addHiddenCommand(QStringLiteral("edit.prevObject"), [this] { selectAdjacentObject(-1); }, arrowsFree);
+  addHiddenCommand(QStringLiteral("edit.nextObject"), [this] { selectAdjacentObject(1); }, arrowsFree);
+  auto refreshEdit = [undo, redo, dup, del, trackUp, trackDown, group, ungroup] {
     undo->setEnabled(editor().canUndo());
     redo->setEnabled(editor().canRedo());
     dup->setEnabled(bool(editor().selection()));
     del->setEnabled(bool(editor().selection()));
-    const bool isText = editor().selection().type == Selection::Text;
-    trackUp->setEnabled(isText);
-    trackDown->setEnabled(isText);
+    const Selection::Type t = editor().selection().type;
+    trackUp->setEnabled(t == Selection::Text || t == Selection::Overlay);
+    trackDown->setEnabled(t == Selection::Text || t == Selection::Overlay);
+    group->setEnabled(editor().canGroup());
+    ungroup->setEnabled(editor().canUngroup());
   };
   connect(&ed, &Editor::projectChanged, this, refreshEdit);
   connect(&ed, &Editor::selectionChanged, this, refreshEdit);
@@ -296,6 +338,13 @@ void MainWindow::buildMenus() {
   bindCommand(QStringLiteral("view.zoomOut"),
               view->addAction(QStringLiteral("タイムラインを縮小"), this, [] { editor().setPxPerSec(editor().pxPerSec() / 1.4); }));
   bindCommand(QStringLiteral("view.fitAll"), view->addAction(QStringLiteral("全体を表示"), this, [this] { timeline_->view()->fitAll(); }));
+  // タイムラインの段（テキスト・ビデオ・オーディオ）の高さ。左の見出しの列の境目をドラッグしても変えられる
+  bindCommand(QStringLiteral("view.tracksTaller"),
+              view->addAction(QStringLiteral("タイムラインの段を高く"), this, [this] { timeline_->view()->scaleTrackHeights(1.2); }));
+  bindCommand(QStringLiteral("view.tracksShorter"),
+              view->addAction(QStringLiteral("タイムラインの段を低く"), this, [this] { timeline_->view()->scaleTrackHeights(1 / 1.2); }));
+  bindCommand(QStringLiteral("view.tracksReset"),
+              view->addAction(QStringLiteral("タイムラインの段の高さを元に戻す"), this, [this] { timeline_->view()->resetTrackHeights(); }));
   view->addSeparator();
   bindCommand(QStringLiteral("view.fullScreen"),
               view->addAction(QStringLiteral("プレビューを全画面表示"), this, [this] { preview_->toggleFullScreen(); }));
@@ -405,6 +454,62 @@ QString MainWindow::plainCommandFor(const QKeyEvent* e) const {
   // Shift 付きで割り当てが無ければ、Shift なしの割り当てを使う（Shift+S でも分割、"?" を Shift で打つキーボードなど）
   if (id.isEmpty() && (mods & Qt::ShiftModifier)) id = plainKeys_.value(QKeyCombination(mods & ~Qt::ShiftModifier, key).toCombined());
   return id;
+}
+
+void MainWindow::selectAdjacentObject(int dir) {
+  Editor& ed = editor();
+  // タイムラインの上から（テキストの段 → ビデオ → オーディオ）、時間の順に並べる。同じ時間なら上の段から
+  struct Obj {
+    double start;
+    int row;
+    Selection sel;
+  };
+  std::vector<Obj> objs;
+  for (const auto& t : ed.project().texts) objs.push_back({t.start, t.track, {Selection::Text, t.id}});
+  // 重ねるトラック（テキストの段とビデオの段の間。上の段ほど上に並ぶ）
+  for (const auto& o : ed.project().overlays) objs.push_back({o.start, (1 << 19) - o.track, {Selection::Overlay, o.id}});
+  for (const auto& l : ed.layout().items) objs.push_back({l.start, 1 << 20, {Selection::Clip, l.clip.id}});
+  for (const auto& a : ed.project().audios) objs.push_back({a.start, 1 << 21, {Selection::Audio, a.id}});
+  if (objs.empty()) return;
+  std::stable_sort(objs.begin(), objs.end(), [](const Obj& a, const Obj& b) {
+    if (std::abs(a.start - b.start) > 1e-9) return a.start < b.start;
+    return a.row < b.row;
+  });
+  const int n = int(objs.size());
+  int index = -1;
+  for (int i = 0; i < n; ++i) {
+    if (objs[size_t(i)].sel == ed.selection()) index = i;
+  }
+  int next = 0;
+  if (index >= 0) {
+    next = std::clamp(index + dir, 0, n - 1);
+    if (next == index) return;  // 端ではそのまま
+  } else {
+    // 何も選んでいないとき: ↓ は再生位置から後ろで最初の物、↑ は再生位置より前で最後の物
+    const double t = ed.currentTime();
+    if (dir > 0) {
+      next = n - 1;
+      for (int i = 0; i < n; ++i) {
+        if (objs[size_t(i)].start >= t - 1e-6) {
+          next = i;
+          break;
+        }
+      }
+    } else {
+      next = 0;
+      for (int i = n - 1; i >= 0; --i) {
+        if (objs[size_t(i)].start < t - 1e-6) {
+          next = i;
+          break;
+        }
+      }
+    }
+  }
+  const Obj& o = objs[size_t(next)];
+  ed.pause();
+  ed.select(o.sel);
+  ed.seek(o.start);
+  timeline_->view()->revealTime(o.start);
 }
 
 bool MainWindow::runCommand(const QString& id) {

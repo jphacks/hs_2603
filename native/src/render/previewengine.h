@@ -1,14 +1,17 @@
 #pragma once
 // プレビューの再生エンジン。再生位置に合わせてフレームを用意し、色・フェード・テキストを重ねた画像を作る。
 
+#include <QColor>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QObject>
+#include <QPointF>
 #include <QTimer>
 #include <atomic>
 #include <deque>
 #include <map>
 #include <memory>
+#include <optional>
 
 #include "core/model.h"
 #include "media/audioengine.h"
@@ -39,6 +42,12 @@ class PreviewEngine : public QObject {
   /** 停止中なら、今の再生位置の画面をすぐ作り直す（編集中の文字と、その上に重ねる入力位置の表示がずれないように） */
   void refreshNow();
 
+  /**
+   * スポイト: 画面上の点 at（左上 (0,0)〜右下 (1,1) の割合）にある、映像 clipId（メイン・重ねるトラック）の元の色
+   * （クロマキー・色の調整の前。周りの数画素の平均）。今の画面にその映像が出ていない・点がその映像の外なら空
+   */
+  std::optional<QColor> sampleSource(const QString& clipId, QPointF at) const;
+
  signals:
   void frameReady();
 
@@ -47,6 +56,19 @@ class PreviewEngine : public QObject {
   void compose(double t, bool playing);
   void updateAudioSnapshot();
   VideoSource* source(const QString& key, const QString& path);
+  /**
+   * クロマキー（と、withColor なら色の調整）を掛けたフレーム。同じフレーム・同じ設定なら、前に作ったものを使う
+   * （一時停止中に何度描き直しても、重い処理をくり返さない）。onBlack なら、透明にした所を黒で埋める（メインのトラック）
+   */
+  QImage processedFrame(const QString& key, const QImage& src, const VideoClip& c, bool withColor, bool onBlack);
+  struct Processed {
+    qint64 source = 0;
+    QString params;
+    QImage image;
+  };
+  std::map<QString, Processed> processed_;
+  /** 今の画面に使った映像の元のフレーム（"clip:<id>" / "overlay:<id>"。スポイト用） */
+  std::map<QString, QImage> raw_;
 
   QTimer timer_;
   AudioEngine audio_;
@@ -62,6 +84,8 @@ class PreviewEngine : public QObject {
   bool wasPlaying_ = false;
   int seenSeek_ = -1;
   double playStart_ = 0;
+  /** 再生を始めたときの、動画全体の再生速度（再生中に変わったら、その位置から始め直す） */
+  double playSpeed_ = 1;
   QElapsedTimer wall_;
 };
 

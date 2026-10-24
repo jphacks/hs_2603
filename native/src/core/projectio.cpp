@@ -13,6 +13,7 @@
 
 #include "core/editor.h"
 #include "core/filters.h"
+#include "core/textstyles.h"
 #include "core/timeline.h"
 
 namespace kv {
@@ -73,72 +74,112 @@ static Animation animFromJson(const QJsonObject& o) {
   return a;
 }
 
+/** ビデオクリップ（重ねるトラックの映像・画像も同じ形）。切り抜き・伸縮・クロマキーは、使っているときだけ書く */
+static QJsonObject clipToJson(const VideoClip& c) {
+  QJsonObject co{
+      {QStringLiteral("id"), c.id},
+      {QStringLiteral("assetId"), c.assetId},
+      {QStringLiteral("kind"), c.isImage ? QStringLiteral("image") : QStringLiteral("video")},
+      {QStringLiteral("in"), c.in},
+      {QStringLiteral("out"), c.out},
+      {QStringLiteral("speed"), c.speed},
+      {QStringLiteral("volume"), c.volume},
+      {QStringLiteral("muted"), c.muted},
+      {QStringLiteral("fadeIn"), c.fadeIn},
+      {QStringLiteral("fadeOut"), c.fadeOut},
+      {QStringLiteral("fit"), fitToString(c.fit)},
+      {QStringLiteral("color"), QJsonObject{{QStringLiteral("preset"), presetToString(c.color.preset)},
+                                            {QStringLiteral("brightness"), c.color.brightness},
+                                            {QStringLiteral("contrast"), c.color.contrast},
+                                            {QStringLiteral("saturation"), c.color.saturation},
+                                            {QStringLiteral("temperature"), c.color.temperature}}},
+      {QStringLiteral("x"), c.x},
+      {QStringLiteral("y"), c.y},
+      {QStringLiteral("scale"), c.scale},
+      {QStringLiteral("rotation"), c.rotation},
+      {QStringLiteral("opacity"), c.opacity},
+  };
+  if (!c.volumePoints.empty()) co[QStringLiteral("volumePoints")] = volumePointsToJson(c.volumePoints);
+  animToJson(co, c.anim);
+  if (hasCrop(c)) {
+    co[QStringLiteral("crop")] = QJsonObject{{QStringLiteral("left"), c.cropL},
+                                             {QStringLiteral("top"), c.cropT},
+                                             {QStringLiteral("right"), c.cropR},
+                                             {QStringLiteral("bottom"), c.cropB}};
+  }
+  if (hasStretch(c)) co[QStringLiteral("stretch")] = QJsonObject{{QStringLiteral("x"), c.stretchX}, {QStringLiteral("y"), c.stretchY}};
+  if (!(c.chroma == ChromaKey{})) {
+    co[QStringLiteral("chromaKey")] = QJsonObject{{QStringLiteral("enabled"), c.chroma.enabled},
+                                                  {QStringLiteral("color"), colorHex(c.chroma.color)},
+                                                  {QStringLiteral("similarity"), c.chroma.similarity},
+                                                  {QStringLiteral("blend"), c.chroma.blend},
+                                                  {QStringLiteral("despill"), c.chroma.despill}};
+  }
+  return co;
+}
+
+QJsonObject textToJson(const TextItem& t) {
+  QJsonObject to{
+      {QStringLiteral("id"), t.id},
+      {QStringLiteral("text"), t.text},
+      {QStringLiteral("start"), t.start},
+      {QStringLiteral("duration"), t.duration},
+      {QStringLiteral("track"), t.track},
+      {QStringLiteral("x"), t.x},
+      {QStringLiteral("y"), t.y},
+      {QStringLiteral("font"), fontToString(t.font)},
+      {QStringLiteral("size"), t.size},
+      {QStringLiteral("bold"), t.bold},
+      {QStringLiteral("color"), colorHex(t.color)},
+      {QStringLiteral("strokeColor"), colorHex(t.strokeColor)},
+      {QStringLiteral("strokeWidth"), t.strokeWidth},
+      {QStringLiteral("boxColor"), colorHex(t.boxColor)},
+      {QStringLiteral("boxOpacity"), t.boxOpacity},
+      {QStringLiteral("shadow"), t.shadow},
+      {QStringLiteral("align"), alignToString(t.align)},
+      {QStringLiteral("letterSpacing"), t.letterSpacing},
+      {QStringLiteral("animation"), animationToString(t.animation)},
+      {QStringLiteral("scale"), t.scale},
+      {QStringLiteral("rotation"), t.rotation},
+      {QStringLiteral("opacity"), t.opacity},
+  };
+  animToJson(to, t.anim);
+  // 読み込んだフォント・同梱のフォント（無いパソコンでは "font" の種類で描く）と、一部だけ別のフォントにした範囲
+  if (!t.fontFamily.isEmpty()) to[QStringLiteral("fontFamily")] = t.fontFamily;
+  if (!t.fontSpans.empty()) {
+    QJsonArray spans;
+    for (const auto& s : t.fontSpans) {
+      QJsonObject so{{QStringLiteral("start"), s.start}, {QStringLiteral("length"), s.length}, {QStringLiteral("font"), fontToString(s.font)}};
+      if (!s.family.isEmpty()) so[QStringLiteral("fontFamily")] = s.family;
+      spans.append(so);
+    }
+    to[QStringLiteral("fontSpans")] = spans;
+  }
+  if (!t.group.isEmpty()) to[QStringLiteral("group")] = t.group;
+  return to;
+}
+
 QJsonObject projectToJson(const ProjectData& p) {
   QJsonObject proj;
   proj[QStringLiteral("name")] = p.name;
   proj[QStringLiteral("settings")] = QJsonObject{{QStringLiteral("aspect"), aspectToString(p.settings.aspect)},
-                                                 {QStringLiteral("fps"), p.settings.fps}};
+                                                 {QStringLiteral("fps"), p.settings.fps},
+                                                 {QStringLiteral("speed"), p.settings.speed}};
   QJsonArray clips;
-  for (const auto& c : p.clips) {
-    QJsonObject co{
-        {QStringLiteral("id"), c.id},
-        {QStringLiteral("assetId"), c.assetId},
-        {QStringLiteral("kind"), c.isImage ? QStringLiteral("image") : QStringLiteral("video")},
-        {QStringLiteral("in"), c.in},
-        {QStringLiteral("out"), c.out},
-        {QStringLiteral("speed"), c.speed},
-        {QStringLiteral("volume"), c.volume},
-        {QStringLiteral("muted"), c.muted},
-        {QStringLiteral("fadeIn"), c.fadeIn},
-        {QStringLiteral("fadeOut"), c.fadeOut},
-        {QStringLiteral("fit"), fitToString(c.fit)},
-        {QStringLiteral("color"), QJsonObject{{QStringLiteral("preset"), presetToString(c.color.preset)},
-                                              {QStringLiteral("brightness"), c.color.brightness},
-                                              {QStringLiteral("contrast"), c.color.contrast},
-                                              {QStringLiteral("saturation"), c.color.saturation},
-                                              {QStringLiteral("temperature"), c.color.temperature}}},
-        {QStringLiteral("x"), c.x},
-        {QStringLiteral("y"), c.y},
-        {QStringLiteral("scale"), c.scale},
-        {QStringLiteral("rotation"), c.rotation},
-        {QStringLiteral("opacity"), c.opacity},
-    };
-    if (!c.volumePoints.empty()) co[QStringLiteral("volumePoints")] = volumePointsToJson(c.volumePoints);
-    animToJson(co, c.anim);
-    clips.append(co);
+  for (const auto& c : p.clips) clips.append(clipToJson(c));
+  QJsonArray overlays;
+  for (const auto& o : p.overlays) {
+    QJsonObject oo = clipToJson(o);
+    oo[QStringLiteral("start")] = o.start;
+    oo[QStringLiteral("track")] = o.track;
+    if (!o.group.isEmpty()) oo[QStringLiteral("group")] = o.group;
+    overlays.append(oo);
   }
   QJsonArray texts;
-  for (const auto& t : p.texts) {
-    QJsonObject to{
-        {QStringLiteral("id"), t.id},
-        {QStringLiteral("text"), t.text},
-        {QStringLiteral("start"), t.start},
-        {QStringLiteral("duration"), t.duration},
-        {QStringLiteral("track"), t.track},
-        {QStringLiteral("x"), t.x},
-        {QStringLiteral("y"), t.y},
-        {QStringLiteral("font"), fontToString(t.font)},
-        {QStringLiteral("size"), t.size},
-        {QStringLiteral("bold"), t.bold},
-        {QStringLiteral("color"), colorHex(t.color)},
-        {QStringLiteral("strokeColor"), colorHex(t.strokeColor)},
-        {QStringLiteral("strokeWidth"), t.strokeWidth},
-        {QStringLiteral("boxColor"), colorHex(t.boxColor)},
-        {QStringLiteral("boxOpacity"), t.boxOpacity},
-        {QStringLiteral("shadow"), t.shadow},
-        {QStringLiteral("align"), alignToString(t.align)},
-        {QStringLiteral("letterSpacing"), t.letterSpacing},
-        {QStringLiteral("animation"), animationToString(t.animation)},
-        {QStringLiteral("scale"), t.scale},
-        {QStringLiteral("rotation"), t.rotation},
-        {QStringLiteral("opacity"), t.opacity},
-    };
-    animToJson(to, t.anim);
-    texts.append(to);
-  }
+  for (const auto& t : p.texts) texts.append(textToJson(t));
   QJsonArray audios;
   for (const auto& a : p.audios) {
-    audios.append(QJsonObject{
+    QJsonObject ao{
         {QStringLiteral("id"), a.id},
         {QStringLiteral("assetId"), a.assetId},
         {QStringLiteral("start"), a.start},
@@ -148,9 +189,13 @@ QJsonObject projectToJson(const ProjectData& p) {
         {QStringLiteral("volumePoints"), volumePointsToJson(a.volumePoints)},
         {QStringLiteral("fadeIn"), a.fadeIn},
         {QStringLiteral("fadeOut"), a.fadeOut},
-    });
+    };
+    if (!a.group.isEmpty()) ao[QStringLiteral("group")] = a.group;
+    audios.append(ao);
   }
   proj[QStringLiteral("clips")] = clips;
+  // 重ねるトラックは、使っているときだけ書く（以前の版で開いても、ほかの内容はそのまま読める）
+  if (!overlays.isEmpty()) proj[QStringLiteral("overlays")] = overlays;
   proj[QStringLiteral("texts")] = texts;
   proj[QStringLiteral("audios")] = audios;
   return proj;
@@ -215,6 +260,100 @@ static double numOr(const QJsonObject& o, const char* key, double fallback) {
   return v.isDouble() ? v.toDouble() : fallback;
 }
 
+static VideoClip clipFromJson(const QJsonObject& o) {
+  VideoClip c;
+  c.id = o.value(QStringLiteral("id")).toString(newId());
+  c.assetId = o.value(QStringLiteral("assetId")).toString();
+  c.isImage = o.value(QStringLiteral("kind")).toString() == u"image";
+  c.in = std::max(0.0, numOr(o, "in", 0));
+  c.out = std::max(c.in + 0.05, numOr(o, "out", c.in + 1));
+  c.speed = std::clamp(numOr(o, "speed", 1), 0.1, 16.0);
+  // 以前は 200% まで設定できたので、保存されている値が 100% を超えていたら 100% にそろえる
+  c.volume = std::clamp(numOr(o, "volume", kMaxVolume), 0.0, kMaxVolume);
+  c.muted = o.value(QStringLiteral("muted")).toBool(false);
+  c.fadeIn = std::max(0.0, numOr(o, "fadeIn", 0));
+  c.fadeOut = std::max(0.0, numOr(o, "fadeOut", 0));
+  c.fit = fitFromString(o.value(QStringLiteral("fit")).toString());
+  const QJsonObject col = o.value(QStringLiteral("color")).toObject();
+  c.color.preset = presetFromString(col.value(QStringLiteral("preset")).toString());
+  c.color.brightness = numOr(col, "brightness", 1);
+  c.color.contrast = numOr(col, "contrast", 1);
+  c.color.saturation = numOr(col, "saturation", 1);
+  c.color.temperature = numOr(col, "temperature", 0);
+  // 位置・拡大率・回転・不透明度、音量とアニメーションのキーフレーム（以前のプロジェクトには無い。その場合は従来どおり）
+  c.x = clampProp(AnimProp::X, numOr(o, "x", 0.5));
+  c.y = clampProp(AnimProp::Y, numOr(o, "y", 0.5));
+  c.scale = clampProp(AnimProp::Scale, numOr(o, "scale", 1));
+  c.rotation = clampProp(AnimProp::Rotation, numOr(o, "rotation", 0));
+  c.opacity = clampProp(AnimProp::Opacity, numOr(o, "opacity", 1));
+  volumePointsFromJson(o.value(QStringLiteral("volumePoints")).toArray(), c.volumePoints);
+  c.anim = animFromJson(o);
+  c.anim.keys(AnimProp::LetterSpacing).clear();  // 字間は文字だけの項目（映像に紛れ込んだ分は捨てる）
+  // 切り抜き・伸縮・クロマキー（以前のプロジェクトには無い。その場合は使わない）
+  const QJsonObject crop = o.value(QStringLiteral("crop")).toObject();
+  c.cropL = numOr(crop, "left", 0);
+  c.cropT = numOr(crop, "top", 0);
+  c.cropR = numOr(crop, "right", 0);
+  c.cropB = numOr(crop, "bottom", 0);
+  const QJsonObject stretch = o.value(QStringLiteral("stretch")).toObject();
+  c.stretchX = numOr(stretch, "x", 1);
+  c.stretchY = numOr(stretch, "y", 1);
+  const QJsonObject ck = o.value(QStringLiteral("chromaKey")).toObject();
+  if (!ck.isEmpty()) {
+    c.chroma.enabled = ck.value(QStringLiteral("enabled")).toBool(false);
+    c.chroma.color = colorFrom(ck.value(QStringLiteral("color")), ChromaKey{}.color);
+    c.chroma.similarity = numOr(ck, "similarity", ChromaKey{}.similarity);
+    c.chroma.blend = numOr(ck, "blend", ChromaKey{}.blend);
+    c.chroma.despill = ck.value(QStringLiteral("despill")).toBool(true);
+  }
+  clampCropStretch(c);
+  return c;
+}
+
+TextItem textFromJson(const QJsonObject& o, bool* hasTrack) {
+  TextItem t;
+  t.id = o.value(QStringLiteral("id")).toString(newId());
+  t.text = o.value(QStringLiteral("text")).toString();
+  t.start = std::max(0.0, numOr(o, "start", 0));
+  t.duration = std::max(0.1, numOr(o, "duration", 3));
+  const bool tracked = o.value(QStringLiteral("track")).isDouble();
+  if (tracked) t.track = std::max(0, o.value(QStringLiteral("track")).toInt());
+  if (hasTrack) *hasTrack = tracked;
+  t.x = numOr(o, "x", 0.5);
+  t.y = numOr(o, "y", 0.82);
+  t.font = fontFromString(o.value(QStringLiteral("font")).toString());
+  t.fontFamily = o.value(QStringLiteral("fontFamily")).toString();
+  t.size = std::clamp(numOr(o, "size", 0.075), 0.01, 0.5);
+  t.bold = o.value(QStringLiteral("bold")).toBool(true);
+  t.color = colorFrom(o.value(QStringLiteral("color")), QColor(255, 255, 255));
+  t.strokeColor = colorFrom(o.value(QStringLiteral("strokeColor")), QColor(0, 0, 0));
+  t.strokeWidth = std::clamp(numOr(o, "strokeWidth", 0.12), 0.0, 0.5);
+  t.boxColor = colorFrom(o.value(QStringLiteral("boxColor")), QColor(0, 0, 0));
+  t.boxOpacity = std::clamp(numOr(o, "boxOpacity", 0), 0.0, 1.0);
+  t.shadow = o.value(QStringLiteral("shadow")).toBool(true);
+  t.align = alignFromString(o.value(QStringLiteral("align")).toString());
+  // 字間（以前のプロジェクトには無い。その場合は 0 = フォント本来の間隔）
+  t.letterSpacing = clampProp(AnimProp::LetterSpacing, numOr(o, "letterSpacing", 0));
+  t.animation = animationFromString(o.value(QStringLiteral("animation")).toString());
+  t.scale = clampProp(AnimProp::Scale, numOr(o, "scale", 1));
+  t.rotation = clampProp(AnimProp::Rotation, numOr(o, "rotation", 0));
+  t.opacity = clampProp(AnimProp::Opacity, numOr(o, "opacity", 1));
+  t.anim = animFromJson(o);
+  // 一部だけ別のフォントにした範囲（以前のプロジェクトには無い）。文字の範囲に収め、並べ直す
+  for (const auto& sv : o.value(QStringLiteral("fontSpans")).toArray()) {
+    const QJsonObject so = sv.toObject();
+    FontSpan s;
+    s.start = so.value(QStringLiteral("start")).toInt(0);
+    s.length = so.value(QStringLiteral("length")).toInt(0);
+    s.font = fontFromString(so.value(QStringLiteral("font")).toString());
+    s.family = so.value(QStringLiteral("fontFamily")).toString();
+    t.fontSpans.push_back(s);
+  }
+  normalizeFontSpans(t);
+  t.group = o.value(QStringLiteral("group")).toString();
+  return t;
+}
+
 /** 1 つの編集場所分（プロジェクトの中身とメディア一覧）を読む */
 static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& assetList) {
   WorkspaceData file;
@@ -224,69 +363,26 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
   file.project.settings.aspect = aspectFromString(settings.value(QStringLiteral("aspect")).toString());
   const int fps = settings.value(QStringLiteral("fps")).toInt(30);
   file.project.settings.fps = (fps == 24 || fps == 30 || fps == 60) ? fps : 30;
+  // 動画全体の再生速度（以前のプロジェクトには無い。その場合は元の速さ）
+  file.project.settings.speed = std::clamp(settings.value(QStringLiteral("speed")).toDouble(1), kMinProjectSpeed, kMaxProjectSpeed);
 
-  for (const auto& v : p.value(QStringLiteral("clips")).toArray()) {
+  for (const auto& v : p.value(QStringLiteral("clips")).toArray()) file.project.clips.push_back(clipFromJson(v.toObject()));
+  // 重ねるトラック（以前のプロジェクトには無い）
+  for (const auto& v : p.value(QStringLiteral("overlays")).toArray()) {
     const QJsonObject o = v.toObject();
-    VideoClip c;
-    c.id = o.value(QStringLiteral("id")).toString(newId());
-    c.assetId = o.value(QStringLiteral("assetId")).toString();
-    c.isImage = o.value(QStringLiteral("kind")).toString() == u"image";
-    c.in = std::max(0.0, numOr(o, "in", 0));
-    c.out = std::max(c.in + 0.05, numOr(o, "out", c.in + 1));
-    c.speed = std::clamp(numOr(o, "speed", 1), 0.1, 16.0);
-    // 以前は 200% まで設定できたので、保存されている値が 100% を超えていたら 100% にそろえる
-    c.volume = std::clamp(numOr(o, "volume", kMaxVolume), 0.0, kMaxVolume);
-    c.muted = o.value(QStringLiteral("muted")).toBool(false);
-    c.fadeIn = std::max(0.0, numOr(o, "fadeIn", 0));
-    c.fadeOut = std::max(0.0, numOr(o, "fadeOut", 0));
-    c.fit = fitFromString(o.value(QStringLiteral("fit")).toString());
-    const QJsonObject col = o.value(QStringLiteral("color")).toObject();
-    c.color.preset = presetFromString(col.value(QStringLiteral("preset")).toString());
-    c.color.brightness = numOr(col, "brightness", 1);
-    c.color.contrast = numOr(col, "contrast", 1);
-    c.color.saturation = numOr(col, "saturation", 1);
-    c.color.temperature = numOr(col, "temperature", 0);
-    // 位置・拡大率・回転・不透明度、音量とアニメーションのキーフレーム（以前のプロジェクトには無い。その場合は従来どおり）
-    c.x = clampProp(AnimProp::X, numOr(o, "x", 0.5));
-    c.y = clampProp(AnimProp::Y, numOr(o, "y", 0.5));
-    c.scale = clampProp(AnimProp::Scale, numOr(o, "scale", 1));
-    c.rotation = clampProp(AnimProp::Rotation, numOr(o, "rotation", 0));
-    c.opacity = clampProp(AnimProp::Opacity, numOr(o, "opacity", 1));
-    volumePointsFromJson(o.value(QStringLiteral("volumePoints")).toArray(), c.volumePoints);
-    c.anim = animFromJson(o);
-    c.anim.keys(AnimProp::LetterSpacing).clear();  // 字間は文字だけの項目（映像に紛れ込んだ分は捨てる）
-    file.project.clips.push_back(c);
+    OverlayItem item;
+    static_cast<VideoClip&>(item) = clipFromJson(o);
+    item.fit = FitMode::Contain;  // 重ねるトラックは、いつも全体表示（余白は透明）
+    item.start = std::max(0.0, numOr(o, "start", 0));
+    item.track = std::max(0, o.value(QStringLiteral("track")).toInt(0));
+    item.group = o.value(QStringLiteral("group")).toString();
+    file.project.overlays.push_back(item);
   }
   bool hasAllTracks = true;
   for (const auto& v : p.value(QStringLiteral("texts")).toArray()) {
-    const QJsonObject o = v.toObject();
-    TextItem t;
-    t.id = o.value(QStringLiteral("id")).toString(newId());
-    t.text = o.value(QStringLiteral("text")).toString();
-    t.start = std::max(0.0, numOr(o, "start", 0));
-    t.duration = std::max(0.1, numOr(o, "duration", 3));
-    if (o.value(QStringLiteral("track")).isDouble()) t.track = std::max(0, o.value(QStringLiteral("track")).toInt());
-    else hasAllTracks = false;
-    t.x = numOr(o, "x", 0.5);
-    t.y = numOr(o, "y", 0.82);
-    t.font = fontFromString(o.value(QStringLiteral("font")).toString());
-    t.size = std::clamp(numOr(o, "size", 0.075), 0.01, 0.5);
-    t.bold = o.value(QStringLiteral("bold")).toBool(true);
-    t.color = colorFrom(o.value(QStringLiteral("color")), QColor(255, 255, 255));
-    t.strokeColor = colorFrom(o.value(QStringLiteral("strokeColor")), QColor(0, 0, 0));
-    t.strokeWidth = std::clamp(numOr(o, "strokeWidth", 0.12), 0.0, 0.5);
-    t.boxColor = colorFrom(o.value(QStringLiteral("boxColor")), QColor(0, 0, 0));
-    t.boxOpacity = std::clamp(numOr(o, "boxOpacity", 0), 0.0, 1.0);
-    t.shadow = o.value(QStringLiteral("shadow")).toBool(true);
-    t.align = alignFromString(o.value(QStringLiteral("align")).toString());
-    // 字間（以前のプロジェクトには無い。その場合は 0 = フォント本来の間隔）
-    t.letterSpacing = clampProp(AnimProp::LetterSpacing, numOr(o, "letterSpacing", 0));
-    t.animation = animationFromString(o.value(QStringLiteral("animation")).toString());
-    t.scale = clampProp(AnimProp::Scale, numOr(o, "scale", 1));
-    t.rotation = clampProp(AnimProp::Rotation, numOr(o, "rotation", 0));
-    t.opacity = clampProp(AnimProp::Opacity, numOr(o, "opacity", 1));
-    t.anim = animFromJson(o);
-    file.project.texts.push_back(t);
+    bool hasTrack = false;
+    file.project.texts.push_back(textFromJson(v.toObject(), &hasTrack));
+    if (!hasTrack) hasAllTracks = false;
   }
   // 段を保存していない古いプロジェクトは、以前の自動配置と同じ並びで段を決める（これが最後の自動配置で、以降は保存した段のまま）
   if (!hasAllTracks) autoAssignTextTracks(file.project.texts);
@@ -303,6 +399,7 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
     volumePointsFromJson(o.value(QStringLiteral("volumePoints")).toArray(), a.volumePoints);
     a.fadeIn = std::max(0.0, numOr(o, "fadeIn", 0));
     a.fadeOut = std::max(0.0, numOr(o, "fadeOut", 0));
+    a.group = o.value(QStringLiteral("group")).toString();
     file.project.audios.push_back(a);
   }
   for (const auto& v : assetList) {
@@ -353,7 +450,7 @@ std::optional<ProjectFile> parseProject(const QByteArray& json, QString* error) 
 }
 
 bool hasMeaningfulContent(const ProjectData& p) {
-  return !p.clips.empty() || !p.texts.empty() || !p.audios.empty();
+  return !p.clips.empty() || !p.overlays.empty() || !p.texts.empty() || !p.audios.empty();
 }
 
 bool hasMeaningfulContent(const ProjectFile& f) {

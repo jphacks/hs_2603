@@ -17,7 +17,8 @@
 namespace kv {
 
 struct Selection {
-  enum Type { None, Clip, Text, Audio };
+  /** Clip はメインのビデオトラックのクリップ、Overlay は重ねるトラックの映像・画像 */
+  enum Type { None, Clip, Text, Audio, Overlay };
   Type type = None;
   QString id;
   bool operator==(const Selection&) const = default;
@@ -116,8 +117,31 @@ class Editor : public QObject {
   void redo();
 
   // ---- 選択・再生位置 --------------------------------------------------------
+  /** 主に選んでいるもの（設定欄に出すもの） */
   const Selection& selection() const { return ws().selection; }
+  /** 1 つだけ選ぶ（一緒に選んでいたものは外す） */
   void select(const Selection& sel);
+  // ---- 複数の選択とグループ（テキスト・オーディオ・重ねるトラックだけ。メインのビデオクリップは 1 つずつ） ----
+  // Ctrl+クリックで一緒に選んだものと、選んだものと同じグループのものは、まとめて動かす・削除・複製する。
+  /** テキスト・オーディオ・重ねるトラックか（一緒に選べる・グループにできる種類か） */
+  static bool groupable(Selection::Type t) { return t == Selection::Text || t == Selection::Audio || t == Selection::Overlay; }
+  /** Ctrl+クリック: 一緒に選ぶものに加える / 外す。一緒に選べない種類なら、ふつうに 1 つだけ選ぶ */
+  void toggleSelect(const Selection& sel);
+  /** 主に選ぶものを sel にする（一緒に選んでいるものはそのまま。sel が一緒に選んでいるものの中にあるとき） */
+  void focusInSelection(const Selection& sel);
+  /** 一緒に選んでいるもの（主に選んでいるものは含まない） */
+  const std::vector<Selection>& extraSelection() const { return ws().extra; }
+  /** まとめて扱うもの: 主に選んでいるもの・一緒に選んでいるもの・それらと同じグループのもの（主に選んでいるものが先頭） */
+  std::vector<Selection> selectionSet() const;
+  bool inSelectionSet(const Selection& sel) const;
+  /** そのもののグループ（無ければ空） */
+  QString groupOf(const Selection& sel) const;
+  /** まとめて扱うもの（2 つ以上）を 1 つのグループにする */
+  bool groupSelection();
+  /** まとめて扱うもののグループを解く */
+  bool ungroupSelection();
+  bool canGroup() const;
+  bool canUngroup() const;
   double currentTime() const { return ws().currentTime; }
   int seekToken() const { return seekToken_; }
   void seek(double t);
@@ -130,6 +154,30 @@ class Editor : public QObject {
   void setPxPerSec(double v);
   void requestFit() { emit fitRequested(); }
   void toast(const QString& message, ToastKind kind = ToastKind::Info) { emit toastRequested(message, kind); }
+
+  // ---- クロマキーの色をプレビューから選ぶ（スポイト） ----
+  /**
+   * 映像 clipId（メイン・重ねるトラック）の透明にする色を、プレビューのクリックで選ぶ状態にする。空ならやめる。
+   * 選んでいる間、プレビューはその映像のクロマキーを外して元の色で出す。ほかのものを選ぶ・再生する・
+   * 編集場所を切り替える・その映像が無くなると、やめる
+   */
+  void setChromaPick(const QString& clipId);
+  const QString& chromaPick() const { return chromaPick_; }
+
+  // ---- 書き出す範囲（タイムラインの一部だけを書き出すとき。編集場所ごとに持ち、プロジェクトには保存しない） ----
+  struct TimeRange {
+    double start = 0;
+    double end = 0;
+  };
+  /** 決めてある範囲（今の内容の長さに収めたもの。1 フレームより短くなったら空）。決めていなければ空 */
+  std::optional<TimeRange> exportRange() const;
+  /** 範囲の開始を t に（フレームにそろえる）。終了がまだ無い・開始より前なら、終了は内容の終わりにする */
+  void setRangeStart(double t);
+  /** 範囲の終了を t に（フレームにそろえる）。開始がまだ無い・終了より後ろなら、開始は 0 にする */
+  void setRangeEnd(double t);
+  /** a〜b を範囲にする（順番はどちらでもよい） */
+  void setRange(double a, double b);
+  void clearRange();
 
   // ---- メディア ------------------------------------------------------------
   const std::map<QString, Asset>& assets() const { return ws().assets; }
@@ -159,17 +207,26 @@ class Editor : public QObject {
   QString addText(const QString& presetId, std::optional<double> at = std::nullopt);
   /** 指定した開始時間（フレームにそろえる）にそのまま追加して選ぶ。ドラッグ＆ドロップでの追加に使う */
   QString addTextAt(const QString& presetId, double start);
-  /** その開始時間に追加するテキストの表示時間（動画の終わりをまたぐときは終わりまで） */
-  double newTextDuration(double start) const;
+  /** その開始時間に追加するテキストの表示時間（wanted の長さ。動画の終わりをまたぐときは終わりまで） */
+  double newTextDuration(double start, double wanted = kDefaultTextDuration) const;
   /** いま追加すると、そのテキストが入る段（追加前の表示に使う。何も変えない） */
   int textTrackFor(double start, double duration) const;
   /**
-   * テキストを上（負）・下（正）の段へ移す。テキストの移動や長さの変更では段は変わらず、
-   * 段を変えるのはこの明示的な操作だけ。ほかのテキストの段は変えない
+   * テキストを上（負）・下（正）の段へ移す。横に動かす・長さを変えるだけでは段は変わらず、
+   * 段を変えるのはこの操作と、タイムラインで上下にドラッグしたときだけ。ほかのテキストの段は変えない
    */
   void moveTextTrack(const QString& id, int delta);
   void updateText(const QString& id, const std::function<void(TextItem&)>& fn, const QString& merge = QString());
   void updateAudio(const QString& id, const std::function<void(AudioItem&)>& fn, const QString& merge = QString());
+  // ---- 重ねるトラック ----
+  /**
+   * 動画・写真を重ねるトラックに追加して選ぶ。at から順に並べる（省略すると再生位置）。track を省略すると、重ならない段へ入れる。
+   * 追加したもののうち最初の ID を返す
+   */
+  QString addOverlays(const std::vector<QString>& assetIds, std::optional<double> at = std::nullopt, std::optional<int> track = std::nullopt);
+  void updateOverlay(const QString& id, const std::function<void(OverlayItem&)>& fn, const QString& merge = QString());
+  /** 重ねるトラックの段を、上（正 = 前）・下（負 = 後ろ）へ移す。一番上の段のさらに上へ 1 段だけ増やせる */
+  void moveOverlayTrack(const QString& id, int delta);
   // ---- オーディオの音量キーフレーム（時間は、オーディオの先頭からの秒数） ----
   /** その時間にキーフレームを追加する（今の音量で作るので、音は変わらない）。近くに既にあるときは増やさない。その番号を返す */
   int addVolumePoint(const QString& audioId, double local);
@@ -240,10 +297,16 @@ class Editor : public QObject {
   void splitAtPlayhead();
   void setAspect(Aspect a);
   void setFps(int fps);
+  /** 動画全体の再生速度（kMinProjectSpeed〜kMaxProjectSpeed）。プレビューの再生と書き出しに効く */
+  void setProjectSpeed(double speed);
 
+  /** メインのビデオクリップと、重ねるトラックの映像・画像（どちらも映像の設定は同じ） */
   const VideoClip* clip(const QString& id) const;
+  const OverlayItem* overlay(const QString& id) const;
   const TextItem* text(const QString& id) const;
   const AudioItem* audio(const QString& id) const;
+  /** 映像（メイン・重ねるトラック）のタイムライン上の開始と長さ。見つからなければ false */
+  bool clipSpan(const QString& id, double* start, double* duration) const;
 
   /** 全編集場所を入れ替える（前回の編集内容の復元） */
   void resetSession(const ProjectFile& file);
@@ -266,6 +329,10 @@ class Editor : public QObject {
   /** 今の編集場所が変わる直前（画面側が、いまの表示位置などを覚えておくため） */
   void workspaceAboutToChange();
   void autoKeyChanged();
+  /** 書き出す範囲が変わった */
+  void rangeChanged();
+  /** スポイト（クロマキーの色をプレビューから選ぶ）を始めた / やめた */
+  void chromaPickChanged();
   /** 今の編集場所が変わった。このあと projectChanged などで中身の更新も通知される */
   void workspaceChanged(int index);
   /** タブの一覧が変わった（追加・削除・名前・保存状態） */
@@ -293,10 +360,14 @@ class Editor : public QObject {
     std::map<QString, Asset> assets;
     std::vector<QString> assetOrder;
     Selection selection;
+    /** 一緒に選んでいるもの（Ctrl+クリック。テキスト・オーディオ・重ねるトラックだけ） */
+    std::vector<Selection> extra;
     double currentTime = 0;
     double pxPerSec = 60;
     int scrollX = 0;
     int scrollY = 0;
+    /** 書き出す範囲（決めていなければ空） */
+    std::optional<TimeRange> range;
   };
   Workspace& ws() { return ws_[size_t(active_)]; }
   const Workspace& ws() const { return ws_[size_t(active_)]; }
@@ -324,6 +395,8 @@ class Editor : public QObject {
 
   int seekToken_ = 0;
   bool playing_ = false;
+  /** スポイトで色を選んでいる映像（選んでいなければ空） */
+  QString chromaPick_;
 
   /** 取り消せる作業を始めたときの状態（キャンセルで戻す） */
   struct EditSession {

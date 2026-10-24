@@ -47,8 +47,17 @@ class Assistant : public QObject {
   /** この会話で使ったトークン（「新しい会話」で 0 に戻る） */
   const Usage& sessionUsage() const { return session_; }
 
+  /**
+   * 1 回の依頼の文の長さの上限（文字数。プロジェクトの状態や道具の結果は数えない）。編集の依頼には十分な長さにして、
+   * 動画と関係のない長い文書を貼り付けて頼む（要約・翻訳 など）のを、アプリの中で止める。
+   * アプリの中だけの上限で、AI サーバーでは数えない（API を直接呼ぶ人には、AI サーバーの決まりとトークンの上限が効く）
+   */
+  static constexpr int kMaxRequestChars = 2000;
+  /** 送れない依頼なら、その理由（長すぎる など）。送れるなら空 */
+  static QString requestProblem(const QString& text);
+
   bool busy() const { return busy_; }
-  /** 依頼を送る。送れないとき（返事を待っている、ログインしていない）は false */
+  /** 依頼を送る。送れないとき（返事を待っている、ログインしていない、長すぎる）は false */
   bool send(const QString& text);
   /** 返事を待つのをやめる。それまでに行った変更は残る（元に戻すで戻せる） */
   void cancel();

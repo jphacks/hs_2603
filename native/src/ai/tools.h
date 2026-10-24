@@ -90,6 +90,11 @@ struct ToolResult {
 const QJsonArray& toolSpecs();
 /** 今の編集場所の状態（AI に渡す） */
 QJsonObject describeProject();
+/**
+ * AI に渡す JSON の文字列。文字の中の < > は \u003c \u003e にする（JSON としては同じ値）。
+ * 素材のファイル名やテキストの文字が </project> などの区切りに見えて、AI への指示のように読まれるのを防ぐ
+ */
+QString promptJson(const QJsonObject& o);
 /** 道具を使う。編集は merge をつけて記録する（1 回の依頼の変更を、まとめて元に戻せる）。done は context のスレッドで呼ぶ */
 void runTool(const QString& name, const QJsonObject& input, const QString& merge, QObject* context, std::function<void(ToolResult)> done);
 /** 案をタイムラインに追加する（1 回の「元に戻す」で消える）。追加したテキストの ID を、案と同じ順で返す */

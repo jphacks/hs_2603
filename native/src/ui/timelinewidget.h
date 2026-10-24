@@ -36,6 +36,14 @@ class TimelineView : public QAbstractScrollArea {
 
   explicit TimelineView(QWidget* parent = nullptr);
   void fitAll();
+  /** その時間が見えていなければ、見える位置まで横にスクロールする */
+  void revealTime(double t);
+
+  // ---- 段の高さ（テキスト・ビデオ・オーディオ）。左の見出しの列の境目をドラッグするか、キーで変えられる。設定に覚える ----
+  /** すべての段の高さを factor 倍にする（範囲に収める） */
+  void scaleTrackHeights(double factor);
+  /** 段の高さを、はじめの高さに戻す */
+  void resetTrackHeights();
 
   /** クリップ・テキスト・オーディオ（や音量キーフレーム）をドラッグして動かしている最中か（再生位置の赤い線のドラッグは含めない） */
   bool isDragging() const;
@@ -53,6 +61,7 @@ class TimelineView : public QAbstractScrollArea {
   void mouseReleaseEvent(QMouseEvent*) override;
   void mouseDoubleClickEvent(QMouseEvent*) override;
   void contextMenuEvent(QContextMenuEvent*) override;
+  void leaveEvent(QEvent*) override;
   void wheelEvent(QWheelEvent*) override;
   void dragEnterEvent(QDragEnterEvent*) override;
   void dragMoveEvent(QDragMoveEvent*) override;
@@ -61,8 +70,9 @@ class TimelineView : public QAbstractScrollArea {
   void scrollContentsBy(int dx, int dy) override;
 
  private:
-  enum class Row { None, Ruler, Text, Video, Audio };
-  enum class Drag { None, Scrub, ClipMove, ClipTrim, ItemMove, ItemTrim, KeyMove };
+  /** Overlay は重ねるトラックの段（テキストの段とビデオの段の間。下の段ほどメインに近く、上の段ほど前に重なる） */
+  enum class Row { None, Ruler, Text, Overlay, Video, Audio };
+  enum class Drag { None, Scrub, ClipMove, ClipTrim, ItemMove, ItemTrim, KeyMove, Fade, Range, RangeEdge, TrackResize };
   struct Hit {
     Row row = Row::None;
     Selection::Type type = Selection::None;
@@ -76,10 +86,22 @@ class TimelineView : public QAbstractScrollArea {
   double xOf(double t) const;
   double tOf(double x) const;
   int textY() const;
+  int overlayY() const;
   int videoY() const;
   int audioY() const;
   int textH() const;
+  int overlayH() const;
   int audioH() const;
+  /** テキストをドラッグしているときの、縦の位置にあたる段（テキストの段の外なら -1） */
+  int textLaneAt(double y) const;
+  /** 重ねるトラックの映像をドラッグしているときの、縦の位置にあたる段（重ねるトラックの段の外なら -1） */
+  int overlayLaneAt(double y) const;
+  QRectF overlayRect(const OverlayItem& o) const;
+  void paintOverlays(QPainter& p);
+  /** 主に選んでいるもの以外で、一緒に扱うもの（一緒に選んだもの・同じグループのもの）の ID */
+  std::vector<QString> coSelectedIds() const;
+  /** グループの印（バーの下の端の色の線）と、一緒に選んでいるものの点線の枠 */
+  void paintGroupMarks(QPainter& p, const QRectF& r, const QString& group, bool coSelected);
   Row rowAt(double y) const;
   Hit hitTest(QPointF p) const;
   QRectF clipRect(const ClipLayout& l) const;
@@ -143,6 +165,57 @@ class TimelineView : public QAbstractScrollArea {
   /** 映像・文字のバーに、アニメーションのキーフレームがある時間の小さな ◆ を並べる（表示だけ。編集は右の設定パネル） */
   void paintKeyMarkers(QPainter& p);
 
+  // ---- フェードのつまみ（映像・オーディオのバーの上の角。左右にドラッグして、フェードの長さを変える） ----
+  struct FadeHit {
+    Selection::Type type = Selection::None;
+    QString id;
+    int side = 0;  // -1 フェードイン / 1 フェードアウト
+  };
+  /** つまみの位置（画面の座標）。バーが狭くてつまみを出せないときは false */
+  bool fadeHandlePos(const QRectF& r, double fadeIn, double fadeOut, int side, QPointF* pos) const;
+  /** その位置にあるフェードのつまみ（無ければ type が None） */
+  FadeHit fadeHitTest(QPointF pos) const;
+  /** つまみと、フェードの傾きの線を描く（選んでいる物と、カーソルの下の物だけ） */
+  void paintFadeHandles(QPainter& p, const QRectF& r, double fadeIn, double fadeOut, bool active);
+  /** ドラッグ中のフェードの長さの表示 */
+  void paintFadeLabel(QPainter& p);
+  /** フェードのつまみをドラッグして、長さを変える */
+  void fadeTo(QPointF pos);
+  int fadeSide_ = 0;
+  /** カーソルの下にある物（フェードのつまみを出す） */
+  QString hoverId_;
+
+  // ---- 書き出す範囲（目盛りの上に表示。Shift+ドラッグで作り、両端をドラッグで動かす。I / O キーでも決められる） ----
+  /** 目盛りの上で、範囲の端にあたる位置なら -1（開始）/ 1（終了）。無ければ 0 */
+  int rangeEdgeAt(QPointF pos) const;
+  void paintRange(QPainter& p, const QRect& area);
+  /** 範囲のドラッグ: 押した時間（Shift+ドラッグで作るとき） */
+  double rangeAnchor_ = 0;
+  int rangeEdge_ = 0;
+  /** ドラッグを始める前の範囲（Esc で戻す） */
+  std::optional<Editor::TimeRange> origRange_;
+  /** 目盛りの右クリックメニュー（範囲の開始・終了・解除） */
+  void execRulerMenu(QPointF pos, const QPoint& globalPos);
+
+  // ---- 段の高さ ----
+  int textLaneH_ = 28;
+  int overlayLaneH_ = 44;
+  int videoH_ = 66;
+  int audioLaneH_ = 52;
+  /**
+   * 左の見出しの列の上で、段の境目にあたる位置なら 0（テキストの下）/ 1（重ねるトラックの下）/ 2（ビデオの下）/ 3（オーディオの下）。
+   * 無ければ -1
+   */
+  int trackBorderAt(QPointF pos) const;
+  void setTrackHeights(int textLane, int overlayLane, int video, int audioLane);
+  void loadTrackHeights();
+  void saveTrackHeights() const;
+  /** 見出しの列の右クリックメニュー（段の高さ） */
+  void execHeaderMenu(const QPoint& globalPos);
+  int resizeWhich_ = -1;
+  double resizeStartY_ = 0;
+  int resizeOrig_[4] = {0, 0, 0, 0};
+
   // オーディオの音量キーフレーム（音量ライン上の丸い点）
   struct KeyHit {
     QString id;
@@ -179,6 +252,8 @@ class TimelineView : public QAbstractScrollArea {
   struct DropGhost {
     Selection::Type type = Selection::Text;
     bool valid = false;
+    /** テキストのとき: ドラッグしているスタイル・テンプレートの ID（テンプレートは、保存したときの長さで追加する） */
+    QString presetId;
     std::vector<GhostItem> items;
     /** オーディオのとき: 各素材の長さと名前（動きのたびに引き直さない） */
     std::vector<double> audioDurations;
@@ -201,11 +276,13 @@ class TimelineView : public QAbstractScrollArea {
   bool armedRight_ = true;
 
   Lanes textLanes_;
+  Lanes overlayLanes_;
   Lanes audioLanes_;
   std::map<QString, LaneMemo> audioMemo_;  // 前回のオーディオの段の割り当て
   QString laneHoldId_;                     // ドラッグ中のオーディオ。ドラッグを始めたときの段（laneHold_）にとどめる
   int laneHold_ = -1;
-  std::map<QString, std::vector<QPixmap>> thumbCache_;
+  /** サムネイル（素材 → 高さ → 並べる画像）。メインのビデオと重ねるトラックで高さが違うので、高さごとに持つ */
+  std::map<QString, std::map<int, std::vector<QPixmap>>> thumbCache_;
 
   // ドラッグの状態
   Drag drag_ = Drag::None;
@@ -219,6 +296,17 @@ class TimelineView : public QAbstractScrollArea {
   VideoClip origClip_;
   TextItem origText_;
   AudioItem origAudio_;
+  OverlayItem origOverlay_;
+  /** 一緒に動かすもの（一緒に選んだもの・同じグループのもの）と、ドラッグを始めたときの開始 */
+  struct Companion {
+    Selection sel;
+    double start = 0;
+  };
+  std::vector<Companion> companions_;
+  /** 一緒に選んでいたものを押した（動かさずに離したら、押したものだけを選ぶ） */
+  bool pressInSet_ = false;
+  /** 素材一覧から動画・写真を、重ねるトラックの段へドラッグしてきている（その時間に縦線を出す） */
+  std::optional<double> overlayDropT_;
   std::vector<double> dragSnap_;
   QPointF dragPos_;                    // ドラッグ中の、最後のマウスの位置
   Qt::KeyboardModifiers dragMods_;     // そのときの修飾キー（自動スクロールで引き直すときに使う）

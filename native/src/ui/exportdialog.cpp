@@ -58,6 +58,18 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
     sg->addWidget(summary_[i], 1, i);
   }
   sv->addWidget(sum);
+  // 書き出す部分。タイムラインで範囲を決めてあるときだけ出す（I / O キー、または目盛りを Shift を押しながらドラッグ）
+  partBox_ = new QWidget(settings);
+  auto* pv = new QVBoxLayout(partBox_);
+  pv->setContentsMargins(0, 0, 0, 0);
+  pv->setSpacing(6);
+  pv->addWidget(makeLabel(QStringLiteral("書き出す部分"), "muted", partBox_));
+  part_ = new Segmented({{0, QStringLiteral("全体")}, {1, QStringLiteral("指定した範囲")}}, 0, partBox_);
+  part_->setValue(1);
+  pv->addWidget(part_);
+  partNote_ = makeLabel(QString(), "muted", partBox_);
+  pv->addWidget(partNote_);
+  sv->addWidget(partBox_);
   sv->addWidget(makeLabel(QStringLiteral("解像度"), "muted", settings));
   resolution_ = new Segmented({{720, QStringLiteral("720p")}, {1080, QStringLiteral("1080p")}, {2160, QStringLiteral("4K")}}, 0, settings);
   resolution_->setValue(1080);
@@ -158,6 +170,11 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
 
   connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
   connect(resolution_, &Segmented::changed, this, &ExportDialog::refreshSummary);
+  connect(part_, &Segmented::changed, this, &ExportDialog::refreshSummary);
+  // 開いている間にタイムラインで範囲を変えたら、表示を合わせる（書き出し中は変えない）
+  connect(&editor(), &Editor::rangeChanged, this, [this] {
+    if (!exporter_->running()) refreshSummary();
+  });
   connect(go, &QPushButton::clicked, this, [this] {
     static QString dir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
     // 保存したプロジェクトならそのファイル名、まだなら今のタブの名前（タブごとに別のファイルになるように）
@@ -219,9 +236,22 @@ void ExportDialog::refreshSummary() {
   const Editor& ed = editor();
   setWindowTitle(QStringLiteral("書き出し - %1").arg(ed.workspaceName(ed.workspaceIndex())));
   const QSize size = exportSize(ed.project().settings.aspect, resolution_->value().toInt());
-  summary_[0]->setText(formatDuration(ed.layout().total));
+  const std::optional<Editor::TimeRange> range = ed.exportRange();
+  partBox_->setVisible(range.has_value());
+  if (range) {
+    partNote_->setText(QStringLiteral("範囲: %1 〜 %2").arg(formatTime(range->start, true), formatTime(range->end, true)));
+  }
+  // 書き出す動画の長さ（動画全体の再生速度を変えていれば、その速さでの長さ）
+  const double speed = ed.project().settings.speed;
+  const double length = (rangeSelected() ? range->end - range->start : ed.layout().total) / speed;
+  summary_[0]->setText(std::abs(speed - 1) > 1e-9 ? QStringLiteral("%1（%2倍速）").arg(formatDuration(length), QString::number(speed, 'g', 4))
+                                                  : formatDuration(length));
   summary_[1]->setText(QStringLiteral("%1 × %2").arg(size.width()).arg(size.height()));
   summary_[2]->setText(QStringLiteral("MP4"));
+}
+
+bool ExportDialog::rangeSelected() const {
+  return editor().exportRange().has_value() && part_->value().toInt() == 1;
 }
 
 void ExportDialog::begin(const QString& path) {
@@ -230,7 +260,7 @@ void ExportDialog::begin(const QString& path) {
   pct_->setText(QStringLiteral("0%"));
   eta_->clear();
   pages_->setCurrentIndex(1);
-  if (!exporter_->start(path, ExportQuality(quality_->value().toInt()), resolution_->value().toInt(), &error)) {
+  if (!exporter_->start(path, ExportQuality(quality_->value().toInt()), resolution_->value().toInt(), &error, rangeSelected())) {
     errorDetail_->setText(error);
     pages_->setCurrentIndex(3);
     return;

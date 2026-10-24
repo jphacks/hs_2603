@@ -33,6 +33,8 @@ set(SOURCES
   src/core/timeline.h src/core/timeline.cpp
   src/core/filters.h src/core/filters.cpp
   src/core/textstyles.h src/core/textstyles.cpp
+  src/core/texttemplates.h src/core/texttemplates.cpp
+  src/core/fontlibrary.h src/core/fontlibrary.cpp
   src/core/editor.h src/core/editor.cpp
   src/core/projectio.h src/core/projectio.cpp
   src/core/exportplan.h src/core/exportplan.cpp
@@ -57,6 +59,7 @@ set(SOURCES
   src/ui/keymap.h src/ui/keymap.cpp
   src/ui/shortcutsdialog.h src/ui/shortcutsdialog.cpp
   src/ui/perspective.h src/ui/perspective.cpp
+  src/ui/objectmenu.h src/ui/objectmenu.cpp
   src/ai/aiconfig.h src/ai/aiconfig.cpp
   src/ai/bedrock.h src/ai/bedrock.cpp
   src/ai/framegrab.h src/ai/framegrab.cpp

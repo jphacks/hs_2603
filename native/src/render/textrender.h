@@ -18,7 +18,14 @@
 namespace kv {
 
 struct TextLayout {
+  /** 基本のフォント */
   QFont font;
+  /**
+   * 文字の一部だけ別のフォントにしたときの、フォントの一覧（[0] は基本のフォント）と、1 文字ごとのフォントの番号
+   * （item.text と同じ長さ。一部だけ変えたフォントが無ければ空で、すべて基本のフォント）
+   */
+  QList<QFont> fonts;
+  QList<int> charFont;
   double fontPx = 0;
   QStringList lines;
   /**
@@ -40,6 +47,8 @@ struct TextLayout {
 };
 
 QFont textFont(const TextItem& item, int pixelSize);
+/** 一部だけ別のフォントにした文字の QFont（大きさ・太さ・字間は基本のフォントと同じ） */
+QFont spanFont(const TextItem& item, FontId font, const QString& family, int pixelSize);
 TextLayout layoutText(const TextItem& item, double W, double H);
 /** painter は基準座標で描けるように変換しておく。pixelScale は基準座標 → 実ピクセルの倍率 */
 void drawTextLayout(QPainter& p, const TextItem& item, const TextLayout& L, double pixelScale);

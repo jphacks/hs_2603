@@ -59,6 +59,108 @@ static QStringList fitStatements(FitMode fit, const QString& input, const QStrin
               .arg(input, square, w, h, output)};
 }
 
+/** クロマキーの色かぶりを抑える色（0: 抑えない / 1: 緑 / 2: 青）。プレビュー（imageops の despillType）と同じ決め方 */
+static int despillKind(const QColor& key) {
+  const int r = key.red(), g = key.green(), b = key.blue();
+  if (g > r && g >= b) return 1;
+  if (b > r && b > g) return 2;
+  return 0;
+}
+
+/**
+ * クロマキーのフィルター。色の違いは BT.601 の色み（U・V。テレビの範囲）で測る（プレビューと同じ）。境目がきれいになるよう、
+ * 色の解像度を落とさない形（yuva444p）で行う。色かぶりの抑えは despill の既定の値（mix 0.5・expand 0）
+ * - 透明にする色は U・V にしてから渡す（yuv=1）。RGB のまま渡すと、ffmpeg はフル レンジの式で変換するので、
+ *   テレビの範囲にした映像の色みとずれる
+ * - chromakey は、周りの 3×3 のうち画面の外の分を、前の画素の値（行の始めは透明にする色）のままにするので、
+ *   上の端の 1 行と左の端の所々が半透明になる。1 画素広げて端の画素を繰り返してから行い、広げた分を切り戻す
+ *   （プレビューと同じ「端は端の画素を繰り返す」になる）
+ */
+static QStringList chromaFilters(const ChromaKey& k) {
+  const double r = k.color.red(), g = k.color.green(), b = k.color.blue();
+  const int u = std::clamp(int(std::lround(128 + (-0.168736 * r - 0.331264 * g + 0.5 * b) * 224.0 / 255.0)), 0, 255);
+  const int v = std::clamp(int(std::lround(128 + (0.5 * r - 0.418688 * g - 0.081312 * b) * 224.0 / 255.0)), 0, 255);
+  const QString key = QStringLiteral("0x80%1%2").arg(u, 2, 16, QLatin1Char('0')).arg(v, 2, 16, QLatin1Char('0'));
+  QStringList f{QStringLiteral("scale=out_color_matrix=bt601:out_range=tv"), QStringLiteral("format=yuva444p"),
+                QStringLiteral("pad=w=iw+2:h=ih+2:x=1:y=1"),
+                QStringLiteral("fillborders=left=1:right=1:top=1:bottom=1:mode=smear"),
+                QStringLiteral("chromakey=color=%1:yuv=1:similarity=%2:blend=%3").arg(key, num6(std::max(1e-5, k.similarity)), num6(std::max(0.0, k.blend))),
+                QStringLiteral("crop=w=iw-2:h=ih-2:x=1:y=1")};
+  const int sp = k.despill ? despillKind(k.color) : 0;
+  if (sp == 1) f << QStringLiteral("format=rgba") << QStringLiteral("despill=type=green:mix=0.5:expand=0:red=0:green=-1:blue=0:brightness=0:alpha=0");
+  if (sp == 2) f << QStringLiteral("format=rgba") << QStringLiteral("despill=type=blue:mix=0.5:expand=0:red=0:green=0:blue=-1:brightness=0:alpha=0");
+  return f;
+}
+
+/** 透明な所を黒で埋めて不透明にする（黒の上に重ねたのと同じ。メインのトラックのクロマキーで使う） */
+static QString flattenOnBlack() {
+  return QStringLiteral("format=gbrap,premultiply=inplace=1,format=gbrp");
+}
+
+static bool clipHasCrop(const ExportClip& c) {
+  return c.cropL > 1e-6 || c.cropT > 1e-6 || c.cropR > 1e-6 || c.cropB > 1e-6;
+}
+
+/**
+ * 切り抜き・クロマキーのある素材と、重ねるトラックの素材を、画面の大きさ W×H の 1 枚にする文（input → output）。
+ * 素材は、切り抜く前の全体を fit（全体表示 / 拡大）で収めたときの大きさ・場所のまま、残す部分だけを置く（プレビューと同じ）。
+ * 背景は、メインのトラックなら黒（ぼかし背景のときは、切り抜く前の全体をぼかしたもの）、重ねるトラック（transparent）なら透明。
+ * 重ねる前に BT.709 にそろえ、背景にも BT.709 の印を付けるので、このあとで色の規格がずれない
+ */
+static QStringList mediaFitStatements(const ExportClip& clip, FitMode fit, const QString& input, const QString& output, const QString& id,
+                                      int W, int H, int FPS, bool transparent, const QString& to709, const QString& tag709) {
+  const QString square = QStringLiteral("scale='trunc(iw*sar/2)*2':'trunc(ih/2)*2',setsar=1");
+  const double l = clip.cropL, t = clip.cropT;
+  const double cw = std::max(0.05, 1 - clip.cropL - clip.cropR);
+  const double ch = std::max(0.05, 1 - clip.cropT - clip.cropB);
+  QStringList out;
+  QString media = id + QStringLiteral("fa");
+  const QString bg = id + QStringLiteral("mbg");  // 位置・拡大などを掛けるときの黒い背景（[idbg]）とは別の名前にする
+  if (fit == FitMode::Blur && !transparent) {
+    const QString bw = QString::number(evenSize(W / 8.0));
+    const QString bh = QString::number(evenSize(H / 8.0));
+    // クロマキーがあるときは、ぼかす前に透明にした所を黒にする（メインのトラックでは透明にした所は黒。ぼかし背景も、
+    // その映像をぼかしたものにする。プレビューと同じ）
+    QString key;
+    if (clip.chroma) key = QStringLiteral(",") + chromaFilters(*clip.chroma).join(u',') + QStringLiteral(",") + flattenOnBlack();
+    out << QStringLiteral("[%1]%2,split=2[%3fa][%3fb]").arg(input, square, id);
+    out << QStringLiteral("[%1fb]scale=%2:%3:force_original_aspect_ratio=increase,crop=%2:%3%9,scale=%4:%5,boxblur=8:2,scale=%2:%3,setsar=1,%6,format=yuv420p,%7[%8]")
+               .arg(id).arg(W).arg(H).arg(bw, bh, to709, tag709, bg, key);
+  } else {
+    out << QStringLiteral("[%1]%2[%3]").arg(input, square, media);
+    out << QStringLiteral("color=c=%1:s=%2x%3:r=%4,format=%5,%6[%7]")
+               .arg(transparent ? QStringLiteral("black@0") : QStringLiteral("black"))
+               .arg(W)
+               .arg(H)
+               .arg(FPS)
+               .arg(transparent ? QStringLiteral("yuva420p") : QStringLiteral("yuv420p"), tag709, bg);
+  }
+  // 素材: 切り抜き → 切り抜く前の全体を収める倍率で縮める（全体表示は min、拡大は max）→ クロマキー → 色 → BT.709
+  QStringList m;
+  if (clipHasCrop(clip)) {
+    m << QStringLiteral("crop=w='iw*%1':h='ih*%2':x='iw*%3':y='ih*%4'").arg(num6(cw), num6(ch), num6(l), num6(t));
+  }
+  const QString fn = fit == FitMode::Cover && !transparent ? QStringLiteral("max") : QStringLiteral("min");
+  const QString s = QStringLiteral("%1(%2*%3/iw,%4*%5/ih)").arg(fn).arg(W).arg(num6(cw)).arg(H).arg(num6(ch));
+  m << QStringLiteral("scale=w='max(2,trunc(iw*%1/2)*2)':h='max(2,trunc(ih*%1/2)*2)'").arg(s) << QStringLiteral("setsar=1");
+  if (clip.chroma) {
+    m << chromaFilters(*clip.chroma);
+    // ぼかし背景の上では、透明にした所から後ろのぼかしが見えないよう黒で埋める（ほかの表示方法は、黒い背景の上に重ねる）
+    if (fit == FitMode::Blur && !transparent) m << flattenOnBlack();
+  }
+  // 重ねるトラックは、素材だけに色を掛ける（メインのトラックは、これまでどおり背景と合わせたあとで掛ける）
+  if (transparent && clip.color) {
+    const QString color = ffmpegColorFilter(*clip.color);
+    if (!color.isEmpty()) m << color;
+  }
+  m << to709 << QStringLiteral("format=yuva420p") << tag709;
+  out << QStringLiteral("[%1]%2[%3m]").arg(media, m.join(u','), id);
+  // 切り抜く前の全体（幅 w/cw・高さ h/ch）を画面の中央に置いたときの、残す部分の場所に重ねる
+  out << QStringLiteral("[%1][%2m]overlay=x='(W-w/%3)/2+%4*w/%3':y='(H-h/%5)/2+%6*h/%5':shortest=1:format=yuv420[%7]")
+             .arg(bg, id, num6(cw), num6(l), num6(ch), num6(t), output);
+  return out;
+}
+
 QString volumeExpression(const std::vector<VolumePoint>& points) {
   if (points.empty()) return QStringLiteral("1");
   // 後ろのキーフレームから順に、入れ子の if(lt(t, 次の時間), 直線, それ以降) を作る
@@ -135,13 +237,18 @@ static LayerChain buildLayerChain(const LayerSpec& L, const QString& in, const Q
   const bool needScale = !ks.empty() || std::abs(L.scale - 1) > 1e-6;
   const bool keyedOpacity = !ko.empty();
   const bool needOpacity = keyedOpacity || L.opacity < 0.9999;
+  // 伸縮（幅・高さだけの倍率）は、回転の前に、素材の向きのまま掛ける（プレビューの layerMatrix と同じ順）
+  const bool stretched = std::abs(L.stretchX - 1) > 1e-6 || std::abs(L.stretchY - 1) > 1e-6;
+  const int bw = stretched ? evenSize(W * std::clamp(L.stretchX, kMinStretch, kMaxStretch)) : W;
+  const int bh = stretched ? evenSize(H * std::clamp(L.stretchY, kMinStretch, kMaxStretch)) : H;
 
   // 回転するときは、どの角度でも欠けないよう、対角線の長さの正方形にする
-  const int big = evenSize(std::ceil(std::hypot(double(W), double(H))) + 1);
-  const int lw = needRotate ? big : W;
-  const int lh = needRotate ? big : H;
+  const int big = evenSize(std::ceil(std::hypot(double(bw), double(bh))) + 1);
+  const int lw = needRotate ? big : bw;
+  const int lh = needRotate ? big : bh;
 
   QStringList chain{QStringLiteral("[%1]format=yuva420p").arg(in)};
+  if (stretched) chain << QStringLiteral("scale=%1:%2:flags=bicubic,setsar=1").arg(bw).arg(bh);
   if (needOpacity) {
     if (keyedOpacity) {
       // 1 画素ごとの式で、不透明度を時間で変える（色は変えず、透明度だけ掛ける）
@@ -245,7 +352,12 @@ ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedTe
       head = QStringLiteral("[%1:v]%2setpts=(PTS-STARTPTS)%3,fps=%4[%5src]").arg(k).arg(tag, speed).arg(FPS).arg(id);
     }
     graph << head;
-    graph << fitStatements(clip.fit, id + QStringLiteral("src"), id + QStringLiteral("fit"), id, W, H);
+    // 切り抜き・クロマキーがあるときは、残す部分（透明にしなかった部分）を黒い背景（ぼかし背景）の上に置く。無ければこれまでどおり
+    if (clipHasCrop(clip) || clip.chroma) {
+      graph << mediaFitStatements(clip, clip.fit, id + QStringLiteral("src"), id + QStringLiteral("fit"), id, W, H, FPS, false, kTo709, kTag709);
+    } else {
+      graph << fitStatements(clip.fit, id + QStringLiteral("src"), id + QStringLiteral("fit"), id, W, H);
+    }
 
     QStringList tail;
     if (!color.isEmpty()) tail << color;
@@ -294,11 +406,56 @@ ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedTe
 
   graph << QStringLiteral("%1concat=n=%2:v=1:a=1[vcat][acat]").arg(segments).arg(req.clips.size());
 
-  const double totalDuration = double(totalFrames) / FPS;
   const long long totalSamples = jsRound(double(totalFrames) * kAudioRate / FPS);
 
-  // ---- テキスト -----------------------------------------------------------
+  // ---- 重ねるトラック ----------------------------------------------------------
+  // メインの映像の上に、並べた順（後ろのものほど前）に重ねる。素材は全体表示の大きさで透明の余白を付けた 1 枚にし、
+  // 位置・拡大率・回転・伸縮・不透明度（とキーフレーム）で動かして、開始の時間から重ねる（文字はこのあと、いちばん前に重ねる）
   QString vLabel = QStringLiteral("vcat");
+  for (size_t j = 0; j < req.overlays.size(); ++j) {
+    const ExportOverlay& ov = req.overlays[j];
+    const ExportClip& clip = ov.clip;
+    long long startFrame = 0;
+    const int frames = textFramesOf(totalFrames, FPS, ov.start, clip.duration, &startFrame);
+    if (frames <= 0) continue;
+    const double dur = double(frames) / FPS;
+    const QString id = QStringLiteral("o%1").arg(j);
+    if (clip.isImage) {
+      const int k = addInput({QStringLiteral("-i"), clip.path});
+      graph << QStringLiteral("[%1:v]null[%2src]").arg(k).arg(id);
+    } else {
+      QStringList args;
+      if (clip.in > 0.0005) args << QStringLiteral("-ss") << num6(clip.in);
+      args << QStringLiteral("-t") << num6(dur * clip.speed + 0.5) << QStringLiteral("-i") << clip.path;
+      const int k = addInput(args);
+      const QString speed = std::abs(clip.speed - 1) > 1e-6 ? QStringLiteral("/") + num6(clip.speed) : QString();
+      const QString tag = clip.colorParams.isEmpty() ? QString() : QStringLiteral("setparams=%1,").arg(clip.colorParams);
+      graph << QStringLiteral("[%1:v]%2setpts=(PTS-STARTPTS)%3,fps=%4[%5src]").arg(k).arg(tag, speed).arg(FPS).arg(id);
+    }
+    graph << mediaFitStatements(clip, FitMode::Contain, id + QStringLiteral("src"), id + QStringLiteral("fit"), id, W, H, FPS, true, kTo709, kTag709);
+    QStringList tail{QStringLiteral("format=yuva420p"), QStringLiteral("setsar=1")};
+    if (clip.isImage) {
+      tail << QStringLiteral("settb=1/%1").arg(FPS) << QStringLiteral("loop=loop=%1:size=1:start=0").arg(frames - 1) << QStringLiteral("setpts=N");
+    } else {
+      tail << QStringLiteral("tpad=stop_mode=clone:stop_duration=%1").arg(num6(dur + 1)) << QStringLiteral("trim=end_frame=%1").arg(frames)
+           << QStringLiteral("setpts=PTS-STARTPTS");
+    }
+    // フェードは透明度で（下の映像が見えてくる・見えなくなる）
+    const double fi = std::min(std::max(0.0, clip.fadeIn), dur);
+    const double fo = std::min(std::max(0.0, clip.fadeOut), dur);
+    if (fi > 0.001) tail << QStringLiteral("fade=t=in:st=0:d=%1:alpha=1").arg(num6(fi));
+    if (fo > 0.001) tail << QStringLiteral("fade=t=out:st=%1:d=%2:alpha=1").arg(num6(dur - fo), num6(fo));
+    graph << QStringLiteral("[%1fit]%2[%1t]").arg(id, tail.join(u','));
+    const double start = double(startFrame) / FPS;
+    const QString overlayT = QStringLiteral("(t-%1)").arg(num6(start));
+    const LayerChain ch = buildLayerChain(clip.layer, id + QStringLiteral("t"), id + QStringLiteral("l"), W, H, overlayT);
+    graph << ch.statements;
+    graph << QStringLiteral("[%1l]setpts=PTS+%2[%1]").arg(id).arg(startFrame);
+    graph << QStringLiteral("[%1][%2]overlay=x='%3':y='%4':eval=frame:eof_action=pass:format=yuv420[ov%2]").arg(vLabel, id, ch.xExpr, ch.yExpr);
+    vLabel = QStringLiteral("ov") + id;
+  }
+
+  // ---- テキスト -----------------------------------------------------------
   for (size_t j = 0; j < texts.size(); ++j) {
     const PlannedText& t = texts[j];
     long long startFrame = 0;
@@ -343,7 +500,28 @@ ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedTe
     }
     vLabel = QStringLiteral("ov%1").arg(j);
   }
-  graph << QStringLiteral("[%1]trim=end_frame=%2,format=yuv420p,%3[vout]").arg(vLabel).arg(totalFrames).arg(kTag709);
+  // 書き出す範囲（指定が無ければ全体）。範囲のときは、全体を組み立てたあとで切り出し、時間を 0 からに付け直す
+  long long outStart = 0;
+  long long outEnd = totalFrames;
+  if (req.rangeEnd > req.rangeStart) {
+    outStart = std::clamp<long long>(jsRound(req.rangeStart * FPS), 0, std::max<long long>(0, totalFrames - 1));
+    outEnd = std::clamp<long long>(jsRound(req.rangeEnd * FPS), outStart + 1, totalFrames);
+  }
+  const bool ranged = outStart > 0 || outEnd < totalFrames;
+  // 動画全体の再生速度。範囲を切り出したあとで、映像はフレームの時間を 1/S にしてフレームレートを合わせ直す
+  const double S = std::clamp(req.speed, kMinProjectSpeed, kMaxProjectSpeed);
+  const bool sped = std::abs(S - 1) > 1e-9;
+  {
+    QStringList post;
+    if (ranged) {
+      post << QStringLiteral("trim=start_frame=%1:end_frame=%2").arg(outStart).arg(outEnd) << QStringLiteral("setpts=PTS-STARTPTS");
+    } else {
+      post << QStringLiteral("trim=end_frame=%1").arg(totalFrames);
+    }
+    if (sped) post << QStringLiteral("setpts=(PTS-STARTPTS)/%1").arg(num6(S)) << QStringLiteral("fps=%1").arg(FPS);
+    post << QStringLiteral("format=yuv420p") << kTag709;
+    graph << QStringLiteral("[%1]%2[vout]").arg(vLabel, post.join(u','));
+  }
 
   // ---- オーディオ ---------------------------------------------------------
   QStringList mix{QStringLiteral("[acat]")};
@@ -355,12 +533,15 @@ ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedTe
     const double dur = std::min(a.duration, maxDur);
     if (dur <= 0.01) continue;
     if (a.points.empty() && a.volume <= 0.0001) continue;
+    // 速さを変えた動画の音（重ねるトラック）は、読み出す長さを速さの分だけ増やし、atempo で音程を変えずに速さを合わせる
+    const double sp = std::clamp(a.speed, 0.1, 16.0);
     QStringList args;
     if (a.in > 0.0005) args << QStringLiteral("-ss") << num6(a.in);
-    args << QStringLiteral("-t") << num6(dur + 0.25) << QStringLiteral("-i") << a.path;
+    args << QStringLiteral("-t") << num6(dur * sp + 0.25) << QStringLiteral("-i") << a.path;
     const int k = addInput(args);
-    QStringList parts{QStringLiteral("[%1:a]asetpts=PTS-STARTPTS").arg(k), QStringLiteral("aresample=%1").arg(kAudioRate), kAformat,
-                      QStringLiteral("atrim=end_sample=%1").arg(jsRound(dur * kAudioRate))};
+    QStringList parts{QStringLiteral("[%1:a]asetpts=PTS-STARTPTS").arg(k), QStringLiteral("aresample=%1").arg(kAudioRate), kAformat};
+    for (double f : atempoFactors(sp)) parts << QStringLiteral("atempo=") + num6(f);
+    parts << QStringLiteral("atrim=end_sample=%1").arg(jsRound(dur * kAudioRate));
     if (!a.points.empty()) {
       // 音量が時間で変わる: 1 サンプルごとに式で音量を掛ける（プレビューと同じ変わり方で、段差やクリックが出ない）
       const QString g = volumeExpression(a.points);
@@ -379,7 +560,24 @@ ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedTe
     aLabel = QStringLiteral("amix");
   }
   // 音量を上げたときや BGM を重ねたときに音が割れないようにリミッターをかける（自動音量調整はしない）
-  graph << QStringLiteral("[%1]alimiter=limit=0.97:level=0:latency=1,apad,atrim=end_sample=%2[aout]").arg(aLabel).arg(totalSamples);
+  {
+    QStringList post{QStringLiteral("alimiter=limit=0.97:level=0:latency=1"), QStringLiteral("apad")};
+    if (ranged) {
+      const long long s0 = jsRound(double(outStart) * kAudioRate / FPS);
+      const long long s1 = jsRound(double(outEnd) * kAudioRate / FPS);
+      post << QStringLiteral("atrim=start_sample=%1:end_sample=%2").arg(s0).arg(s1) << QStringLiteral("asetpts=PTS-STARTPTS");
+    } else {
+      post << QStringLiteral("atrim=end_sample=%1").arg(totalSamples);
+    }
+    // 動画全体の再生速度: 音程を変えずに速さだけ変える（atempo は 1 段で 0.5〜2 倍なので、掛け合わせる）
+    if (sped) {
+      if (!ranged) post << QStringLiteral("asetpts=PTS-STARTPTS");
+      for (double f : atempoFactors(S)) post << QStringLiteral("atempo=") + num6(f);
+    }
+    graph << QStringLiteral("[%1]%2[aout]").arg(aLabel, post.join(u','));
+  }
+  // 書き出す動画の長さ（範囲の長さを、全体の再生速度で割ったもの）
+  const double outDuration = double(outEnd - outStart) / FPS / S;
 
   QString preset = QStringLiteral("faster");
   QString crf = QStringLiteral("20");
@@ -398,10 +596,10 @@ ExportPlan buildExportPlan(const ExportRequest& req, const std::vector<PlannedTe
                      QStringLiteral("-r"), QString::number(FPS), QStringLiteral("-c:a"), QStringLiteral("aac"),
                      QStringLiteral("-b:a"), QStringLiteral("192k"), QStringLiteral("-ar"), QString::number(kAudioRate),
                      QStringLiteral("-ac"), QStringLiteral("2"), QStringLiteral("-movflags"), QStringLiteral("+faststart"),
-                     QStringLiteral("-max_muxing_queue_size"), QStringLiteral("4096"), QStringLiteral("-t"), num6(totalDuration)};
+                     QStringLiteral("-max_muxing_queue_size"), QStringLiteral("4096"), QStringLiteral("-t"), num6(outDuration)};
   plan.filterGraph = graph.join(QStringLiteral(";\n"));
-  plan.totalFrames = int(totalFrames);
-  plan.duration = totalDuration;
+  plan.totalFrames = int(std::max<long long>(1, jsRound(double(outEnd - outStart) / S)));
+  plan.duration = outDuration;
   return plan;
 }
 

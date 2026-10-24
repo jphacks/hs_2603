@@ -30,6 +30,9 @@ struct Asset {
 /** 音量の上限（1.0 = 100% = 元の音量）。クリップの音量もオーディオの音量も、0〜この値の範囲で扱う */
 constexpr double kMaxVolume = 1.0;
 
+/** フェードイン・アウトの長さの上限（秒）。設定欄のスライダーとタイムラインのつまみで、この範囲で自由に変えられる */
+constexpr double kMaxFade = 10.0;
+
 enum class FitMode { Contain, Cover, Blur };
 enum class FilterPreset { None, Vivid, Warm, Cool, Soft, Drama, Retro, Sepia, Mono };
 
@@ -89,6 +92,31 @@ struct Animation {
   }
 };
 
+/** 切り抜き（素材の上下左右の端から切り落とす割合）の上限。左右・上下それぞれ、合わせてもこの範囲に収める */
+constexpr double kMaxCrop = 0.9;
+/** 伸縮（幅・高さだけの倍率）の範囲 */
+constexpr double kMinStretch = 0.1;
+constexpr double kMaxStretch = 4.0;
+/** クロマキーの「透明にする色の近さ」と「境目のなめらかさ」の上限 */
+constexpr double kMaxChromaSimilarity = 0.6;
+constexpr double kMaxChromaBlend = 0.5;
+
+/**
+ * クロマキー: 指定した色（グリーンバックなど）に近い部分を透明にする。書き出しの ffmpeg chromakey と同じ考え方で、
+ * 色の違いは明るさを除いた色み（BT.601 の U・V）の距離で測る（0〜1）
+ */
+struct ChromaKey {
+  bool enabled = false;
+  QColor color{0, 255, 0};
+  /** この近さまでの色を、完全に透明にする */
+  double similarity = 0.2;
+  /** 透明から不透明へ、なめらかに変える幅（0 なら境目がくっきり） */
+  double blend = 0.1;
+  /** 残った部分に映り込んだ緑・青の色かぶりを抑える */
+  bool despill = true;
+  bool operator==(const ChromaKey&) const = default;
+};
+
 /** ビデオトラックのクリップ。前から順に隙間なく並ぶ */
 struct VideoClip {
   QString id;
@@ -113,11 +141,47 @@ struct VideoClip {
   double rotation = 0;
   double opacity = 1;
   Animation anim;
+  /**
+   * 切り抜き（素材の左・上・右・下の端から切り落とす割合。0〜kMaxCrop）。残った部分は、切り抜く前と同じ場所・大きさのまま出す
+   * （切り落としたところは、メインのトラックでは黒、重ねるトラックでは透明）
+   */
+  double cropL = 0;
+  double cropT = 0;
+  double cropR = 0;
+  double cropB = 0;
+  /** 伸縮（幅・高さだけの倍率。拡大率に掛ける。1 が素材の比率のまま） */
+  double stretchX = 1;
+  double stretchY = 1;
+  ChromaKey chroma;
+};
+
+/**
+ * 重ねるトラックの映像・画像。メインの映像の上に、好きな時間（start）から重ねる。中身はビデオクリップと同じ
+ * （素材・切り出し・速度・音量・フェード・位置・拡大・回転・不透明度・アニメーション・色・切り抜き・伸縮・クロマキー）。
+ * 表示方法はいつも「全体表示」で、余白は透明。段（track）は 0 がメインのすぐ上で、数字が大きいほど前に重なる。文字はいつも一番前
+ */
+struct OverlayItem : VideoClip {
+  double start = 0;
+  int track = 0;
+  /** グループ（同じ値のもの同士が、一緒に動く・消える・複製される）。空ならグループなし */
+  QString group;
 };
 
 enum class TextAnimation { None, Fade, SlideUp };
 enum class FontId { Gothic, Maru, Mincho, Ud, Kyokasho, Impact, Meiryo };
 enum class TextAlign { Left, Center, Right };
+
+/**
+ * 文字の一部だけ別のフォントにする範囲。start・length は item.text の位置（UTF-16）。
+ * family が空でなければそのファミリー（読み込んだフォント・同梱のフォント）、空なら font（組み込みの種類）を使う
+ */
+struct FontSpan {
+  int start = 0;
+  int length = 0;
+  FontId font = FontId::Gothic;
+  QString family;
+  bool operator==(const FontSpan&) const = default;
+};
 
 struct TextItem {
   QString id;
@@ -128,6 +192,13 @@ struct TextItem {
   double x = 0.5;
   double y = 0.82;
   FontId font = FontId::Gothic;
+  /**
+   * 読み込んだフォント・同梱のフォントのファミリー名。空でなければ font より優先する
+   * （そのフォントが無いパソコンでは font のフォントで描く）
+   */
+  QString fontFamily;
+  /** 文字の一部だけ別のフォントにする範囲（start の順・重なりなし）。文字を書き換えると、位置を合わせ直す */
+  std::vector<FontSpan> fontSpans;
   /** 文字の大きさ（画面の高さに対する割合） */
   double size = 0.075;
   bool bold = true;
@@ -144,7 +215,8 @@ struct TextItem {
   TextAnimation animation = TextAnimation::Fade;
   /**
    * タイムラインの段（0 が一番上）。追加するときに一度だけ決め、開始時間や長さを変えても、
-   * ほかのテキストが増えたり減ったりしても変わらない。変えるのは、段を移す明示的な操作のときだけ
+   * ほかのテキストが増えたり減ったりしても変わらない。変えるのは、段を移す操作（Alt+↑↓・右クリック）と、
+   * タイムラインでテキストを上下にドラッグしたときだけ
    */
   int track = 0;
   /** 拡大率・回転(度。時計回りが正)・不透明度。位置は x, y。文字の中心を基準に動かす */
@@ -152,6 +224,8 @@ struct TextItem {
   double rotation = 0;
   double opacity = 1;
   Animation anim;
+  /** グループ（同じ値のもの同士が、一緒に動く・消える・複製される）。空ならグループなし */
+  QString group;
 };
 
 struct AudioItem {
@@ -165,19 +239,32 @@ struct AudioItem {
   std::vector<VolumePoint> volumePoints;
   double fadeIn = 0;
   double fadeOut = 0;
+  /** グループ（同じ値のもの同士が、一緒に動く・消える・複製される）。空ならグループなし */
+  QString group;
 };
 
 enum class Aspect { R16_9, R9_16, R1_1, R4_5 };
 
+/** 動画全体の再生速度の範囲（1 が元の速さ） */
+constexpr double kMinProjectSpeed = 0.25;
+constexpr double kMaxProjectSpeed = 4.0;
+
 struct ProjectSettings {
   Aspect aspect = Aspect::R16_9;
   int fps = 30;
+  /**
+   * 動画全体の再生速度（1 が元の速さ）。タイムラインの時間はそのままで、プレビューの再生と書き出しを、
+   * 映像・文字・音のすべてまとめてこの速さにする（音は音程を変えずに速さだけ変える）
+   */
+  double speed = 1;
 };
 
 struct ProjectData {
   QString name;
   ProjectSettings settings;
   std::vector<VideoClip> clips;
+  /** 重ねるトラックの映像・画像（並びは追加した順。重なりの順は track で決める） */
+  std::vector<OverlayItem> overlays;
   std::vector<TextItem> texts;
   std::vector<AudioItem> audios;
 };

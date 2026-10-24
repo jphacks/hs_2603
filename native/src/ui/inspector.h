@@ -2,6 +2,10 @@
 
 #include <QScrollArea>
 
+class QFrame;
+class QLabel;
+class QPushButton;
+
 namespace kv {
 
 class ProjectPanel;
@@ -23,6 +27,12 @@ class Inspector : public QScrollArea {
  private:
   void refreshCurrent();
   void onSelection();
+  /** いくつかを一緒に選んでいるときの案内（グループ化のボタン） */
+  void refreshMulti();
+  QFrame* multi_;
+  QLabel* multiText_;
+  QPushButton* group_;
+  QPushButton* ungroup_;
   ProjectPanel* project_;
   ClipPanel* clip_;
   TextPanel* text_;
