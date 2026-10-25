@@ -1251,6 +1251,163 @@ void Editor::duplicateSelection() {
   if (done) select({sel.type, newIdValue});
 }
 
+int Editor::copySelection() {
+  const std::vector<Selection> set = selectionSet();
+  if (set.empty()) return 0;
+  const ProjectData& p = ws().project;
+  ItemClipboard c;
+  std::vector<QString> assetIds;
+  auto useAsset = [&](const QString& id) {
+    if (std::find(assetIds.begin(), assetIds.end(), id) == assetIds.end()) assetIds.push_back(id);
+  };
+  double origin = 1e18;
+  for (const auto& s : set) {
+    if (s.type == Selection::Clip) {
+      if (const VideoClip* v = findById(p.clips, s.id)) {
+        c.clips.push_back(*v);
+        useAsset(v->assetId);
+      }
+    } else if (s.type == Selection::Text) {
+      if (const TextItem* t = findById(p.texts, s.id)) {
+        c.texts.push_back(*t);
+        origin = std::min(origin, t->start);
+      }
+    } else if (s.type == Selection::Audio) {
+      if (const AudioItem* a = findById(p.audios, s.id)) {
+        c.audios.push_back(*a);
+        useAsset(a->assetId);
+        origin = std::min(origin, a->start);
+      }
+    } else if (s.type == Selection::Overlay) {
+      if (const OverlayItem* o = findById(p.overlays, s.id)) {
+        c.overlays.push_back(*o);
+        useAsset(o->assetId);
+        origin = std::min(origin, o->start);
+      }
+    }
+  }
+  if (c.empty()) return 0;
+  c.origin = origin < 1e17 ? origin : 0;
+  for (const QString& id : assetIds) {
+    if (const Asset* a = asset(id)) c.assets.push_back(*a);
+  }
+  itemClip_ = std::move(c);
+  return itemClip_.count();
+}
+
+int Editor::pasteClipboard(std::vector<Asset>* added) {
+  if (itemClip_.empty()) return 0;
+  const ItemClipboard c = itemClip_;  // 貼り付けの途中で写し直されても困らないように
+  // メディア: 同じファイル（同じ種類）が今の一覧にあればそれを使い、無ければ写しを足す（ID は新しくする）
+  std::map<QString, QString> assetMap;
+  bool assetsAdded = false;
+  for (const Asset& a : c.assets) {
+    QString found;
+    const QString path = QFileInfo(a.path).absoluteFilePath();
+    for (const QString& id : ws().assetOrder) {
+      const Asset* b = asset(id);
+      if (b && b->kind == a.kind && QFileInfo(b->path).absoluteFilePath().compare(path, Qt::CaseInsensitive) == 0) {
+        found = id;
+        break;
+      }
+    }
+    if (found.isEmpty()) {
+      Asset copy = a;
+      copy.id = newId();
+      // サムネイル・波形は、作り直すまでの間も同じものを出す
+      if (auto it = thumbs_.find(a.id); it != thumbs_.end()) thumbs_[copy.id] = it->second;
+      if (auto it = waveforms_.find(a.id); it != waveforms_.end()) waveforms_[copy.id] = it->second;
+      ws().assets[copy.id] = copy;
+      ws().assetOrder.push_back(copy.id);
+      if (added) added->push_back(copy);
+      assetsAdded = true;
+      found = copy.id;
+    }
+    assetMap[a.id] = found;
+  }
+  if (assetsAdded) emit assetsChanged();
+  auto mapAsset = [&](QString& id) {
+    if (auto it = assetMap.find(id); it != assetMap.end()) id = it->second;
+  };
+  // グループは、貼り付けたもの同士の新しいグループにする（1 つだけなら、グループに入れない）
+  std::map<QString, QString> groups;
+  const bool single = c.count() == 1;
+  auto mapGroup = [&](const QString& g) {
+    if (g.isEmpty() || single) return QString();
+    auto it = groups.find(g);
+    if (it == groups.end()) it = groups.insert({g, newId()}).first;
+    return it->second;
+  };
+  const double at = ws().currentTime;
+  std::vector<Selection> pasted;
+  commit([&](ProjectData& p) {
+    const int fps = p.settings.fps;
+    const double shift = at - c.origin;
+    if (!c.clips.empty()) {
+      // メインのビデオクリップ: 再生位置にあるクリップのうしろ（クリップの頭なら、その前）に入れる
+      const TimelineLayout layout = layoutClips(p.clips, fps);
+      int index = int(p.clips.size());
+      for (size_t i = 0; i < layout.items.size(); ++i) {
+        const auto& l = layout.items[i];
+        if (at < l.end - 1e-6) {
+          index = at <= l.start + 1e-6 ? int(i) : int(i) + 1;
+          break;
+        }
+      }
+      for (const VideoClip& v : c.clips) {
+        VideoClip copy = v;
+        copy.id = newId();
+        mapAsset(copy.assetId);
+        p.clips.insert(p.clips.begin() + std::clamp(index, 0, int(p.clips.size())), copy);
+        ++index;
+        pasted.push_back({Selection::Clip, copy.id});
+      }
+    }
+    for (const TextItem& t : c.texts) {
+      TextItem copy = t;
+      copy.id = newId();
+      copy.start = frameRound(std::max(0.0, t.start + shift), fps);
+      copy.group = mapGroup(t.group);
+      // 元と同じ段が空いていればそこへ。ふさがっていれば、重ならない段へ
+      if (!textTrackFree(p.texts, copy.track, copy.start, copy.duration)) copy.track = freeTextTrack(p.texts, copy.start, copy.duration);
+      p.texts.push_back(copy);
+      pasted.push_back({Selection::Text, copy.id});
+    }
+    for (const AudioItem& a : c.audios) {
+      AudioItem copy = a;
+      copy.id = newId();
+      mapAsset(copy.assetId);
+      copy.start = frameRound(std::max(0.0, a.start + shift), fps);
+      copy.group = mapGroup(a.group);
+      if (!audioTrackFree(p.audios, copy.track, copy.start, audioDuration(copy))) copy.track = freeAudioTrack(p.audios, copy.start, audioDuration(copy));
+      p.audios.push_back(copy);
+      pasted.push_back({Selection::Audio, copy.id});
+    }
+    for (const OverlayItem& o : c.overlays) {
+      OverlayItem copy = o;
+      copy.id = newId();
+      mapAsset(copy.assetId);
+      copy.start = frameRound(std::max(0.0, o.start + shift), fps);
+      copy.group = mapGroup(o.group);
+      const double dur = overlayDuration(copy, fps);
+      if (!overlayTrackFree(p.overlays, copy.track, copy.start, dur, fps)) copy.track = freeOverlayTrack(p.overlays, copy.start, dur, fps);
+      p.overlays.push_back(copy);
+      pasted.push_back({Selection::Overlay, copy.id});
+    }
+    return !pasted.empty();
+  });
+  if (pasted.empty()) return 0;
+  // 貼り付けたものを選ぶ（一緒に選べるのはテキスト・オーディオ・重ねるものだけ）
+  ws().selection = pasted.front();
+  ws().extra.clear();
+  for (size_t i = 1; i < pasted.size(); ++i) {
+    if (groupable(pasted[i].type) && groupable(pasted.front().type)) ws().extra.push_back(pasted[i]);
+  }
+  ws().lastMerge.clear();
+  emit selectionChanged();
+  return int(pasted.size());
+}
+
 void Editor::splitAtPlayhead() {
   const int fps = ws().project.settings.fps;
   const double t = frameRound(ws().currentTime, fps);

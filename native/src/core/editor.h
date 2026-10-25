@@ -322,6 +322,16 @@ class Editor : public QObject {
   // 音量キーフレームは、オーディオにも映像(音声つき)にも使える。ID でどちらかを探す
   void deleteSelection();
   void duplicateSelection();
+  // ---- コピー・貼り付け（タブをまたいで使える。編集2 で写して、編集1 に貼り付けるなど） ----
+  /** 選んでいるもの（一緒に選んだもの・同じグループのものも）を、アプリの中のクリップボードに写す。写したものの数 */
+  int copySelection();
+  bool hasItemClipboard() const { return !itemClip_.empty(); }
+  /**
+   * 写したものを、今の編集場所の再生位置に貼り付ける（並びと間隔はそのまま。1 回の「元に戻す」で消える）。
+   * 使っているメディアがこの編集場所の一覧に無ければ、写しを一覧に足す（同じファイルがあれば、それを使う）。
+   * 貼り付けた数を返し、added に足したメディアを入れる（呼ぶ側で、サムネイルなどを作る）
+   */
+  int pasteClipboard(std::vector<Asset>* added = nullptr);
   void splitAtPlayhead();
   void setAspect(Aspect a);
   void setFps(int fps);
@@ -420,6 +430,21 @@ class Editor : public QObject {
   // サムネイルと波形はメディアの ID で引くので、編集場所をまたいで 1 つの置き場にまとめる
   std::map<QString, std::vector<QImage>> thumbs_;
   std::map<QString, Waveform> waveforms_;
+
+  /** copySelection で写したもの（編集場所をまたいで使う） */
+  struct ItemClipboard {
+    std::vector<VideoClip> clips;
+    std::vector<OverlayItem> overlays;
+    std::vector<TextItem> texts;
+    std::vector<AudioItem> audios;
+    /** 写したものが使っているメディア（貼り付け先の一覧に無ければ足す） */
+    std::vector<Asset> assets;
+    /** テキスト・オーディオ・重ねるものの、いちばん早い開始（貼り付けると、ここが再生位置になる） */
+    double origin = 0;
+    bool empty() const { return clips.empty() && overlays.empty() && texts.empty() && audios.empty(); }
+    int count() const { return int(clips.size() + overlays.size() + texts.size() + audios.size()); }
+  };
+  ItemClipboard itemClip_;
 
   int seekToken_ = 0;
   bool playing_ = false;

@@ -19,4 +19,11 @@ enum class ObjectMenuPlace { Timeline, Preview };
 void execObjectMenu(QWidget* parent, const Selection& sel, const QPoint& globalPos, ObjectMenuPlace place,
                     const std::function<void()>& editText = {});
 
+/** 選んでいるものをコピーする（ほかのタブにも貼り付けられる）。結果は画面の下に知らせる */
+void copyItems();
+/** コピーしたものを、今のタブの再生位置に貼り付ける（使っているメディアも、このタブの一覧に入れる） */
+void pasteItems();
+/** 選んでいるものを、ほかのタブ（index）にコピーする: そのタブに切り替えて、そのタブの再生位置に貼り付ける */
+void copyItemsToTab(int index);
+
 }  // namespace kv

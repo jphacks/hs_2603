@@ -58,6 +58,8 @@ class AiPanel : public QWidget {
   void addChoices(const ai::ChoiceSet& set);
   /** 案を大きく横に並べた画面を開く（そこからも選べる） */
   void showComparison(const std::shared_ptr<AiChoiceCard>& card);
+  /** AI の返事が終わったときに、その回に出した見た目の案を、大きく並べた画面で自動で開く */
+  void openPendingComparison();
   /** 案を選ぶ。ほかの案を選んでいたら、1 回の操作でその案から切り替える */
   void chooseOption(const std::shared_ptr<AiChoiceCard>& card, int index);
   /** ワークショップのオーディオの候補を試聴する（鳴らしていれば止める）。はじめはファイルを読み込んでから鳴らす */
@@ -127,6 +129,11 @@ class AiPanel : public QWidget {
   /** この回の依頼で出したオーディオ・作った画像の候補の欄（見た目の案とは別に置き換える） */
   QPointer<QFrame> turnAudio_;
   QPointer<QFrame> turnImages_;
+  /**
+   * この回の依頼で最後に出した、見た目の案・作った画像の候補の欄。返事が終わったら大きく並べた画面を自動で開く
+   * （失敗・中止のときは開かない）
+   */
+  std::weak_ptr<AiChoiceCard> autoCompare_;
   /** この欄で鳴らしている試聴の印（ワークショップの窓で鳴らしたものと見分ける） */
   QString previewKey_;
   /** 案を当てはめている間（その変更では、選んだ案の見分けをしない） */

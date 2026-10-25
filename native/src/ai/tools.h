@@ -8,7 +8,9 @@
 #include <QString>
 #include <QStringList>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "ai/workshop.h"
@@ -37,6 +39,8 @@ struct Choice {
   QJsonArray actions;
   /** 案を当てはめた画面の JPEG（ChoiceSet::times と同じ順） */
   std::vector<QByteArray> previews;
+  /** 案を当てはめた編集データ（propose_choices のときだけ。画面で動くプレビューを作るのに使う） */
+  std::shared_ptr<const ProjectData> project;
   /** 何をするか（1 行ずつ） */
   QStringList log;
   /**
@@ -46,6 +50,11 @@ struct Choice {
   WorkshopTemplate audio;
   /** generate_images の候補のときの、作った画像のファイル（ChoiceSet::image のときだけ。選ぶとメディア一覧に入れる） */
   QString file;
+  /**
+   * propose_photos の候補のときの、ワークショップの写真（ChoiceSet::image のときだけ。previews はその見本）。
+   * 選ぶと、写真を手元に置いてメディア一覧に入れてから、案の編集（add_workshop_photo）を当てはめる
+   */
+  WorkshopTemplate photo;
 };
 
 /** propose_choices・propose_audio で見せる、選ぶ案のまとまり */
@@ -55,6 +64,8 @@ struct ChoiceSet {
   QString question;
   /** プレビューの時間（秒）。どの案も同じ時間の画面を見せる */
   std::vector<double> times;
+  /** 動くプレビューの範囲（[始め, 終わり] 秒。times と同じ順。propose_choices のときだけ） */
+  std::vector<std::pair<double, double>> motion;
   std::vector<Choice> choices;
   /** 案を作った編集場所（ほかのタブには当てはめない） */
   int workspaceUid = -1;
@@ -134,6 +145,8 @@ QString choiceLetter(int index);
 QString workshopRef(const QString& id);
 /** ワークショップのオーディオ id を手元に置いたファイルが、今の編集場所のメディア一覧にあれば、その素材の ID（無ければ空） */
 QString workshopAudioAsset(const QString& id);
+/** ワークショップの写真 id を手元に置いたファイルが、今の編集場所のメディア一覧にあれば、その素材の ID（無ければ空） */
+QString workshopPhotoAsset(const QString& id);
 /** ファイル path が、今の編集場所のメディア一覧にあれば、その素材の ID（無ければ空。読み込めなかったものは除く） */
 QString assetForFile(const QString& path);
 

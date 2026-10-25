@@ -26,5 +26,8 @@ void grabFrames(const std::vector<double>& times, int longSide, QObject* context
 /** 編集データ project（AI の案を当てはめた写しなど）の画面を作る。素材は今の編集場所のものを使う */
 void grabFrames(const ProjectData& project, const std::vector<double>& times, int longSide, QObject* context,
                 std::function<void(std::vector<FrameShot>)> done);
+/** 動くプレビューのコマ（grabFrames と同じ。times は短い間隔で並べる。コマが多いので、少し軽い JPEG にする） */
+void grabMotionFrames(const ProjectData& project, const std::vector<double>& times, int longSide, QObject* context,
+                      std::function<void(std::vector<FrameShot>)> done);
 
 }  // namespace kv::ai

@@ -51,6 +51,7 @@
 #include "ui/inspector.h"
 #include "ui/keymap.h"
 #include "ui/librarypanel.h"
+#include "ui/objectmenu.h"
 #include "ui/perspective.h"
 #include "ui/previewwidget.h"
 #include "ui/serverstatus.h"
@@ -258,6 +259,9 @@ void MainWindow::buildMenus() {
   bindCommand(QStringLiteral("edit.split"), split);
   QAction* dup = edit->addAction(QStringLiteral("複製"), this, [] { editor().duplicateSelection(); });
   bindCommand(QStringLiteral("edit.duplicate"), dup);
+  // コピー・貼り付け（タブをまたいで使える。編集2 で写して、編集1 に貼り付けるなど）
+  bindCommand(QStringLiteral("edit.copy"), edit->addAction(QStringLiteral("コピー"), this, [] { copyItems(); }));
+  bindCommand(QStringLiteral("edit.paste"), edit->addAction(QStringLiteral("貼り付け（再生位置に）"), this, [] { pasteItems(); }));
   QAction* del = edit->addAction(QStringLiteral("削除"), this, [] { editor().deleteSelection(); });
   bindCommand(QStringLiteral("edit.delete"), del);
   addHiddenCommand(QStringLiteral("edit.deselect"), [] { editor().select({}); }, [] { return bool(editor().selection()); });

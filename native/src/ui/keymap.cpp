@@ -45,6 +45,8 @@ const std::vector<Command>& commands() {
         {QStringLiteral("edit.redo"), edit, QStringLiteral("やり直し"), seqs({"Ctrl+Y"})},
         {QStringLiteral("edit.split"), edit, QStringLiteral("分割"), seqs({"S"})},
         {QStringLiteral("edit.duplicate"), edit, QStringLiteral("複製"), seqs({"Ctrl+D"})},
+        {QStringLiteral("edit.copy"), edit, QStringLiteral("コピー（ほかのタブにも貼り付けられる）"), seqs({"Ctrl+C"})},
+        {QStringLiteral("edit.paste"), edit, QStringLiteral("貼り付け（再生位置に）"), seqs({"Ctrl+V"})},
         {QStringLiteral("edit.delete"), edit, QStringLiteral("削除"), seqs({"Del", "Backspace"})},
         {QStringLiteral("edit.deselect"), edit, QStringLiteral("選択を解除"), seqs({"Esc"})},
         {QStringLiteral("edit.copyKeys"), edit, QStringLiteral("キーフレームをコピー"), seqs({"Ctrl+Shift+C"})},

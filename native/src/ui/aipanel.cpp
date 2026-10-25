@@ -36,6 +36,7 @@
 #include "ai/account.h"
 #include "ai/aiconfig.h"
 #include "ai/assistant.h"
+#include "ai/framegrab.h"
 #include "ai/workshop.h"
 #include "core/editor.h"
 #include "core/projectio.h"
@@ -72,6 +73,23 @@ struct AiChoiceCard {
   QList<int> fetching;
   /** 選んで、ファイルを読み込んでいる候補（なければ -1）。読み込み終わると当てはめる */
   int preparing = -1;
+  // ---- 動くプレビュー（見比べる案のときだけ） ----
+  /** 案ごと・プレビューの時間ごとの、動くプレビューのコマ（JPEG。set.motion の範囲）。作り終わるまで空 */
+  std::vector<std::vector<std::vector<QByteArray>>> motion;
+  /** コマを作り終わった案の数 */
+  int motionReady = 0;
+  /** 動くプレビューを出すところ（欄と、見比べる画面の PreviewThumb）。どの案の、どの時間か */
+  struct MotionView {
+    QPointer<QWidget> view;
+    int choice = 0;
+    int time = 0;
+  };
+  std::vector<MotionView> motionViews;
+  /** 動かす・止めるボタン（欄と、見比べる画面） */
+  std::vector<QPointer<QPushButton>> motionButtons;
+  /** 動かしているときのタイマー（欄と一緒に消える）と、始めてから何コマ目か */
+  QPointer<QTimer> motionTimer;
+  int motionTick = 0;
 };
 
 namespace {
@@ -83,18 +101,36 @@ class PreviewThumb : public QWidget {
     QSizePolicy sp(QSizePolicy::Preferred, QSizePolicy::Preferred);
     sp.setHeightForWidth(true);
     setSizePolicy(sp);
+    still_ = image_;
+    stillCaption_ = caption_;
   }
   void setOnClick(std::function<void()> fn, const QString& tip) {
     onClick = std::move(fn);
     setCursor(Qt::PointingHandCursor);
     setToolTip(tip);
   }
+  /** 動くプレビューの 1 コマを出す（caption はそのコマの時間、progress は範囲の中の位置 0〜1）。restore で元の画像に戻す */
+  void showFrame(QImage frame, const QString& caption, double progress) {
+    image_ = std::move(frame);
+    caption_ = caption;
+    progress_ = progress;
+    cache_ = QPixmap();
+    update();
+  }
+  void restore() {
+    if (progress_ < 0) return;
+    image_ = still_;
+    caption_ = stillCaption_;
+    progress_ = -1;
+    cache_ = QPixmap();
+    update();
+  }
 
   bool hasHeightForWidth() const override { return true; }
   int heightForWidth(int w) const override {
-    // 縦長（9:16 など）の画面でも欄が伸びすぎないよう、高さには上限をつける
-    if (image_.isNull() || image_.width() <= 0) return w * 9 / 16;
-    return std::min(int(std::lround(double(w) * image_.height() / image_.width())), kMaxHeight);
+    // 縦長（9:16 など）の画面でも欄が伸びすぎないよう、高さには上限をつける（動くプレビューのコマでは変えない）
+    if (still_.isNull() || still_.width() <= 0) return w * 9 / 16;
+    return std::min(int(std::lround(double(w) * still_.height() / still_.width())), kMaxHeight);
   }
   QSize sizeHint() const override { return {240, heightForWidth(240)}; }
   QSize minimumSizeHint() const override { return {60, heightForWidth(60)}; }
@@ -119,6 +155,12 @@ class PreviewThumb : public QWidget {
       p.save();
       p.setClipPath(round);
       p.drawPixmap(target.topLeft(), cache_);
+      if (progress_ >= 0) {
+        // 動いているときは、下の端に、範囲の中のどこかを細い線で出す
+        const QRectF track(r.left(), r.bottom() - 3, r.width(), 3);
+        p.fillRect(track, QColor(255, 255, 255, 60));
+        p.fillRect(QRectF(track.left(), track.top(), track.width() * std::clamp(progress_, 0.0, 1.0), track.height()), theme::accent);
+      }
       p.restore();
     }
     if (!caption_.isEmpty()) {
@@ -157,6 +199,11 @@ class PreviewThumb : public QWidget {
   std::function<void()> onClick;
   QImage image_;
   QString caption_;
+  /** はじめに渡された画像と時間（動くプレビューを止めたら、これに戻す） */
+  QImage still_;
+  QString stillCaption_;
+  /** 動くプレビューの、範囲の中の位置（止まっているときは -1） */
+  double progress_ = -1;
   QPixmap cache_;
   bool hover_ = false;
 };
@@ -328,6 +375,116 @@ QString audioLength(double seconds) {
 /** ワークショップのオーディオの試聴の印（ワークショップの窓と同じ。どちらで鳴らしても、両方のボタンが合う） */
 QString previewKeyOf(const ai::WorkshopTemplate& t) {
   return QStringLiteral("workshop:") + t.id;
+}
+
+// ---- 動くプレビュー（見比べる案を当てはめた数秒を、音なしでくり返して見せる） ----
+
+/** 1 秒あたりのコマ数・コマの長い辺（見比べる画面でも粗くならない大きさ）・止めるまでにくり返す回数 */
+constexpr double kMotionFps = 12;
+constexpr int kMotionSide = 640;
+constexpr int kMotionLoops = 3;
+
+/** 動くプレビューの範囲 range のコマの時間（短すぎる範囲は動かさない） */
+std::vector<double> motionTimes(const std::pair<double, double>& range) {
+  std::vector<double> out;
+  if (range.second - range.first < 0.5) return out;
+  const int n = int(std::floor((range.second - range.first) * kMotionFps + 1e-6)) + 1;
+  for (int k = 0; k < n; ++k) out.push_back(range.first + k / kMotionFps);
+  return out;
+}
+
+/** 1 回分のコマ数（いちばん長い範囲） */
+int motionLength(const AiChoiceCard& card) {
+  size_t n = 0;
+  for (const auto& perTime : card.motion) {
+    for (const auto& frames : perTime) n = std::max(n, frames.size());
+  }
+  return int(n);
+}
+
+bool motionReady(const AiChoiceCard& card) {
+  return !card.set.choices.empty() && card.motionReady == int(card.set.choices.size()) && motionLength(card) > 1;
+}
+
+bool motionPlaying(const AiChoiceCard& card) {
+  return card.motionTimer && card.motionTimer->isActive();
+}
+
+void refreshMotionButtons(AiChoiceCard& card) {
+  const bool ready = motionReady(card);
+  const bool playing = motionPlaying(card);
+  for (const auto& b : card.motionButtons) {
+    if (!b) continue;
+    b->setVisible(ready);
+    b->setText(playing ? QStringLiteral("止める") : QStringLiteral("動かす"));
+    b->setIcon(theme::icon(playing ? QStringLiteral("pause") : QStringLiteral("play")));
+    b->setAccessibleName(playing ? QStringLiteral("動くプレビューを止める") : QStringLiteral("プレビューを動かす"));
+  }
+}
+
+/** 今のコマを、見えているプレビューに出す（スクロールで隠れているものは、デコードしない） */
+void showMotionFrame(AiChoiceCard& card) {
+  for (const auto& mv : card.motionViews) {
+    auto* thumb = static_cast<PreviewThumb*>(mv.view.data());
+    if (!thumb || !thumb->isVisible() || thumb->visibleRegion().isEmpty()) continue;
+    if (mv.choice >= int(card.motion.size()) || mv.time >= int(card.motion[size_t(mv.choice)].size()) || mv.time >= int(card.set.motion.size())) continue;
+    const auto& frames = card.motion[size_t(mv.choice)][size_t(mv.time)];
+    if (frames.size() < 2) continue;
+    const int k = card.motionTick % int(frames.size());
+    QImage img = QImage::fromData(frames[size_t(k)], "JPG");
+    if (img.isNull()) continue;
+    const double t = card.set.motion[size_t(mv.time)].first + k / kMotionFps;
+    thumb->showFrame(std::move(img), formatTime(t), double(k) / double(frames.size() - 1));
+  }
+}
+
+/** 止めて、はじめのプレビュー（案を出したときの画面）に戻す */
+void stopMotion(AiChoiceCard& card) {
+  if (card.motionTimer) card.motionTimer->stop();
+  for (const auto& mv : card.motionViews) {
+    if (auto* thumb = static_cast<PreviewThumb*>(mv.view.data())) thumb->restore();
+  }
+  refreshMotionButtons(card);
+}
+
+/** はじめから動かす（どの案も同じ時間を同時に出す。kMotionLoops 回くり返したら止める） */
+void startMotion(const std::shared_ptr<AiChoiceCard>& card) {
+  if (!motionReady(*card) || !card->box) return;
+  if (!card->motionTimer) {
+    auto* timer = new QTimer(card->box);
+    timer->setInterval(int(std::lround(1000 / kMotionFps)));
+    timer->setTimerType(Qt::PreciseTimer);
+    std::weak_ptr<AiChoiceCard> weak = card;
+    QObject::connect(timer, &QTimer::timeout, timer, [weak] {
+      const auto c = weak.lock();
+      if (!c) return;
+      if (++c->motionTick >= motionLength(*c) * kMotionLoops) {
+        stopMotion(*c);
+        return;
+      }
+      showMotionFrame(*c);
+    });
+    card->motionTimer = timer;
+  }
+  card->motionTick = 0;
+  card->motionTimer->start();
+  showMotionFrame(*card);
+  refreshMotionButtons(*card);
+}
+
+/** 動かす・止めるボタン */
+QPushButton* motionButton(const std::shared_ptr<AiChoiceCard>& card, QWidget* parent) {
+  auto* b = new QPushButton(parent);
+  b->setObjectName(QStringLiteral("AiMotionButton"));
+  b->setFocusPolicy(Qt::TabFocus);
+  b->setToolTip(QStringLiteral("案を当てはめた数秒の動きを、くり返して見せます（音は出ません）"));
+  QObject::connect(b, &QPushButton::clicked, b, [card] {
+    if (motionPlaying(*card)) stopMotion(*card);
+    else startMotion(card);
+  });
+  card->motionButtons.push_back(b);
+  refreshMotionButtons(*card);
+  return b;
 }
 
 }  // namespace
@@ -547,6 +704,7 @@ AiPanel::AiPanel(QWidget* parent) : QWidget(parent), assistant_(new ai::Assistan
   });
   connect(send_, &QPushButton::clicked, this, [this] {
     if (assistant_->busy()) {
+      autoCompare_.reset();
       assistant_->cancel();
       auto* note = makeLabel(QStringLiteral("中止しました（それまでの変更は残っています）"), "dim", this);
       addItem(note);
@@ -564,6 +722,8 @@ AiPanel::AiPanel(QWidget* parent) : QWidget(parent), assistant_(new ai::Assistan
   connect(assistant_, &ai::Assistant::proposed, this, &AiPanel::addIdeas);
   connect(assistant_, &ai::Assistant::choicesProposed, this, &AiPanel::addChoices);
   connect(assistant_, &ai::Assistant::failed, this, &AiPanel::addError);
+  // 失敗したり途中で止まったりした回は、案を大きく並べた画面を自動では開かない
+  connect(assistant_, &ai::Assistant::failed, this, [this] { autoCompare_.reset(); });
   connect(&editor(), &Editor::projectChanged, this, &AiPanel::trackChoices);
   connect(&editor(), &Editor::workspaceChanged, this, &AiPanel::refreshChoices);
   // オーディオの候補の「試聴」「試聴を止める」を、鳴らしている状態に合わせる
@@ -922,9 +1082,12 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
     refreshChoices();
     return;
   }
-  v->addWidget(wrapLabel(set.image ? QStringLiteral("AI が作った画像です。「これを使う」を押したものだけが入ります（メディア一覧にも入ります）。"
-                                                    "選んだあとでも、ほかの候補に切り替えられます。")
-                                   : QStringLiteral("「これにする」を押した案だけが入ります。選んだあとでも、ほかの案に切り替えられます。"),
+  const bool photos = set.image && !set.choices.front().photo.id.isEmpty();
+  v->addWidget(wrapLabel(photos      ? QStringLiteral("ワークショップの写真です。「これを使う」を押したものだけが入ります（メディア一覧にも入ります）。"
+                                                      "選んだあとでも、ほかの候補に切り替えられます。")
+                         : set.image ? QStringLiteral("AI が作った画像です。「これを使う」を押したものだけが入ります（メディア一覧にも入ります）。"
+                                                      "選んだあとでも、ほかの候補に切り替えられます。")
+                                     : QStringLiteral("「これにする」を押した案だけが入ります。選んだあとでも、ほかの案に切り替えられます。"),
                          "dim", box));
   // 欄が広ければ案を横に並べ、狭ければ縦に重ねる
   auto* tiles = new QWidget(box);
@@ -952,6 +1115,12 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
       thumb->setAccessibleName(set.image ? QStringLiteral("候補 %1 の画像").arg(letter) : QStringLiteral("案 %1 のプレビュー（%2）").arg(letter, time));
       thumb->setOnClick([this, card] { showComparison(card); }, QStringLiteral("押すと、案を大きく並べて見比べられます"));
       fv->addWidget(thumb);
+      if (!set.image) card->motionViews.push_back({thumb, int(i), int(j)});
+    }
+    if (!c.photo.id.isEmpty()) {
+      // ワークショップの写真: 作った人（ほかの人が書いた名前なので、文字のまま出す）と大きさ
+      const QString author = c.photo.author.isEmpty() ? QStringLiteral("名前なし") : c.photo.author;
+      fv->addWidget(wrapLabel(QStringLiteral("%1・%2×%3・%4 人が使用").arg(author).arg(c.photo.width).arg(c.photo.height).arg(c.photo.uses), "dim", f));
     }
     // AI の説明が無ければ、何をするか（道具の結果の 1 行ずつ）を出す
     const QString about = !c.description.isEmpty() ? c.description : c.log.join(QLatin1Char('\n'));
@@ -973,13 +1142,45 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
   }
   v->addWidget(tiles);
   // 新しい欄は下が見えるので、見比べるボタンは下に置く
+  auto* bottom = new QHBoxLayout();
+  bottom->setSpacing(6);
+  bottom->addStretch(1);
+  // 見た目の案は、当てはめた数秒の動きも見せる（コマを作り終わったら動き出す。それまでは止まった画面）
+  const bool moving = !set.image && !card->motionViews.empty() && set.motion.size() == set.times.size() &&
+                      std::all_of(set.choices.begin(), set.choices.end(), [](const ai::Choice& c) { return bool(c.project); });
+  if (moving) bottom->addWidget(motionButton(card, box));
   auto* compare = new QPushButton(theme::icon(QStringLiteral("maximize")), QStringLiteral("大きく並べて見比べる"), box);
   compare->setObjectName(QStringLiteral("AiCompareButton"));
   compare->setFocusPolicy(Qt::TabFocus);
   compare->setToolTip(QStringLiteral("案を大きく横に並べて見比べます（そこからも選べます）"));
-  v->addWidget(compare, 0, Qt::AlignRight);
+  bottom->addWidget(compare);
+  v->addLayout(bottom);
   connect(compare, &QPushButton::clicked, this, [this, card] { showComparison(card); });
+  if (moving) {
+    card->motion.assign(set.choices.size(), std::vector<std::vector<QByteArray>>(set.times.size()));
+    std::vector<double> times;
+    std::vector<size_t> counts;
+    for (const auto& range : set.motion) {
+      const std::vector<double> ts = motionTimes(range);
+      counts.push_back(ts.size());
+      times.insert(times.end(), ts.begin(), ts.end());
+    }
+    std::weak_ptr<AiChoiceCard> weak = card;
+    for (size_t i = 0; i < set.choices.size() && !times.empty(); ++i) {
+      ai::grabMotionFrames(*set.choices[i].project, times, kMotionSide, box, [weak, i, counts](std::vector<ai::FrameShot> shots) {
+        const auto c = weak.lock();
+        if (!c || i >= c->motion.size()) return;
+        size_t at = 0;
+        for (size_t j = 0; j < counts.size() && j < c->motion[i].size(); ++j) {
+          for (size_t k = 0; k < counts[j] && at < shots.size(); ++k) c->motion[i][j].push_back(std::move(shots[at++].jpeg));
+        }
+        if (++c->motionReady == int(c->set.choices.size())) startMotion(c);
+      });
+    }
+  }
   choiceCards_.push_back(card);
+  // 返事が終わったら、大きく並べた画面を自動で開く（同じ回に出し直したら、新しい案のほう）
+  autoCompare_ = card;
   // 見た目の案と、作った画像の候補は、別々に置き換える
   QPointer<QFrame>& slot = set.image ? turnImages_ : turnChoices_;
   if (QFrame* old = slot; old && items_->indexOf(old) >= 0) {
@@ -1002,6 +1203,9 @@ void AiPanel::showComparison(const std::shared_ptr<AiChoiceCard>& card) {
     card->dialog->activateWindow();
     return;
   }
+  // 前に開いて閉じた画面の、動くプレビューを出すところとボタンは、もう無い
+  std::erase_if(card->motionViews, [](const AiChoiceCard::MotionView& mv) { return !mv.view; });
+  std::erase_if(card->motionButtons, [](const QPointer<QPushButton>& b) { return !b; });
   const ai::ChoiceSet& set = card->set;
   const int cols = int(set.choices.size());
   const int rows = std::max(1, int(set.times.size()));
@@ -1052,6 +1256,7 @@ void AiPanel::showComparison(const std::shared_ptr<AiChoiceCard>& card) {
       view->setFixedSize(cellW, cellH);
       view->setAccessibleName(set.image ? QStringLiteral("候補 %1 の画像").arg(letter) : QStringLiteral("案 %1 のプレビュー（%2）").arg(letter, time));
       col->addWidget(view);
+      if (!card->motionButtons.empty()) card->motionViews.push_back({view, i, int(j)});
     }
     const QString about = !c.description.isEmpty() ? c.description : c.log.join(QLatin1Char('\n'));
     if (!about.isEmpty()) {
@@ -1074,6 +1279,9 @@ void AiPanel::showComparison(const std::shared_ptr<AiChoiceCard>& card) {
   v->addLayout(row);
   auto* bottom = new QHBoxLayout();
   bottom->addWidget(wrapLabel(QStringLiteral("選んだあとでも、AI の欄の「こちらにする」でほかの案に切り替えられます（Ctrl+Z で戻せます）。"), "dim", dlg), 1);
+  // 動くプレビューは、AI の欄と同じ時間を同時に出す（開いたら、はじめから動かす）
+  const bool moving = !card->motionButtons.empty();
+  if (moving) bottom->addWidget(motionButton(card, dlg));
   auto* close = new QPushButton(QStringLiteral("閉じる"), dlg);
   bottom->addWidget(close);
   v->addLayout(bottom);
@@ -1082,16 +1290,18 @@ void AiPanel::showComparison(const std::shared_ptr<AiChoiceCard>& card) {
   if (card->box) connect(card->box, &QObject::destroyed, dlg, &QWidget::close);
   refreshChoices();
   dlg->show();
+  if (moving) startMotion(card);
 }
 
-/** 候補のファイル（ワークショップのオーディオ・作った画像）を使う候補か */
+/** 候補のファイル（ワークショップのオーディオ・写真、作った画像）を使う候補か */
 static bool needsAsset(const ai::Choice& c) {
-  return !c.audio.id.isEmpty() || !c.file.isEmpty();
+  return !c.audio.id.isEmpty() || !c.photo.id.isEmpty() || !c.file.isEmpty();
 }
 
 /** 候補のファイルが、今の編集場所のメディア一覧に入っていれば、その素材の ID（無ければ空） */
 static QString preparedAsset(const ai::Choice& c) {
   if (!c.audio.id.isEmpty()) return ai::workshopAudioAsset(c.audio.id);
+  if (!c.photo.id.isEmpty()) return ai::workshopPhotoAsset(c.photo.id);
   if (!c.file.isEmpty()) return ai::assetForFile(c.file);
   return {};
 }
@@ -1142,7 +1352,9 @@ void AiPanel::chooseOption(const std::shared_ptr<AiChoiceCard>& card, int index)
     assistant_->noteChoice(card->set.id, QStringLiteral("%1（%2）").arg(letter, ai::workshopRef(choice.audio.id)));
   } else if (card->set.image) {
     addAction(QStringLiteral("候補 %1「%2」を入れました").arg(letter, choice.label));
-    assistant_->noteChoice(card->set.id, QStringLiteral("%1「%2」").arg(letter, choice.label));
+    // ワークショップの写真の名前も、ほかの人が付けたものなので、AI には ID で知らせる
+    if (!choice.photo.id.isEmpty()) assistant_->noteChoice(card->set.id, QStringLiteral("%1（%2）").arg(letter, ai::workshopRef(choice.photo.id)));
+    else assistant_->noteChoice(card->set.id, QStringLiteral("%1「%2」").arg(letter, choice.label));
   } else {
     addAction(QStringLiteral("案 %1「%2」にしました").arg(letter, choice.label));
     assistant_->noteChoice(card->set.id, QStringLiteral("%1「%2」").arg(letter, choice.label));
@@ -1215,14 +1427,16 @@ void AiPanel::prepareChoice(const std::shared_ptr<AiChoiceCard>& card, int index
       if (!ready) return stop(QStringLiteral("ファイルを読み込めませんでした。もう一度押してください。"));
       card->preparing = -1;
       chooseOption(card, index);
+      // 見比べる画面で選んだときは、入ったら閉じる（すぐに入る案と同じ）
+      if (card->applied == index && card->dialog) card->dialog->close();
       refreshChoices();
     });
     timer->start();
   };
   const ai::Choice& c = card->set.choices[size_t(index)];
-  if (!c.audio.id.isEmpty()) {
-    // ワークショップのオーディオは、手元に置いてから
-    ai::workshop().fetchFile(c.audio, this, [card, import, stop](const QString& error, const QString& file) {
+  if (!c.audio.id.isEmpty() || !c.photo.id.isEmpty()) {
+    // ワークショップのオーディオ・写真は、手元に置いてから
+    ai::workshop().fetchFile(!c.audio.id.isEmpty() ? c.audio : c.photo, this, [card, import, stop](const QString& error, const QString& file) {
       if (!card->box) return stop(QString());
       if (!error.isEmpty()) return stop(error);
       import(file);
@@ -1319,13 +1533,26 @@ void AiPanel::setBusy(bool busy) {
     turnChoices_ = nullptr;
     turnAudio_ = nullptr;
     turnImages_ = nullptr;
+    autoCompare_.reset();
     busyClock_.start();
     statusTimer_.start();
   } else {
     statusTimer_.stop();
+    // 失敗の知らせ（返事が終わった直後に来る）を受け取ってから決める
+    QTimer::singleShot(0, this, [this] { openPendingComparison(); });
   }
   refreshStatus();
   refreshChoices();
+}
+
+void AiPanel::openPendingComparison() {
+  const std::shared_ptr<AiChoiceCard> card = autoCompare_.lock();
+  autoCompare_.reset();
+  // 選べるようになった（返事が終わった）ところで開く。AI の欄を閉じていたり、もう選んでいたり、別のタブのときは開かない
+  if (!card || !card->box || card->dialog || card->applied >= 0 || assistant_->busy() || !isVisible()) return;
+  const Editor& ed = editor();
+  if (ed.workspaceUid(ed.workspaceIndex()) != card->set.workspaceUid) return;
+  showComparison(card);
 }
 
 void AiPanel::refreshStatus() {
@@ -1355,6 +1582,7 @@ void AiPanel::sendInput() {
 }
 
 void AiPanel::clearConversation() {
+  autoCompare_.reset();
   assistant_->reset();
   stopPanelPreview();
   // はじめの説明と最後の伸縮だけを残す

@@ -7,10 +7,54 @@
 
 #include "core/animtemplates.h"
 #include "core/timeline.h"
+#include "media/mediamanager.h"
 #include "ui/keymap.h"
 #include "ui/widgets.h"
 
 namespace kv {
+
+void copyItems() {
+  Editor& ed = editor();
+  const int n = ed.copySelection();
+  if (n <= 0) {
+    ed.toast(QStringLiteral("コピーするものを、タイムラインで選んでください"));
+    return;
+  }
+  ed.toast(ed.workspaceCount() > 1 ? QStringLiteral("%1 個コピーしました（ほかのタブにも貼り付けられます）").arg(n)
+                                   : QStringLiteral("%1 個コピーしました").arg(n));
+}
+
+void pasteItems() {
+  Editor& ed = editor();
+  if (!ed.hasItemClipboard()) {
+    ed.toast(QStringLiteral("貼り付けるものがありません。タイムラインで選んで「コピー」してください"));
+    return;
+  }
+  ed.pause();
+  std::vector<Asset> added;
+  const int n = ed.pasteClipboard(&added);
+  // 一覧に足したメディアは、サムネイル・波形・写真の表示用の画像を作る（タブを開いたときと同じ）
+  for (const Asset& a : added) {
+    if (a.status != AssetStatus::Missing) media().prepare(a);
+  }
+  if (n <= 0) {
+    ed.toast(QStringLiteral("貼り付けられませんでした"), ToastKind::Error);
+    return;
+  }
+  ed.toast(added.empty() ? QStringLiteral("%1 個貼り付けました").arg(n)
+                         : QStringLiteral("%1 個貼り付けました（使っているメディア %2 個を、このタブの一覧に入れました）").arg(n).arg(added.size()));
+}
+
+void copyItemsToTab(int index) {
+  Editor& ed = editor();
+  if (index < 0 || index >= ed.workspaceCount() || index == ed.workspaceIndex()) return;
+  if (ed.copySelection() <= 0) {
+    ed.toast(QStringLiteral("コピーするものを、タイムラインで選んでください"));
+    return;
+  }
+  ed.switchWorkspace(index);
+  pasteItems();
+}
 
 namespace {
 
@@ -95,6 +139,17 @@ void execObjectMenu(QWidget* parent, const Selection& sel, const QPoint& globalP
   }
   const QString suffix = many > 1 ? QStringLiteral("（%1 個まとめて）").arg(many) : QString();
   menu.addAction(withKeys(QStringLiteral("複製") + suffix, QStringLiteral("edit.duplicate")), parent, [] { editor().duplicateSelection(); });
+  menu.addAction(withKeys(QStringLiteral("コピー") + suffix, QStringLiteral("edit.copy")), parent, [] { copyItems(); });
+  QAction* paste = menu.addAction(withKeys(QStringLiteral("貼り付け（再生位置に）"), QStringLiteral("edit.paste")), parent, [] { pasteItems(); });
+  paste->setEnabled(ed.hasItemClipboard());
+  // ほかのタブ（編集1 など）へ持っていく: そのタブに切り替えて、そのタブの再生位置に貼り付ける
+  if (ed.workspaceCount() > 1) {
+    QMenu* to = menu.addMenu(QStringLiteral("ほかのタブにコピー") + suffix);
+    for (int i = 0; i < ed.workspaceCount(); ++i) {
+      if (i == ed.workspaceIndex()) continue;
+      to->addAction(ed.workspaceName(i), parent, [i] { copyItemsToTab(i); });
+    }
+  }
   menu.addAction(withKeys(QStringLiteral("削除") + suffix, QStringLiteral("edit.delete")), parent, [] { editor().deleteSelection(); });
 
   // ---- グループ（テキスト・オーディオ・重ねるトラック。Ctrl+クリックで一緒に選んでから） ----

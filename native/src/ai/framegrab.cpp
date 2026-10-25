@@ -88,14 +88,67 @@ QImage compose(const Job& job, const QImage& frame, QSize size, QSize design) {
   return canvas;
 }
 
+/** 動画 1 つ分のデコーダーと、直前に作ったコマ */
+struct Reader {
+  VideoDecoder dec;
+  bool open = false;
+  bool has = false;
+  double pts = 0;
+  QImage image;
+};
+
+/** 素材の時刻 t のコマ（読めなければ空）。少し先の時刻なら、キーフレームへ戻らずに読み進める（動くプレビューのコマを続けて作るとき） */
+QImage videoFrame(Reader& r, double t) {
+  if (!r.open) return {};
+  const double tol = r.dec.frameDuration() * 0.5;
+  // 直前のコマのままでよいとき（遅くしたクリップなど）
+  if (r.has && t >= r.pts - tol && t < r.pts + tol) return r.image;
+  auto decodeTo = [&r, t, tol] {
+    bool got = false;
+    for (int i = 0; i < 2000 && r.dec.decodeNext(); ++i) {
+      got = true;
+      if (r.dec.framePts() >= t - tol) break;
+    }
+    return got;
+  };
+  const bool forward = r.has && t > r.pts && t - r.pts < 2.0;
+  if (!forward) r.dec.seek(t);
+  bool got = decodeTo();
+  // 読み進めて終わりに着いたときは、移動してから読み直す（終わりの近くのコマ）
+  if (!got && forward) {
+    r.dec.seek(t);
+    got = decodeTo();
+  }
+  if (!got) return r.has ? r.image : QImage();
+  r.has = true;
+  r.pts = r.dec.framePts();
+  r.image = r.dec.frameImage(1280, 1280);
+  return r.image;
+}
+
+void grabImpl(const ProjectData& project, const std::vector<double>& times, int longSide, int quality, QObject* context,
+              std::function<void(std::vector<FrameShot>)> done);
+
 }  // namespace
 
 void grabFrames(const std::vector<double>& times, int longSide, QObject* context, std::function<void(std::vector<FrameShot>)> done) {
-  grabFrames(editor().project(), times, longSide, context, std::move(done));
+  grabImpl(editor().project(), times, longSide, 80, context, std::move(done));
 }
 
 void grabFrames(const ProjectData& project, const std::vector<double>& times, int longSide, QObject* context,
                 std::function<void(std::vector<FrameShot>)> done) {
+  grabImpl(project, times, longSide, 80, context, std::move(done));
+}
+
+void grabMotionFrames(const ProjectData& project, const std::vector<double>& times, int longSide, QObject* context,
+                      std::function<void(std::vector<FrameShot>)> done) {
+  grabImpl(project, times, longSide, 72, context, std::move(done));
+}
+
+namespace {
+
+void grabImpl(const ProjectData& project, const std::vector<double>& times, int longSide, int quality, QObject* context,
+              std::function<void(std::vector<FrameShot>)> done) {
   const Editor& ed = editor();
   const TimelineLayout layout = layoutClips(project.clips, project.settings.fps);
   // Editor::contentEnd と同じ（テキスト・オーディオが動画より後ろまであれば、そこまで）
@@ -134,26 +187,19 @@ void grabFrames(const ProjectData& project, const std::vector<double>& times, in
   }
 
   QPointer<QObject> guard(context);
-  QThreadPool::globalInstance()->start([jobs = std::move(jobs), size, design, guard, done = std::move(done)] {
+  QThreadPool::globalInstance()->start([jobs = std::move(jobs), size, design, quality, guard, done = std::move(done)] {
     std::vector<FrameShot> shots;
-    std::map<QString, std::unique_ptr<VideoDecoder>> decoders;
+    std::map<QString, std::unique_ptr<Reader>> readers;
     for (const Job& job : jobs) {
       QImage frame = job.still;
       if (job.hasClip && !job.isImage) {
-        auto& dec = decoders[job.path];
-        if (!dec) {
-          dec = std::make_unique<VideoDecoder>();
-          if (!dec->open(job.path)) dec->close();
+        auto& r = readers[job.path];
+        if (!r) {
+          r = std::make_unique<Reader>();
+          r->open = r->dec.open(job.path);
+          if (!r->open) r->dec.close();
         }
-        if (dec->isOpen()) {
-          dec->seek(job.srcT);
-          bool got = false;
-          for (int i = 0; i < 2000 && dec->decodeNext(); ++i) {
-            got = true;
-            if (dec->framePts() >= job.srcT - dec->frameDuration() * 0.5) break;
-          }
-          if (got) frame = dec->frameImage(1280, 1280);
-        }
+        frame = videoFrame(*r, job.srcT);
       }
       const QImage img = compose(job, frame, size, design);
       FrameShot shot;
@@ -161,7 +207,7 @@ void grabFrames(const ProjectData& project, const std::vector<double>& times, in
       shot.size = img.size();
       QBuffer buf(&shot.jpeg);
       buf.open(QIODevice::WriteOnly);
-      img.save(&buf, "JPG", 80);
+      img.save(&buf, "JPG", quality);
       shots.push_back(std::move(shot));
     }
     // 結果はアプリ本体（最後まで残る）を通して UI スレッドへ渡し、そこで context が残っているかを確かめる
@@ -175,5 +221,7 @@ void grabFrames(const ProjectData& project, const std::vector<double>& times, in
         Qt::QueuedConnection);
   });
 }
+
+}  // namespace
 
 }  // namespace kv::ai
