@@ -387,12 +387,13 @@ void AssetList::contextMenuEvent(QContextMenuEvent* e) {
     overlay->setEnabled(usable);
   }
   QAction* remove = menu.addAction(QStringLiteral("一覧から削除"));
-  // オーディオは、ワークショップに公開できる（AI サーバーで使えるときだけ。ワークショップから追加したものは、作った人のものなので出さない）
+  // オーディオと写真は、ワークショップに公開できる（AI サーバーで使えるときだけ。ワークショップから追加したものは、作った人のものなので出さない）
   QAction* publish = nullptr;
-  if (kind_ == Kind::Audio && ai::workshopVisible()) {
+  const bool image = a && a->kind == AssetKind::Image;
+  if ((kind_ == Kind::Audio || image) && ai::workshopVisible()) {
     menu.addSeparator();
-    if (a && ai::isWorkshopAudio(a->path)) {
-      menu.addAction(QStringLiteral("ワークショップから追加したオーディオ"))->setEnabled(false);
+    if (a && (image ? ai::isWorkshopImage(a->path) : ai::isWorkshopAudio(a->path))) {
+      menu.addAction(image ? QStringLiteral("ワークショップから追加した写真") : QStringLiteral("ワークショップから追加したオーディオ"))->setEnabled(false);
     } else {
       publish = menu.addAction(theme::icon(QStringLiteral("upload")), QStringLiteral("ワークショップに公開…"));
       publish->setEnabled(usable);
@@ -404,7 +405,10 @@ void AssetList::contextMenuEvent(QContextMenuEvent* e) {
   else if (chosen == add) editor().addToTimeline({id});
   else if (overlay && chosen == overlay) editor().addOverlays({id});
   else if (chosen == remove) removeFromList(id);
-  else if (publish && chosen == publish) publishAudioAsset(this, id);
+  else if (publish && chosen == publish) {
+    if (image) publishImageAsset(this, id);
+    else publishAudioAsset(this, id);
+  }
 }
 
 void AssetList::mousePressEvent(QMouseEvent* e) {
@@ -539,6 +543,29 @@ static QWidget* makeImportProgress(QWidget* parent) {
   return box;
 }
 
+/**
+ * ワークショップ（みんなが公開したものを探して追加する窓）を kind の一覧で開くボタンの行（テキストの一覧の「ワークショップ」と同じ）。
+ * AI サーバーでワークショップを使えるときだけ出す
+ */
+static QWidget* makeWorkshopRow(QWidget* parent, ai::WorkshopKind kind, const QString& name, const QString& tip) {
+  auto* row = new QWidget(parent);
+  auto* h = new QHBoxLayout(row);
+  h->setContentsMargins(0, 0, 0, 0);
+  h->addStretch(1);
+  auto* button = new QPushButton(theme::icon(QStringLiteral("download")), QStringLiteral("ワークショップ"), row);
+  button->setObjectName(name);
+  button->setToolTip(tip);
+  button->setAccessibleDescription(tip);
+  button->setFocusPolicy(Qt::TabFocus);
+  h->addWidget(button);
+  QObject::connect(button, &QPushButton::clicked, button, [button, kind] { openWorkshop(button, kind); });
+  auto sync = [row] { row->setVisible(ai::workshopVisible()); };
+  sync();
+  QObject::connect(&ai::account(), &ai::Account::changed, row, sync);
+  QObject::connect(&ai::account(), &ai::Account::linkChanged, row, sync);
+  return row;
+}
+
 QWidget* LibraryPanel::createMediaView(QWidget* parent) {
   auto* mediaPage = new QWidget(parent);
   mediaPage->setMinimumWidth(kViewMinWidth);
@@ -549,6 +576,9 @@ QWidget* LibraryPanel::createMediaView(QWidget* parent) {
   mv->addWidget(makeAddRow(mediaPage, QStringLiteral("動画・写真・音声のファイルを選んで追加します（タイムラインにも置きます）"),
                            QStringLiteral("フォルダの中の動画・写真・音声を、まとめて一覧に登録します（動画・写真はメディア、音声はオーディオの一覧へ）"),
                            [mediaPage] { pickAndImport(mediaPage); }, [mediaPage] { pickFolderAndImport(mediaPage, false); }));
+  mv->addWidget(makeWorkshopRow(mediaPage, ai::WorkshopKind::Image, QStringLiteral("MediaWorkshopButton"),
+                                QStringLiteral("みんなが公開した写真を探して、メディアの一覧に追加します\n"
+                                               "自分の写真は、一覧で右クリックして「ワークショップに公開」で公開できます")));
   mv->addWidget(makeImportProgress(mediaPage));
   mv->addWidget(new AssetList(AssetList::Kind::Media, mediaPage), 1);
   return mediaPage;
@@ -565,6 +595,9 @@ QWidget* LibraryPanel::createAudioView(QWidget* parent) {
   av->addWidget(makeAddRow(audioPage, QStringLiteral("音楽・効果音・ナレーションのファイルを選んで、一覧に登録します"),
                            QStringLiteral("フォルダの中の音声ファイルを、まとめて一覧に登録します"),
                            [audioPage] { pickAndImport(audioPage, true, false); }, [audioPage] { pickFolderAndImport(audioPage, true); }));
+  av->addWidget(makeWorkshopRow(audioPage, ai::WorkshopKind::Audio, QStringLiteral("AudioWorkshopButton"),
+                                QStringLiteral("みんなが公開したオーディオ（BGM・効果音など）を試聴して、オーディオの一覧に追加します\n"
+                                               "自分のものは、一覧で右クリックして「ワークショップに公開」で公開できます")));
   av->addWidget(makeImportProgress(audioPage));
   av->addWidget(new AssetList(AssetList::Kind::Audio, audioPage), 1);
   return audioPage;

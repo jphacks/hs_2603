@@ -5,9 +5,12 @@
 // AI サーバーのアカウントでログインして使う（AI を使えないアカウントでも使える）。使い方（すぐ公開・管理者が確認してから公開・使えない）は、
 // AI サーバーの管理画面で決める。通信は ServerCall を通す。
 
+#include <QByteArray>
 #include <QDateTime>
+#include <QImage>
 #include <QJsonObject>
 #include <QObject>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <functional>
@@ -18,7 +21,7 @@
 namespace kv::ai {
 
 /** ワークショップに公開できるものの種類 */
-enum class WorkshopKind { Text, Audio };
+enum class WorkshopKind { Text, Audio, Image };
 
 /** ワークショップに公開されたもの 1 つ（テキストのテンプレートか、オーディオ） */
 struct WorkshopTemplate {
@@ -39,10 +42,14 @@ struct WorkshopTemplate {
   QDateTime createdAt;
   /** テキストのテンプレートの見た目（値の範囲は確かめてある。文字は空） */
   TextItem style;
-  /** オーディオのファイルの形式（mp3 など。サーバーが中身から決めたもの）・大きさ（バイト）・長さ（秒） */
+  /** オーディオ・写真のファイルの形式（mp3・jpg など。サーバーが中身から決めたもの）・大きさ（バイト）・オーディオの長さ（秒） */
   QString fileType;
   qint64 fileSize = 0;
   double duration = 0;
+  /** 写真の幅と高さ（ピクセル）と、一覧の見本（JPEG） */
+  int width = 0;
+  int height = 0;
+  QByteArray thumb;
 };
 
 /** オーディオとして公開できるファイルの拡張子（サーバーは中身でも確かめる） */
@@ -57,6 +64,17 @@ QString workshopAudioDir();
 QString workshopAudioFile(const QString& id);
 /** path が、ワークショップから追加したオーディオか（ほかの人が作ったものなので、公開し直せない） */
 bool isWorkshopAudio(const QString& path);
+
+/** 公開できる写真 1 枚の大きさの上限（バイト。サーバーと同じ） */
+constexpr qint64 kWorkshopImageMaxBytes = 10LL * 1024 * 1024;
+/** 公開する写真の大きさ: フル HD（横長なら 1920×1080、縦長なら 1080×1920）に収まるように縮めた大きさ（収まっていればそのまま） */
+QSize workshopImageSize(const QSize& size);
+/** ワークショップから追加した写真を置くフォルダー（%LOCALAPPDATA%\JPHACKS\kantan-video-editor\workshop\image） */
+QString workshopImageDir();
+/** ワークショップの写真 id を、もう手元に置いてあれば、そのファイル（無ければ空） */
+QString workshopImageFile(const QString& id);
+/** path が、ワークショップから追加した写真か（ほかの人が撮ったものなので、公開し直せない） */
+bool isWorkshopImage(const QString& path);
 
 /** 一覧の 1 ページ分 */
 struct WorkshopPage {
@@ -94,9 +112,15 @@ class Workshop : public QObject {
   void publishAudio(const QString& name, const QString& description, const QString& path, double duration, QObject* ctx,
                     std::function<void(const QString& error, const WorkshopTemplate& published, const QString& message)> done);
   /**
-   * オーディオを手元に置く（もう置いてあれば、読み込まずにそのファイルを返す）。file は workshopAudioDir() の中のファイル
+   * 写真を公開する。フル HD に収まるように縮め、JPEG にして（撮った場所などの写真の情報は入れない）、一覧の見本と一緒に送る
    */
-  void fetchAudio(const WorkshopTemplate& t, QObject* ctx, std::function<void(const QString& error, const QString& file)> done);
+  void publishImage(const QString& name, const QString& description, const QImage& image, QObject* ctx,
+                    std::function<void(const QString& error, const WorkshopTemplate& published, const QString& message)> done);
+  /**
+   * オーディオ・写真を手元に置く（もう置いてあれば、読み込まずにそのファイルを返す）。
+   * file は workshopAudioDir()・workshopImageDir() の中のファイル
+   */
+  void fetchFile(const WorkshopTemplate& t, QObject* ctx, std::function<void(const QString& error, const QString& file)> done);
   /** 自分が公開したものの公開をやめる */
   void remove(const QString& id, QObject* ctx, Done done);
   /** 使ったことを知らせる（使った人の数を増やす。失敗しても知らせない） */

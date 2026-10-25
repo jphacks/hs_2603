@@ -1170,7 +1170,7 @@ void AiPanel::previewAudio(const std::shared_ptr<AiChoiceCard>& card, int index)
   card->fetching << index;
   refreshChoices();
   // 試聴も、追加と同じファイルで鳴らす（はじめて聞くときだけ読み込む）
-  ai::workshop().fetchAudio(t, this, [this, card, index, key, t](const QString& error, const QString& file) {
+  ai::workshop().fetchFile(t, this, [this, card, index, key, t](const QString& error, const QString& file) {
     card->fetching.removeAll(index);
     refreshChoices();
     if (!card->box) return;  // 会話を消した
@@ -1222,7 +1222,7 @@ void AiPanel::prepareChoice(const std::shared_ptr<AiChoiceCard>& card, int index
   const ai::Choice& c = card->set.choices[size_t(index)];
   if (!c.audio.id.isEmpty()) {
     // ワークショップのオーディオは、手元に置いてから
-    ai::workshop().fetchAudio(c.audio, this, [card, import, stop](const QString& error, const QString& file) {
+    ai::workshop().fetchFile(c.audio, this, [card, import, stop](const QString& error, const QString& file) {
       if (!card->box) return stop(QString());
       if (!error.isEmpty()) return stop(error);
       import(file);

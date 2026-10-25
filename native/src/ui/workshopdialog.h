@@ -18,5 +18,7 @@ void publishTemplate(QWidget* parent, const QString& templateId);
 void unpublishTemplate(QWidget* parent, const QString& templateId);
 /** オーディオの一覧の素材 assetId を、ワークショップに公開する画面を出す */
 void publishAudioAsset(QWidget* parent, const QString& assetId);
+/** メディアの一覧の写真 assetId を、ワークショップに公開する画面を出す（フル HD より大きければ縮めて公開する） */
+void publishImageAsset(QWidget* parent, const QString& assetId);
 
 }  // namespace kv

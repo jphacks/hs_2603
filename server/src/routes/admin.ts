@@ -11,10 +11,9 @@ import type { Choice, Level, PolicyFields, UserRow } from '../policy.ts';
 import { allowanceOf, effectivePolicy, isChoice, isLevel, monthRange } from '../policy.ts';
 import type { Registration, WorkshopSettings } from '../settings.ts';
 import { isRegistrationMode, isWorkshopMode, readRegistration, readWorkshop, writeRegistration, writeWorkshop } from '../settings.ts';
-import type { AudioType } from '../workshop.ts';
-import { AUDIO_TYPES } from '../workshop.ts';
+
 import type { TemplateRow } from './workshop.ts';
-import { AUTHOR_SQL, TEMPLATE_COLUMNS, templateJson } from './workshop.ts';
+import { AUTHOR_SQL, fileContentType, TEMPLATE_COLUMNS, templateJson } from './workshop.ts';
 
 type Body = Record<string, unknown>;
 
@@ -593,24 +592,24 @@ export function adminRoutes(app: FastifyInstance, ctx: AppContext): void {
     } else if (q.status === 'reported') {
       where.push('exists (select 1 from workshop_reports r where r.template_id = t.id)');
     }
-    // テキストのテンプレートか、オーディオか（送らなければ両方）
-    if (q.kind === 'text' || q.kind === 'audio') {
+    // テキストのテンプレートか、オーディオか、写真か（送らなければすべて）
+    if (q.kind === 'text' || q.kind === 'audio' || q.kind === 'image') {
       params.push(q.kind);
       where.push(`t.kind = $${params.length}`);
     }
     return { workshop: await readWorkshop(db), templates: await workshopRows(where.length ? where.join(' and ') : 'true', params) };
   });
 
-  // オーディオの中身（管理画面で聞いて確かめる）
+  // オーディオ・写真の中身（管理画面で聞いたり見たりして確かめる）
   app.get('/api/admin/workshop/:id/file', async (req, reply) => {
     await admin(req);
-    const id = check.id((req.params as Body).id, 'オーディオ');
-    const { rows } = await db.query<{ file_type: AudioType; data: Buffer }>(
-      `select t.file_type, f.data from workshop_templates t join workshop_files f on f.template_id = t.id where t.id = $1`,
+    const id = check.id((req.params as Body).id);
+    const { rows } = await db.query<{ kind: string; file_type: string; data: Buffer }>(
+      `select t.kind, t.file_type, f.data from workshop_templates t join workshop_files f on f.template_id = t.id where t.id = $1`,
       [id],
     );
-    if (!rows[0]) throw new ApiError(404, 'not_found', 'オーディオが見つかりません');
-    reply.header('Content-Type', AUDIO_TYPES[rows[0].file_type] ?? 'application/octet-stream');
+    if (!rows[0]) throw new ApiError(404, 'not_found', '見つかりません（もう削除されたのかもしれません）');
+    reply.header('Content-Type', fileContentType(rows[0].kind, rows[0].file_type));
     return rows[0].data;
   });
 

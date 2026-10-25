@@ -1,5 +1,6 @@
 #include "ai/workshop.h"
 
+#include <QBuffer>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -80,15 +81,49 @@ bool isWorkshopAudio(const QString& path) {
   return QDir::cleanPath(QFileInfo(path).absoluteFilePath()).startsWith(root, Qt::CaseInsensitive);
 }
 
+// ---- 写真のファイル -----------------------------------------------------------------------
+
+/** 写真の形式（サーバーが受け付けるもの） */
+static const QStringList& workshopImageTypes() {
+  static const QStringList types = {QStringLiteral("jpg"), QStringLiteral("png")};
+  return types;
+}
+
+QSize workshopImageSize(const QSize& size) {
+  if (size.isEmpty()) return size;
+  const QSize bound = size.width() >= size.height() ? QSize(1920, 1080) : QSize(1080, 1920);
+  if (size.width() <= bound.width() && size.height() <= bound.height()) return size;
+  return size.scaled(bound, Qt::KeepAspectRatio);
+}
+
+QString workshopImageDir() {
+  return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(QStringLiteral("workshop/image"));
+}
+
+QString workshopImageFile(const QString& id) {
+  static const QRegularExpression re(QStringLiteral("^[0-9]{1,18}$"));
+  if (!re.match(id).hasMatch()) return {};
+  const QDir dir(QDir(workshopImageDir()).filePath(id));
+  for (const QFileInfo& f : dir.entryInfoList(QDir::Files, QDir::Name)) {
+    if (workshopImageTypes().contains(f.suffix().toLower()) && f.size() > 0) return f.absoluteFilePath();
+  }
+  return {};
+}
+
+bool isWorkshopImage(const QString& path) {
+  const QString root = QDir::cleanPath(QFileInfo(workshopImageDir()).absoluteFilePath()) + QLatin1Char('/');
+  return QDir::cleanPath(QFileInfo(path).absoluteFilePath()).startsWith(root, Qt::CaseInsensitive);
+}
+
 /** ファイルの名前に使える形にする（名前は、ほかの人が付けたものなので、フォルダーの外を指したり、使えない文字が入ったりしないように） */
-static QString safeFileName(const QString& name) {
+static QString safeFileName(const QString& name, const QString& fallback = QStringLiteral("オーディオ")) {
   QString s = name;
   static const QRegularExpression bad(QStringLiteral("[\\\\/:*?\"<>|\\x00-\\x1f]"));
   s.replace(bad, QStringLiteral("_"));
   s = s.simplified().left(60);
   while (s.endsWith(QLatin1Char('.')) || s.endsWith(QLatin1Char(' '))) s.chop(1);
   while (s.startsWith(QLatin1Char('.'))) s.remove(0, 1);
-  if (s.isEmpty()) s = QStringLiteral("オーディオ");
+  if (s.isEmpty()) s = fallback;
   // Windows で使えない名前（CON・NUL・COM1 など）
   static const QRegularExpression reserved(QStringLiteral("^(con|prn|aux|nul|com[0-9]|lpt[0-9])$"), QRegularExpression::CaseInsensitiveOption);
   if (reserved.match(s).hasMatch()) s += QLatin1Char('_');
@@ -106,7 +141,8 @@ WorkshopTemplate parseWorkshopTemplate(const QJsonObject& o) {
   WorkshopTemplate t;
   const QJsonValue id = o.value(QStringLiteral("id"));
   t.id = id.isString() ? id.toString() : QString::number(id.toInteger());
-  t.kind = o.value(QStringLiteral("kind")).toString() == u"audio" ? WorkshopKind::Audio : WorkshopKind::Text;
+  const QString kind = o.value(QStringLiteral("kind")).toString();
+  t.kind = kind == u"audio" ? WorkshopKind::Audio : kind == u"image" ? WorkshopKind::Image : WorkshopKind::Text;
   t.name = TextTemplates::cleanName(o.value(QStringLiteral("name")).toString());
   t.description = o.value(QStringLiteral("description")).toString().simplified().left(200);
   t.author = o.value(QStringLiteral("author")).toString().simplified().left(40);
@@ -118,6 +154,16 @@ WorkshopTemplate parseWorkshopTemplate(const QJsonObject& o) {
   t.createdAt = QDateTime::fromString(o.value(QStringLiteral("createdAt")).toString(), Qt::ISODateWithMs);
   if (t.kind == WorkshopKind::Text) {
     t.style = TextTemplates::styleFromJson(o.value(QStringLiteral("style")).toObject());
+  } else if (t.kind == WorkshopKind::Image) {
+    const QJsonObject f = o.value(QStringLiteral("file")).toObject();
+    const QString type = f.value(QStringLiteral("type")).toString().toLower();
+    t.fileType = workshopImageTypes().contains(type) ? type : QString();
+    t.fileSize = std::max<qint64>(0, f.value(QStringLiteral("size")).toInteger());
+    t.width = std::clamp(f.value(QStringLiteral("width")).toInt(), 0, 10000);
+    t.height = std::clamp(f.value(QStringLiteral("height")).toInt(), 0, 10000);
+    // 見本はほかの人が作ったものなので、大きすぎるものは使わない（サーバーでも 200KB までにしている）
+    const QByteArray thumb = QByteArray::fromBase64(o.value(QStringLiteral("thumb")).toString().toLatin1());
+    if (thumb.size() <= 300 * 1024) t.thumb = thumb;
   } else {
     const QJsonObject f = o.value(QStringLiteral("file")).toObject();
     const QString type = f.value(QStringLiteral("type")).toString().toLower();
@@ -194,7 +240,9 @@ static QString idPath(const QString& id, const char* tail = "") {
 void Workshop::list(WorkshopKind kind, const QString& query, bool popular, bool mine, int offset, QObject* ctx,
                     std::function<void(const QString&, const WorkshopPage&)> done) {
   QUrlQuery q;
-  q.addQueryItem(QStringLiteral("kind"), kind == WorkshopKind::Audio ? QStringLiteral("audio") : QStringLiteral("text"));
+  q.addQueryItem(QStringLiteral("kind"), kind == WorkshopKind::Audio   ? QStringLiteral("audio")
+                                         : kind == WorkshopKind::Image ? QStringLiteral("image")
+                                                                       : QStringLiteral("text"));
   if (!query.trimmed().isEmpty()) q.addQueryItem(QStringLiteral("q"), query.simplified().left(50));
   if (popular) q.addQueryItem(QStringLiteral("sort"), QStringLiteral("popular"));
   if (mine) q.addQueryItem(QStringLiteral("mine"), QStringLiteral("1"));
@@ -271,31 +319,77 @@ void Workshop::publishAudio(const QString& name, const QString& description, con
        });
 }
 
-void Workshop::fetchAudio(const WorkshopTemplate& t, QObject* ctx, std::function<void(const QString&, const QString&)> done) {
-  if (const QString existing = workshopAudioFile(t.id); !existing.isEmpty()) {
+void Workshop::publishImage(const QString& name, const QString& description, const QImage& image, QObject* ctx,
+                            std::function<void(const QString&, const WorkshopTemplate&, const QString&)> done) {
+  auto fail = [this, done](const QString& message) {
+    QMetaObject::invokeMethod(this, [done, message] { done(message, WorkshopTemplate(), QString()); }, Qt::QueuedConnection);
+  };
+  if (image.isNull()) return fail(QStringLiteral("写真を読み込めませんでした"));
+  // フル HD に収まるように縮めて、JPEG にする（作り直すので、撮った場所などの写真の情報は入らない）
+  QImage img = image.convertToFormat(QImage::Format_RGB32);
+  const QSize target = workshopImageSize(img.size());
+  if (target != img.size()) img = img.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+  auto jpeg = [](const QImage& source, int quality) {
+    QByteArray bytes;
+    QBuffer buf(&bytes);
+    buf.open(QIODevice::WriteOnly);
+    source.save(&buf, "JPG", quality);
+    return bytes;
+  };
+  QByteArray bytes = jpeg(img, 90);
+  if (bytes.size() > kWorkshopImageMaxBytes) bytes = jpeg(img, 75);
+  if (bytes.isEmpty() || bytes.size() > kWorkshopImageMaxBytes) return fail(QStringLiteral("写真が大きすぎて公開できません"));
+  // 一覧の見本（長い辺 480px まで）
+  const QImage small = img.scaled(480, 480, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+  QByteArray thumb = jpeg(small, 80);
+  if (thumb.size() > 200 * 1024) thumb = jpeg(small, 60);
+  const QJsonObject body{{QStringLiteral("name"), TextTemplates::cleanName(name)},
+                         {QStringLiteral("description"), description.simplified().left(200)},
+                         {QStringLiteral("image"), QString::fromLatin1(bytes.toBase64())},
+                         {QStringLiteral("thumb"), QString::fromLatin1(thumb.toBase64())}};
+  call("POST", QStringLiteral("/api/workshop/image"), QJsonDocument(body).toJson(QJsonDocument::Compact), QByteArrayLiteral("application/json"), 180000, ctx,
+       [this, done](int status, const QJsonObject& json, const QByteArray&) {
+         if (status != 201 && status != 200) {
+           // 写真を受け付ける前の版のサーバーには、この API が無い（新しいサーバーは 404 を返さない）
+           done(status == 404 ? QStringLiteral("この AI サーバーは古いので、写真を公開できません。サーバーを管理している人に、新しくしてもらってください")
+                              : errorText(status, json),
+                WorkshopTemplate(), QString());
+           return;
+         }
+         const WorkshopTemplate t = parseWorkshopTemplate(json.value(QStringLiteral("template")).toObject());
+         emit published(t);
+         done(QString(), t, json.value(QStringLiteral("message")).toString(QStringLiteral("ワークショップに公開しました")));
+       });
+}
+
+void Workshop::fetchFile(const WorkshopTemplate& t, QObject* ctx, std::function<void(const QString&, const QString&)> done) {
+  const bool image = t.kind == WorkshopKind::Image;
+  if (const QString existing = image ? workshopImageFile(t.id) : workshopAudioFile(t.id); !existing.isEmpty()) {
     QMetaObject::invokeMethod(this, [done, existing] { done(QString(), existing); }, Qt::QueuedConnection);
     return;
   }
-  if (!safeId(t.id) || t.fileType.isEmpty()) {
-    QMetaObject::invokeMethod(this, [done] { done(QStringLiteral("このオーディオは読み込めません"), QString()); }, Qt::QueuedConnection);
+  if (!safeId(t.id) || t.fileType.isEmpty() || t.kind == WorkshopKind::Text) {
+    QMetaObject::invokeMethod(this, [done] { done(QStringLiteral("このファイルは読み込めません"), QString()); }, Qt::QueuedConnection);
     return;
   }
   const QString id = t.id;
   // 置く場所は、ワークショップのフォルダーの ID ごとのフォルダー（名前はほかの人が付けたものなので、使える文字だけにする）
-  const QString file = QDir(QDir(workshopAudioDir()).filePath(id)).filePath(safeFileName(t.name) + QLatin1Char('.') + t.fileType);
-  call("GET", idPath(id, "/file"), {}, {}, 180000, ctx, [done, file](int status, const QJsonObject& json, const QByteArray& raw) {
+  const QString dir = QDir(image ? workshopImageDir() : workshopAudioDir()).filePath(id);
+  const QString file = QDir(dir).filePath(safeFileName(t.name, image ? QStringLiteral("写真") : QStringLiteral("オーディオ")) + QLatin1Char('.') + t.fileType);
+  const qint64 maxBytes = image ? kWorkshopImageMaxBytes : kWorkshopAudioMaxBytes;
+  call("GET", idPath(id, "/file"), {}, {}, 180000, ctx, [done, file, maxBytes](int status, const QJsonObject& json, const QByteArray& raw) {
     if (status != 200) {
       done(errorText(status, json), QString());
       return;
     }
-    if (raw.isEmpty() || raw.size() > kWorkshopAudioMaxBytes) {
-      done(QStringLiteral("オーディオを読み込めませんでした"), QString());
+    if (raw.isEmpty() || raw.size() > maxBytes) {
+      done(QStringLiteral("ファイルを読み込めませんでした"), QString());
       return;
     }
     QDir().mkpath(QFileInfo(file).absolutePath());
     QSaveFile out(file);
     if (!out.open(QIODevice::WriteOnly) || out.write(raw) != raw.size() || !out.commit()) {
-      done(QStringLiteral("オーディオを保存できませんでした（%1）").arg(QDir::toNativeSeparators(QFileInfo(file).absolutePath())), QString());
+      done(QStringLiteral("ファイルを保存できませんでした（%1）").arg(QDir::toNativeSeparators(QFileInfo(file).absolutePath())), QString());
       return;
     }
     done(QString(), QFileInfo(file).absoluteFilePath());

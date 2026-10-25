@@ -23,7 +23,67 @@ export const WORKSHOP_LIMITS = {
   audioBytesPerUser: 200 * 1024 * 1024,
   /** オーディオの長さの上限（秒） */
   audioSeconds: 30 * 60,
+  /** 写真 1 枚の大きさの上限（バイト） */
+  imageBytes: 10 * 1024 * 1024,
+  /** 写真の大きさの上限（フル HD。横長なら 1920×1080、縦長なら 1080×1920 まで）と下限（ピクセル） */
+  imageLong: 1920,
+  imageShort: 1080,
+  imageMin: 16,
+  /** 1 人が公開できる写真の大きさの合計（バイト） */
+  imageBytesPerUser: 100 * 1024 * 1024,
+  /** 一覧に出す見本（JPEG）の長い辺（ピクセル）と大きさ（バイト）の上限 */
+  thumbLong: 480,
+  thumbBytes: 200 * 1024,
 } as const;
+
+/** 受け付ける写真の形式と、返すときの Content-Type */
+export const IMAGE_TYPES = {
+  jpg: 'image/jpeg',
+  png: 'image/png',
+} as const;
+export type ImageType = keyof typeof IMAGE_TYPES;
+
+/** 写真の形式と大きさ（ピクセル）を、ファイルの中身から読む（JPEG と PNG だけ。拡張子は信じない）。読めなければ null */
+export function readImage(buf: Buffer): { type: ImageType; width: number; height: number } | null {
+  // PNG: 決まった 8 バイトのあとに IHDR（幅・高さ）
+  if (startsWith(buf, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) && buf.length >= 24 && buf.toString('latin1', 12, 16) === 'IHDR') {
+    return { type: 'png', width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  }
+  // JPEG: FF D8 のあとの区切りを順に見て、SOF（大きさの入った区切り）を探す
+  if (startsWith(buf, [0xff, 0xd8])) {
+    let i = 2;
+    while (i + 4 <= buf.length) {
+      if (buf[i] !== 0xff) return null;
+      const marker = buf[i + 1]!;
+      if (marker === 0xff) {
+        i += 1;
+        continue;
+      }
+      // 長さの無い区切り
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+        i += 2;
+        continue;
+      }
+      // 画像の始まり・終わりより前に大きさが無ければ、読めない
+      if (marker === 0xd9 || marker === 0xda) return null;
+      const len = buf.readUInt16BE(i + 2);
+      if (len < 2) return null;
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        if (i + 9 > buf.length) return null;
+        return { type: 'jpg', height: buf.readUInt16BE(i + 5), width: buf.readUInt16BE(i + 7) };
+      }
+      i += 2 + len;
+    }
+  }
+  return null;
+}
+
+/** 写真の大きさが、フル HD（向きはどちらでも）に収まるか */
+export function fitsFullHd(width: number, height: number): boolean {
+  const long = Math.max(width, height);
+  const short = Math.min(width, height);
+  return short >= WORKSHOP_LIMITS.imageMin && long <= WORKSHOP_LIMITS.imageLong && short <= WORKSHOP_LIMITS.imageShort;
+}
 
 /** 受け付けるオーディオの形式（ファイルの中身の先頭で見分ける）と、返すときの Content-Type */
 export const AUDIO_TYPES = {

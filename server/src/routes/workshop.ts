@@ -9,7 +9,7 @@ import { ApiError, authenticate, check } from '../http.ts';
 import type { UserRow } from '../policy.ts';
 import { readWorkshop } from '../settings.ts';
 import type { AudioType } from '../workshop.ts';
-import { AUDIO_TYPES, detectAudio, oneLine, sanitizeStyle, WORKSHOP_LIMITS } from '../workshop.ts';
+import { AUDIO_TYPES, detectAudio, fitsFullHd, IMAGE_TYPES, oneLine, readImage, sanitizeStyle, WORKSHOP_LIMITS } from '../workshop.ts';
 
 type Body = Record<string, unknown>;
 
@@ -26,6 +26,9 @@ export type TemplateRow = {
   file_type: string | null;
   file_size: number | null;
   duration: number | null;
+  width: number | null;
+  height: number | null;
+  thumb: Buffer | null;
   created_at: Date;
   updated_at: Date;
   author: string;
@@ -34,7 +37,13 @@ export type TemplateRow = {
 
 /** 一覧などで読む列（t: workshop_templates、u: users） */
 export const TEMPLATE_COLUMNS = `t.id, t.user_id, t.kind, t.name, t.description, t.style, t.status, t.uses, t.file_type, t.file_size, t.duration,
-  t.created_at, t.updated_at`;
+  t.width, t.height, t.thumb, t.created_at, t.updated_at`;
+
+/** ファイルの Content-Type（オーディオと写真） */
+export function fileContentType(kind: string, type: string): string {
+  const types: Record<string, string> = kind === 'image' ? IMAGE_TYPES : AUDIO_TYPES;
+  return types[type] ?? 'application/octet-stream';
+}
 
 export function templateJson(r: TemplateRow, me: number) {
   return {
@@ -49,8 +58,12 @@ export function templateJson(r: TemplateRow, me: number) {
     uses: r.uses,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
-    // テキストは見た目、オーディオはファイルの形式・大きさ・長さ
-    ...(r.kind === 'audio' ? { file: { type: r.file_type, size: r.file_size, duration: r.duration } } : { style: r.style }),
+    // テキストは見た目、オーディオはファイルの形式・大きさ・長さ、写真はファイルの形式・大きさ・幅と高さと、一覧の見本（JPEG の base64）
+    ...(r.kind === 'audio'
+      ? { file: { type: r.file_type, size: r.file_size, duration: r.duration } }
+      : r.kind === 'image'
+        ? { file: { type: r.file_type, size: r.file_size, width: r.width, height: r.height }, thumb: r.thumb ? r.thumb.toString('base64') : '' }
+        : { style: r.style }),
   };
 }
 
@@ -79,6 +92,8 @@ function nameAndDescription(nameValue: unknown, descriptionValue: unknown): { na
 
 /** オーディオを受け取るときの本文の上限（ファイルの上限に、少しゆとりを持たせる） */
 export const AUDIO_BODY_LIMIT = WORKSHOP_LIMITS.audioBytes + 64 * 1024;
+/** 写真を受け取るときの本文の上限（JSON の中の base64 なので、4/3 倍にゆとりを足す） */
+export const IMAGE_BODY_LIMIT = Math.ceil(((WORKSHOP_LIMITS.imageBytes + WORKSHOP_LIMITS.thumbBytes) * 4) / 3) + 64 * 1024;
 
 export function workshopRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db } = ctx;
@@ -114,7 +129,7 @@ export function workshopRoutes(app: FastifyInstance, ctx: AppContext): void {
     const { user, mode } = await member(req);
     const q = req.query as Record<string, string | undefined>;
     // kind を送らない古いアプリには、テキストのテンプレートだけを返す
-    const kind = q.kind === 'audio' ? 'audio' : 'text';
+    const kind = q.kind === 'audio' || q.kind === 'image' ? q.kind : 'text';
     const mine = q.mine === '1' || q.mine === 'true';
     const limit = int(q.limit, 30, 1, 60);
     const offset = int(q.offset, 0, 0, 100_000);
@@ -214,18 +229,68 @@ export function workshopRoutes(app: FastifyInstance, ctx: AppContext): void {
     };
   });
 
-  // オーディオのファイルの中身（試聴・追加するとき）。公開中のものか、自分が公開したものだけ
+  // 写真を公開する。JSON で、写真（image）と一覧の見本（thumb。長い辺 480px までの JPEG）を base64 で送る。
+  // 写真はフル HD（1920×1080、縦長なら 1080×1920）まで。大きさは中身から読む（アプリが縮めてから送る）
+  app.post('/api/workshop/image', { bodyLimit: IMAGE_BODY_LIMIT }, async (req, reply) => {
+    const { user, mode } = await member(req);
+    const b = (req.body ?? {}) as Body;
+    const { name, description } = nameAndDescription(b.name, b.description);
+    const image = typeof b.image === 'string' ? Buffer.from(b.image, 'base64') : Buffer.alloc(0);
+    const thumb = typeof b.thumb === 'string' ? Buffer.from(b.thumb, 'base64') : Buffer.alloc(0);
+    if (!image.length) throw new ApiError(400, 'invalid', '写真の中身（image）を base64 で送ってください');
+    if (image.length > WORKSHOP_LIMITS.imageBytes) {
+      throw new ApiError(413, 'too_large', `写真は ${WORKSHOP_LIMITS.imageBytes / 1024 / 1024}MB までにしてください`);
+    }
+    const info = readImage(image);
+    if (!info) throw new ApiError(400, 'invalid', 'このファイルは、受け付けている写真の形式（JPEG・PNG）ではありません');
+    if (!fitsFullHd(info.width, info.height)) {
+      throw new ApiError(
+        400,
+        'invalid',
+        `写真の大きさは、フル HD（1920×1080。縦長なら 1080×1920）までにしてください（この写真は ${info.width}×${info.height}）`,
+      );
+    }
+    const small = readImage(thumb);
+    if (!small || small.type !== 'jpg' || thumb.length > WORKSHOP_LIMITS.thumbBytes || Math.max(small.width, small.height) > WORKSHOP_LIMITS.thumbLong) {
+      throw new ApiError(400, 'invalid', `一覧の見本（thumb）は、長い辺 ${WORKSHOP_LIMITS.thumbLong}px までの JPEG にしてください`);
+    }
+    if (!publishLimit.hit(String(user.id))) throw new ApiError(429, 'too_many', '短い間に公開しすぎました。少し待ってから、もう一度公開してください');
+    const status = statusFor(mode, user);
+    const row = await tx(db, async (c) => {
+      await checkCount(c, user);
+      const used = await c.query<{ bytes: number }>("select coalesce(sum(file_size), 0) as bytes from workshop_templates where user_id = $1 and kind = 'image'", [user.id]);
+      if (Number(used.rows[0]?.bytes ?? 0) + image.length > WORKSHOP_LIMITS.imageBytesPerUser) {
+        throw new ApiError(409, 'too_much_images', `公開できる写真は、1 人合わせて ${WORKSHOP_LIMITS.imageBytesPerUser / 1024 / 1024}MB までです。使わなくなったものの公開をやめてから、もう一度公開してください`);
+      }
+      const { rows } = await c.query<TemplateRow>(
+        `insert into workshop_templates (user_id, kind, name, description, style, status, file_type, file_size, width, height, thumb)
+         values ($1, 'image', $2, $3, '{}'::jsonb, $4, $5, $6, $7, $8, $9)
+         returning ${TEMPLATE_COLUMNS.replace(/t\./g, '')}, '' as author`,
+        [user.id, name, description, status, info.type, image.length, info.width, info.height, thumb],
+      );
+      await c.query('insert into workshop_files (template_id, data) values ($1, $2)', [rows[0]!.id, image]);
+      return rows[0]!;
+    });
+    row.author = oneLine(user.display_name) || '名前なし';
+    reply.status(201);
+    return {
+      template: templateJson(row, user.id),
+      message: status === 'pending' ? '公開を受け付けました。管理者が確認すると、みんなが使えるようになります' : 'ワークショップに公開しました',
+    };
+  });
+
+  // オーディオ・写真のファイルの中身（試聴・追加するとき）。公開中のものか、自分が公開したものだけ
   app.get('/api/workshop/templates/:id/file', async (req, reply) => {
     const { user } = await member(req);
-    const id = check.id((req.params as Body).id, 'オーディオ');
+    const id = check.id((req.params as Body).id);
     if (!downloadLimit.hit(String(user.id))) throw new ApiError(429, 'too_many', '短い間に読み込みすぎました。少し待ってから、もう一度試してください');
-    const { rows } = await db.query<{ file_type: AudioType; data: Buffer }>(
-      `select t.file_type, f.data from workshop_templates t join users u on u.id = t.user_id join workshop_files f on f.template_id = t.id
-        where t.id = $1 and t.kind = 'audio' and ((t.status = 'published' and not u.disabled) or t.user_id = $2)`,
+    const { rows } = await db.query<{ kind: string; file_type: string; data: Buffer }>(
+      `select t.kind, t.file_type, f.data from workshop_templates t join users u on u.id = t.user_id join workshop_files f on f.template_id = t.id
+        where t.id = $1 and t.kind in ('audio', 'image') and ((t.status = 'published' and not u.disabled) or t.user_id = $2)`,
       [id, user.id],
     );
-    if (!rows[0]) throw new ApiError(404, 'not_found', 'オーディオが見つかりません（公開をやめたのかもしれません）');
-    reply.header('Content-Type', AUDIO_TYPES[rows[0].file_type] ?? 'application/octet-stream');
+    if (!rows[0]) throw new ApiError(404, 'not_found', '見つかりません（公開をやめたのかもしれません）');
+    reply.header('Content-Type', fileContentType(rows[0].kind, rows[0].file_type));
     reply.header('X-Kantan-File-Type', rows[0].file_type);
     return rows[0].data;
   });

@@ -404,6 +404,7 @@ void MainWindow::buildMenus() {
   auto* workshop = menuBar()->addMenu(QStringLiteral("ワークショップ(&W)"));
   workshop->addAction(QStringLiteral("テキストのテンプレートを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Text); });
   workshop->addAction(QStringLiteral("オーディオを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Audio); });
+  workshop->addAction(QStringLiteral("写真を探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Image); });
   auto syncWorkshop = [workshop] { workshop->menuAction()->setVisible(ai::workshopVisible()); };
   syncWorkshop();
   connect(&ai::account(), &ai::Account::changed, workshop, syncWorkshop);

@@ -776,7 +776,7 @@ async function setTemplate(t, body, done) {
 }
 
 async function deleteTemplate(t) {
-  const what = t.kind === 'audio' ? ['オーディオ', 'ファイル'] : ['テンプレート', 'テンプレート'];
+  const what = t.kind === 'audio' ? ['オーディオ', 'ファイル'] : t.kind === 'image' ? ['写真', '写真'] : ['テンプレート', 'テンプレート'];
   if (!confirm(`${what[0]}「${t.name}」を削除しますか？ 元には戻せません（すでに使っている人の手元の${what[1]}は、そのまま残ります）。`)) return;
   try {
     await api('DELETE', `/api/admin/workshop/${t.id}`);
@@ -797,6 +797,18 @@ function audioSample(t) {
     {},
     h('audio', { controls: true, preload: 'none', src: `/api/admin/workshop/${encodeURIComponent(t.id)}/file`, 'aria-label': `${t.name} を聞く` }),
     h('div', { class: 'sub' }, `${String(f.type ?? '').toUpperCase()}・${length}・${num(Math.round(Number(f.size ?? 0) / 1024))} KB`),
+  );
+}
+
+/** 写真の見本（一覧用の小さな JPEG。押すと元の大きさの写真を別のタブで開く） */
+function imageSample(t) {
+  const f = t.file ?? {};
+  const href = `/api/admin/workshop/${encodeURIComponent(t.id)}/file`;
+  return h(
+    'td',
+    {},
+    h('a', { href, target: '_blank', rel: 'noopener', title: '元の大きさで見る' }, h('img', { class: 'thumb', src: `data:image/jpeg;base64,${t.thumb ?? ''}`, alt: `${t.name} の見本` })),
+    h('div', { class: 'sub' }, `${String(f.type ?? '').toUpperCase()}・${num(f.width)}×${num(f.height)}・${num(Math.round(Number(f.size ?? 0) / 1024))} KB`),
   );
 }
 
@@ -866,9 +878,10 @@ async function viewWorkshop(root) {
     'select',
     { 'aria-label': '種類', onchange: (e) => go({ status: filter, kind: e.target.value }) },
     [
-      ['all', 'テキストとオーディオ'],
+      ['all', 'すべての種類'],
       ['text', 'テキストのテンプレート'],
       ['audio', 'オーディオ'],
+      ['image', '写真'],
     ].map(([v, label]) => h('option', { value: v, selected: v === kind }, label)),
   );
   const actions = (t) => {
@@ -886,15 +899,15 @@ async function viewWorkshop(root) {
     h(
       'p',
       { class: 'hint' },
-      'アプリで作ったテキストのテンプレート（フォント・色・大きさ・登場のアニメーションなどの見た目。文字そのものは公開されません）と、オーディオ（BGM・効果音など）を公開して、ほかの人が使えるようにします。オーディオは、公開する人が「自分で作った・公開してよい音」だと確かめてから公開します。',
+      'アプリで作ったテキストのテンプレート（フォント・色・大きさ・登場のアニメーションなどの見た目。文字そのものは公開されません）と、オーディオ（BGM・効果音など）、写真（フル HD まで）を公開して、ほかの人が使えるようにします。オーディオと写真は、公開する人が「自分で作った・公開してよいもの」だと確かめてから公開します。写真は見本を押すと、元の大きさで見られます。',
     ),
     h('div', { class: 'box narrow' }, h('h2', {}, 'ワークショップの使い方'), form),
     h('div', { class: 'toolbar' }, h('h2', { class: 'grow' }, `公開されたもの（${num(data.templates.length)} 個${data.templates.length >= 200 ? '、新しい 200 個まで' : ''}）`), kindSelect, select),
     table(
       ['名前', '見本', '作った人', '状態', ['使った人', 'num'], ['報告', 'num'], '公開した日時', ''],
       data.templates.map((t) => [
-        h('td', { class: 'wrap' }, h('span', { class: 'tag' }, t.kind === 'audio' ? 'オーディオ' : 'テキスト'), ' ', t.name, t.description ? h('div', { class: 'sub' }, t.description) : null),
-        t.kind === 'audio' ? audioSample(t) : templateSample(t.style),
+        h('td', { class: 'wrap' }, h('span', { class: 'tag' }, t.kind === 'audio' ? 'オーディオ' : t.kind === 'image' ? '写真' : 'テキスト'), ' ', t.name, t.description ? h('div', { class: 'sub' }, t.description) : null),
+        t.kind === 'audio' ? audioSample(t) : t.kind === 'image' ? imageSample(t) : templateSample(t.style),
         cellUser(t.author, t.email),
         h('td', {}, h('span', { class: `tag ${TEMPLATE_STATUS[t.status]?.[1] ?? ''}` }, TEMPLATE_STATUS[t.status]?.[0] ?? t.status)),
         [num(t.uses), 'num'],

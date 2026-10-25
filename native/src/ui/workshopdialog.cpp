@@ -32,6 +32,7 @@
 #include "core/texttemplates.h"
 #include "media/audiopreview.h"
 #include "media/mediamanager.h"
+#include <QImageReader>
 #include "render/textrender.h"
 #include "ui/accountdialog.h"
 #include "ui/theme.h"
@@ -88,9 +89,9 @@ bool haveTemplateLocally(const WorkshopTemplate& t) {
   return false;
 }
 
-/** このオーディオが、今の編集場所のオーディオの一覧に入っているか */
-bool haveAudioInList(const WorkshopTemplate& t) {
-  const QString file = ai::workshopAudioFile(t.id);
+/** このオーディオ・写真が、今の編集場所のオーディオ・メディアの一覧に入っているか */
+bool haveFileInList(const WorkshopTemplate& t) {
+  const QString file = t.kind == WorkshopKind::Image ? ai::workshopImageFile(t.id) : ai::workshopAudioFile(t.id);
   if (file.isEmpty()) return false;
   const QString path = QFileInfo(file).absoluteFilePath();
   for (const auto& [id, a] : editor().assets()) {
@@ -139,10 +140,11 @@ class WorkshopWindow : public QWidget {
     v->setSpacing(8);
     // テキストのテンプレートか、オーディオか（ログインの画面の「ログイン」「新規登録」と同じ切り替え）
     kindSwitch_ = new Segmented({{int(WorkshopKind::Text), QStringLiteral("テキストのテンプレート"), QString()},
-                                 {int(WorkshopKind::Audio), QStringLiteral("オーディオ"), QString()}},
+                                 {int(WorkshopKind::Audio), QStringLiteral("オーディオ"), QString()},
+                                 {int(WorkshopKind::Image), QStringLiteral("写真"), QString()}},
                                 0, this);
     kindSwitch_->setValue(int(kind_));
-    kindSwitch_->setMaximumWidth(360);
+    kindSwitch_->setMaximumWidth(480);
     connect(kindSwitch_, &Segmented::changed, this, [this](const QVariant& value) { setKind(WorkshopKind(value.toInt())); });
     auto* kinds = new QHBoxLayout();
     kinds->addWidget(kindSwitch_, 1);
@@ -293,6 +295,9 @@ class WorkshopWindow : public QWidget {
     intro_->setText(kind_ == WorkshopKind::Text
                         ? QStringLiteral("みんなが公開したテキストのテンプレート（フォント・色・大きさ・登場のアニメーションなど）を、マイテンプレートに追加できます。"
                                          "自分のものは、マイテンプレートを右クリックして公開します。")
+                    : kind_ == WorkshopKind::Image
+                        ? QStringLiteral("みんなが公開した写真（フル HD まで）を、メディアの一覧に追加できます。"
+                                         "自分の写真は、メディアの一覧で写真を右クリックして公開します。")
                         : QStringLiteral("みんなが公開したオーディオ（BGM・効果音など）を試聴して、オーディオの一覧に追加できます。"
                                          "自分のものは、オーディオの一覧を右クリックして公開します。"));
   }
@@ -344,6 +349,8 @@ class WorkshopWindow : public QWidget {
                                              : !mine                              ? QStringLiteral("まだだれも公開していません")
                                              : kind_ == WorkshopKind::Text
                                                  ? QStringLiteral("まだ公開していません。マイテンプレートを右クリックして「ワークショップに公開」で公開できます")
+                                             : kind_ == WorkshopKind::Image
+                                                 ? QStringLiteral("まだ公開していません。メディアの一覧で写真を右クリックして「ワークショップに公開」で公開できます")
                                                  : QStringLiteral("まだ公開していません。オーディオの一覧を右クリックして「ワークショップに公開」で公開できます"));
                           } else {
                             status_->setText(QStringLiteral("%1 個中 %2 個").arg(page.total).arg(cards_.size()));
@@ -389,6 +396,24 @@ class WorkshopWindow : public QWidget {
       preview->setAlignment(Qt::AlignCenter);
       preview->setAccessibleName(QStringLiteral("%1 の見本").arg(t.name));
       v->addWidget(preview);
+    } else if (t.kind == WorkshopKind::Image) {
+      // 写真は、サーバーから一覧と一緒に届いた小さな見本を出す（元の写真は、追加するときに読み込む）
+      auto* preview = new QLabel(f);
+      const qreal dpr = devicePixelRatioF();
+      const QSize box(kCardPreview.width(), 106);
+      const QImage img = QImage::fromData(t.thumb, "JPG");
+      if (!img.isNull()) {
+        QPixmap pm = QPixmap::fromImage(img.scaled(box * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        pm.setDevicePixelRatio(dpr);
+        preview->setPixmap(pm);
+      } else {
+        preview->setPixmap(theme::iconPixmap(QStringLiteral("image"), 28, theme::muted, dpr));
+      }
+      preview->setAlignment(Qt::AlignCenter);
+      preview->setMinimumHeight(box.height());
+      preview->setStyleSheet(QStringLiteral("background:#111111;border-radius:6px"));
+      preview->setAccessibleName(QStringLiteral("%1 の見本").arg(t.name));
+      v->addWidget(preview);
     } else {
       auto* icon = new QLabel(f);
       icon->setPixmap(theme::iconPixmap(QStringLiteral("music"), 28, theme::ok, devicePixelRatioF()));
@@ -402,6 +427,7 @@ class WorkshopWindow : public QWidget {
     v->addWidget(name);
     QString meta = QStringLiteral("%1・%2 人が使用").arg(t.mine ? QStringLiteral("自分") : t.author).arg(t.uses);
     if (t.kind == WorkshopKind::Audio) meta += QStringLiteral("\n%1・%2").arg(lengthText(t.duration), sizeText(t.fileSize));
+    if (t.kind == WorkshopKind::Image) meta += QStringLiteral("\n%1×%2・%3").arg(t.width).arg(t.height).arg(sizeText(t.fileSize));
     v->addWidget(wrapped(meta, "dim", f));
     if (const QString s = statusLabel(t.status); !s.isEmpty()) v->addWidget(wrapped(s, "note", f));
     if (!t.description.isEmpty()) v->addWidget(wrapped(t.description, "muted", f));
@@ -445,8 +471,11 @@ class WorkshopWindow : public QWidget {
     if (c.t.kind == WorkshopKind::Text) {
       have = haveTemplateLocally(c.t);
       addText = have ? QStringLiteral("マイテンプレートにあります") : QStringLiteral("マイテンプレートに追加");
+    } else if (c.t.kind == WorkshopKind::Image) {
+      have = haveFileInList(c.t);
+      addText = have ? QStringLiteral("メディアの一覧にあります") : QStringLiteral("メディアの一覧に追加");
     } else {
-      have = haveAudioInList(c.t);
+      have = haveFileInList(c.t);
       addText = have ? QStringLiteral("オーディオの一覧にあります") : QStringLiteral("オーディオの一覧に追加");
       const bool playing = audioPreview().playingAsset() == previewKey(c.t.id);
       c.play->setText(playing ? QStringLiteral("試聴を止める") : QStringLiteral("試聴"));
@@ -477,11 +506,13 @@ class WorkshopWindow : public QWidget {
                      ToastKind::Success);
       return;
     }
-    // オーディオ: 手元に置いてから、今の編集場所のオーディオの一覧に入れる（タイムラインには置かない）
-    fetch(t, [this, t](const QString& file) {
+    // オーディオ・写真: 手元に置いてから、今の編集場所のオーディオ・メディアの一覧に入れる（タイムラインには置かない）
+    const bool image = t.kind == WorkshopKind::Image;
+    fetch(t, [t, image](const QString& file) {
       media().importPaths({file}, false);
       ai::workshop().markUsed(t.id);
-      editor().toast(QStringLiteral("「%1」をオーディオの一覧に追加しました。「オーディオ」の一覧からタイムラインへドラッグして使えます").arg(t.name),
+      editor().toast(image ? QStringLiteral("「%1」をメディアの一覧に追加しました。「メディア」の一覧からタイムラインへドラッグして使えます").arg(t.name)
+                           : QStringLiteral("「%1」をオーディオの一覧に追加しました。「オーディオ」の一覧からタイムラインへドラッグして使えます").arg(t.name),
                      ToastKind::Success);
     });
   }
@@ -500,7 +531,7 @@ class WorkshopWindow : public QWidget {
     busy_ << t.id;
     refreshButtons();
     const QString id = t.id;
-    ai::workshop().fetchAudio(t, this, [this, id, then](const QString& error, const QString& file) {
+    ai::workshop().fetchFile(t, this, [this, id, then](const QString& error, const QString& file) {
       busy_.removeAll(id);
       refreshButtons();
       if (!error.isEmpty()) {
@@ -512,9 +543,9 @@ class WorkshopWindow : public QWidget {
   }
 
   void stopPublishing(const WorkshopTemplate& t) {
-    const QString detail = t.kind == WorkshopKind::Text
-                               ? QStringLiteral("（すでに追加した人の手元のテンプレートと、自分のマイテンプレートは、そのまま残ります）")
-                               : QStringLiteral("（すでに追加した人の手元のオーディオと、自分のファイルは、そのまま残ります）");
+    const QString detail = t.kind == WorkshopKind::Text    ? QStringLiteral("（すでに追加した人の手元のテンプレートと、自分のマイテンプレートは、そのまま残ります）")
+                           : t.kind == WorkshopKind::Image ? QStringLiteral("（すでに追加した人の手元の写真と、自分のファイルは、そのまま残ります）")
+                                                           : QStringLiteral("（すでに追加した人の手元のオーディオと、自分のファイルは、そのまま残ります）");
     if (QMessageBox::question(this, QStringLiteral("公開をやめる"), QStringLiteral("「%1」のワークショップへの公開をやめますか？\n%2").arg(t.name, detail)) !=
         QMessageBox::Yes) {
       return;
@@ -780,6 +811,106 @@ void publishAudioAsset(QWidget* parent, const QString& assetId) {
     go->setText(QStringLiteral("送っています…"));
     error->hide();
     ai::workshop().publishAudio(name->text(), description->text(), asset.path, asset.duration, &dlg,
+                                [&dlg, go, error](const QString& err, const WorkshopTemplate&, const QString& message) {
+                                  if (!err.isEmpty()) {
+                                    go->setEnabled(true);
+                                    go->setText(QStringLiteral("公開する"));
+                                    error->setText(err);
+                                    error->show();
+                                    return;
+                                  }
+                                  editor().toast(message, ToastKind::Success);
+                                  dlg.accept();
+                                });
+  });
+  dlg.exec();
+}
+
+void publishImageAsset(QWidget* parent, const QString& assetId) {
+  QWidget* owner = parent ? parent->window() : nullptr;
+  const Asset* found = editor().asset(assetId);
+  if (!found || found->kind != AssetKind::Image) return;
+  const Asset asset = *found;
+  if (ai::isWorkshopImage(asset.path)) {
+    QMessageBox::information(owner, QStringLiteral("ワークショップに公開"),
+                             QStringLiteral("ワークショップから追加した写真は、撮った人・作った人のものなので公開できません"));
+    return;
+  }
+  // 読み込んだときに作った画像（向きを直し、透明な所は黒にしたもの。長い辺 2048px まで）を使う。無ければファイルから読む
+  QImage image = media().previewImage(asset.id);
+  if (image.isNull() && QFileInfo(asset.path).isFile()) {
+    QImageReader reader(asset.path);
+    reader.setAutoTransform(true);
+    image = reader.read();
+  }
+  if (asset.status == AssetStatus::Missing || asset.status == AssetStatus::Error || image.isNull()) {
+    QMessageBox::information(owner, QStringLiteral("ワークショップに公開"), QStringLiteral("ファイルが見つからないか、読み込めないので公開できません"));
+    return;
+  }
+  if (!ensureReady(owner)) return;
+  // 元の大きさと、公開する大きさ（フル HD に収める）
+  const QSize original = asset.width > 0 && asset.height > 0 ? QSize(asset.width, asset.height) : image.size();
+  const QSize sent = ai::workshopImageSize(original);
+
+  QDialog dlg(owner);
+  dlg.setWindowTitle(QStringLiteral("写真をワークショップに公開"));
+  dlg.setMinimumWidth(440);
+  auto* v = new QVBoxLayout(&dlg);
+  v->setContentsMargins(16, 14, 16, 14);
+  v->setSpacing(8);
+  auto* preview = new QLabel(&dlg);
+  const qreal dpr = dlg.devicePixelRatioF();
+  QPixmap pm = QPixmap::fromImage(image.scaled(QSize(400, 225) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+  pm.setDevicePixelRatio(dpr);
+  preview->setPixmap(pm);
+  preview->setAlignment(Qt::AlignCenter);
+  preview->setStyleSheet(QStringLiteral("background:#111111;border-radius:6px"));
+  preview->setAccessibleName(QStringLiteral("公開する写真"));
+  v->addWidget(preview);
+  v->addWidget(wrapped(QStringLiteral("%1（%2×%3）").arg(asset.name).arg(original.width()).arg(original.height()), "muted", &dlg));
+  v->addWidget(makeLabel(QStringLiteral("名前"), "muted", &dlg));
+  auto* name = new QLineEdit(QFileInfo(asset.path).completeBaseName().left(30), &dlg);
+  name->setMaxLength(30);
+  name->setAccessibleName(QStringLiteral("公開する名前"));
+  v->addWidget(name);
+  v->addWidget(makeLabel(QStringLiteral("説明（なくてもかまいません）"), "muted", &dlg));
+  auto* description = new QLineEdit(&dlg);
+  description->setMaxLength(200);
+  description->setPlaceholderText(QStringLiteral("例: 夕方の海（背景に使えます）"));
+  description->setAccessibleName(QStringLiteral("説明"));
+  v->addWidget(description);
+  // ほかの人の写真などを勝手に配らないよう、公開してよい写真かを確かめてもらう
+  auto* rights = new QCheckBox(QStringLiteral("自分で撮った・作った写真か、公開してよいと許可されている写真です"), &dlg);
+  rights->setAccessibleName(QStringLiteral("公開してよい写真であることを確かめる"));
+  v->addWidget(rights);
+  QStringList notes = publishNotes(QStringLiteral("写真"));
+  notes.insert(1, QStringLiteral("人の顔・名札・住所・車のナンバーなど、だれかが分かるものが写っていないか確かめてください。"));
+  notes.insert(2, QStringLiteral("撮った場所などの写真の情報（Exif）は、消してから送ります。"));
+  if (sent != original) notes.insert(3, QStringLiteral("フル HD より大きいので、%1×%2 に縮めて公開します。").arg(sent.width()).arg(sent.height()));
+  v->addWidget(wrapped(notes.join(QLatin1Char('\n')), "dim", &dlg));
+  auto* error = wrapped(QString(), "error", &dlg);
+  error->hide();
+  v->addWidget(error);
+  auto* buttons = new QDialogButtonBox(&dlg);
+  auto* go = buttons->addButton(QStringLiteral("公開する"), QDialogButtonBox::AcceptRole);
+  go->setProperty("primary", true);
+  go->setDefault(true);
+  go->setEnabled(false);
+  buttons->addButton(QStringLiteral("やめる"), QDialogButtonBox::RejectRole);
+  v->addWidget(buttons);
+  QObject::connect(rights, &QCheckBox::toggled, go, &QPushButton::setEnabled);
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, [&] {
+    if (!rights->isChecked()) return;
+    if (name->text().trimmed().isEmpty()) {
+      error->setText(QStringLiteral("名前を入れてください"));
+      error->show();
+      return;
+    }
+    go->setEnabled(false);
+    go->setText(QStringLiteral("送っています…"));
+    error->hide();
+    ai::workshop().publishImage(name->text(), description->text(), image, &dlg,
                                 [&dlg, go, error](const QString& err, const WorkshopTemplate&, const QString& message) {
                                   if (!err.isEmpty()) {
                                     go->setEnabled(true);

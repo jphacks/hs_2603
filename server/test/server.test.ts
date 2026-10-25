@@ -870,3 +870,115 @@ describe('画像を作る', () => {
     assert.equal((await create(token, { prompt: 'a dog' })).status, 200);
   });
 });
+
+describe('ワークショップの写真', () => {
+  const as = (token: string) => ({ authorization: `Bearer ${token}` });
+  /** 大きさ（IHDR）だけを持つ PNG のふり（サーバーは先頭の形と大きさだけを読む） */
+  const png = (w: number, h: number, size = 4096) => {
+    const head = Buffer.alloc(24);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(head, 0);
+    head.writeUInt32BE(13, 8);
+    head.write('IHDR', 12, 'latin1');
+    head.writeUInt32BE(w, 16);
+    head.writeUInt32BE(h, 20);
+    return Buffer.concat([head, Buffer.alloc(size - 24, 7)]);
+  };
+  /** APP0 のあとに SOF0（大きさ）がある JPEG のふり */
+  const jpeg = (w: number, h: number) =>
+    Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]),
+      Buffer.alloc(14, 0),
+      Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, h >> 8, h & 0xff, w >> 8, w & 0xff, 0x03]),
+      Buffer.alloc(200, 1),
+    ]);
+  const publish = (token: string, image: Buffer, thumb: Buffer = jpeg(480, 270), name = '夕焼けの海') =>
+    req('POST', '/api/workshop/image', { body: { name, description: '自分で撮った写真', image: image.toString('base64'), thumb: thumb.toString('base64') }, headers: as(token) });
+  let hanakoToken = '';
+  let photoId = '';
+  // 公開する人（前のテストでログインを切られていない、新しい人）
+  let userToken = '';
+  let jiro = 0;
+
+  test('フル HD までの写真を公開すると、大きさを中身から読んで、見本と一緒に保存する', async () => {
+    const role = (await s.db.query("select id from roles where name = '一般'")).rows[0].id;
+    jiro = (
+      await s.db.query('insert into users (email, display_name, password_hash, role_id) values ($1, $2, $3, $4) returning id', [
+        'photographer@example.com',
+        '写真の人',
+        await hashPassword('green-hill-photo-2026'),
+        role,
+      ])
+    ).rows[0].id;
+    userToken = (await appLogin('photographer@example.com', 'green-hill-photo-2026')).json.token;
+    hanakoToken = (await appLogin('hanako@example.com', 'blue-river-2026')).json.token;
+    const res = await publish(userToken, png(1920, 1080));
+    assert.equal(res.status, 201, JSON.stringify(res.json));
+    const t = res.json.template;
+    photoId = t.id;
+    assert.equal(t.kind, 'image');
+    assert.deepEqual(t.file, { type: 'png', size: 4096, width: 1920, height: 1080 });
+    assert.equal(t.thumb, jpeg(480, 270).toString('base64'));
+    assert.equal('style' in t, false);
+    // 縦長のフル HD・JPEG も受け付ける
+    const tall = await publish(userToken, jpeg(1080, 1920), jpeg(270, 480), '縦の写真');
+    assert.equal(tall.status, 201, JSON.stringify(tall.json));
+    assert.deepEqual(tall.json.template.file, { type: 'jpg', size: jpeg(1080, 1920).length, width: 1080, height: 1920 });
+    assert.equal((await req('DELETE', `/api/workshop/templates/${tall.json.template.id}`, { headers: as(userToken) })).status, 200);
+  });
+
+  test('フル HD より大きい写真・写真ではないもの・見本の無いものは受け付けない', async () => {
+    for (const [w, h] of [
+      [1921, 1080],
+      [1920, 1081],
+      [1200, 1200],
+      [2000, 1000],
+      [8, 8],
+    ]) {
+      const res = await publish(userToken, png(w!, h!));
+      assert.equal(res.status, 400, `${w}×${h}`);
+    }
+    assert.equal((await publish(userToken, Buffer.alloc(4096, 0x41))).status, 400);
+    assert.equal((await publish(userToken, png(1280, 720), png(480, 270))).status, 400, '見本は JPEG だけ');
+    assert.equal((await publish(userToken, png(1280, 720), jpeg(960, 540))).status, 400, '見本が大きすぎる');
+    assert.equal((await req('POST', '/api/workshop/image', { body: { name: 'x', image: png(100, 100).toString('base64') }, headers: as(userToken) })).status, 400);
+    assert.equal((await publish(userToken, png(1280, 720, 10 * 1024 * 1024 + 10))).status, 413);
+  });
+
+  test('ほかの人は写真の一覧で見つけて、中身を読み込める（ほかの種類の一覧には出ない）', async () => {
+    const list = await req('GET', '/api/workshop/templates?kind=image', { headers: as(hanakoToken) });
+    assert.equal(list.status, 200);
+    assert.equal(list.json.kind, 'image');
+    assert.equal(list.json.total, 1);
+    assert.equal(list.json.templates[0].thumb, jpeg(480, 270).toString('base64'));
+    for (const kind of ['', '?kind=audio']) {
+      const other = await req('GET', `/api/workshop/templates${kind}`, { headers: as(hanakoToken) });
+      assert.equal(other.json.templates.some((t: { id: string }) => t.id === photoId), false);
+    }
+    const file = await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${photoId}/file`, headers: as(hanakoToken) });
+    assert.equal(file.statusCode, 200);
+    assert.equal(file.headers['content-type'], 'image/png');
+    assert.equal(file.headers['x-kantan-file-type'], 'png');
+    assert.ok(file.rawPayload.equals(png(1920, 1080)));
+    // 管理画面: 種類で絞り込め、見本も出る。元の写真も見られる（前のテストでログアウトしたので、ログインし直す）
+    adminCookie = cookieOf((await req('POST', '/api/auth/login', { body: { email: ADMIN, password: 'new-admin-password-1', client: 'admin' } })).res);
+    const admin = await req('GET', '/api/admin/workshop?kind=image', { headers: adminHeaders(adminCookie, false) });
+    assert.equal(admin.json.templates.length, 1);
+    assert.equal(admin.json.templates[0].file.width, 1920);
+    assert.equal(typeof admin.json.templates[0].thumb, 'string');
+    const adminFile = await s.app.inject({ method: 'GET', url: `/api/admin/workshop/${photoId}/file`, headers: adminHeaders(adminCookie, false) });
+    assert.equal(adminFile.headers['content-type'], 'image/png');
+  });
+
+  test('1 人が公開できる写真の大きさには上限があり、公開をやめると中身も消える', async () => {
+    await s.db.query(`insert into workshop_templates (user_id, kind, name, style, file_type, file_size, width, height) values ($1, 'image', '大きい', '{}', 'png', $2, 1920, 1080)`, [
+      jiro,
+      100 * 1024 * 1024,
+    ]);
+    const over = await publish(userToken, png(640, 360));
+    assert.equal(over.status, 409);
+    assert.equal(over.json.code, 'too_much_images');
+    await s.db.query("delete from workshop_templates where name = '大きい'");
+    assert.equal((await req('DELETE', `/api/workshop/templates/${photoId}`, { headers: as(userToken) })).status, 200);
+    assert.equal((await s.db.query('select count(*)::int as n from workshop_files')).rows[0].n, 0);
+  });
+});
