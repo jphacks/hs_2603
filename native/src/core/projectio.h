@@ -17,6 +17,9 @@ QJsonObject projectToJson(const ProjectData& p);
 QJsonObject textToJson(const TextItem& t);
 /** hasTrack には、段（track）が書いてあったかを返す */
 TextItem textFromJson(const QJsonObject& o, bool* hasTrack = nullptr);
+/** キーフレームアニメーションを o の "anim" に書く（キーフレームが無ければ書かない）/ o の "anim" から読む（範囲・並びをそろえる） */
+void animToJson(QJsonObject& o, const Animation& a);
+Animation animFromJson(const QJsonObject& o);
 
 /** 今の編集場所 1 つを、プロジェクトファイル (.kvproj) の中身にする */
 QByteArray serializeProject();

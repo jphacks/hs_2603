@@ -24,6 +24,7 @@
 #include <cmath>
 
 #include "ai/workshop.h"
+#include "core/animtemplates.h"
 #include "core/editor.h"
 #include "core/textstyles.h"
 #include "core/texttemplates.h"
@@ -206,6 +207,70 @@ void saveTextAsTemplate(QWidget* parent, const QString& textId) {
   editor().toast(QStringLiteral("テンプレート「%1」を保存しました。左の「テキスト」の一覧からタイムラインへドラッグして使えます")
                      .arg(TextTemplates::cleanName(name)),
                  ToastKind::Success);
+}
+
+// ---- アニメーションのマイテンプレート ---------------------------------------------------------------
+
+bool saveAnimTemplate(QWidget* parent, const QString& textId) {
+  const TextItem* t = editor().text(textId);
+  if (!t) return false;
+  if (!AnimTemplates::hasAnimation(*t)) {
+    editor().toast(QStringLiteral("保存できるキーフレームがありません。◆ でキーフレームを付けてから保存してください"));
+    return false;
+  }
+  const TextItem item = *t;
+  bool ok = false;
+  const QString def = QStringLiteral("マイアニメーション %1").arg(animTemplates().list().size() + 1);
+  const QString name = QInputDialog::getText(
+      parent ? parent->window() : nullptr, QStringLiteral("アニメーションをマイテンプレートに保存"),
+      QStringLiteral("名前（位置・拡大率・回転・不透明度・字間のキーフレームと補間方式、登場のアニメーションを保存します。\n文字・フォント・色は保存しません）"),
+      QLineEdit::Normal, def, &ok);
+  if (!ok) return false;
+  if (animTemplates().add(name, item).isEmpty()) {
+    editor().toast(QStringLiteral("マイテンプレートを保存できませんでした"), ToastKind::Error);
+    return false;
+  }
+  editor().toast(QStringLiteral("「%1」を保存しました。ほかのテキストを選んで、アニメーションの「マイテンプレート」から使えます")
+                     .arg(AnimTemplates::cleanName(name)),
+                 ToastKind::Success);
+  return true;
+}
+
+void applyAnimTemplateWithToast(const QString& templateId) {
+  const AnimTemplate* t = animTemplates().find(templateId);
+  if (!t) return;
+  const QString name = t->name;
+  if (editor().applyAnimTemplate(templateId)) editor().toast(QStringLiteral("「%1」を適用しました").arg(name));
+  else editor().toast(QStringLiteral("テキストを選んでから適用してください"));
+}
+
+void execAnimTemplateMenu(QWidget* parent, const QString& templateId, const QPoint& globalPos) {
+  const AnimTemplate* t = animTemplates().find(templateId);
+  if (!t) return;
+  const QString name = t->name;
+  QMenu menu(parent);
+  QAction* apply = menu.addAction(QStringLiteral("選んでいるテキストに適用"));
+  apply->setEnabled(editor().selection().type == Selection::Text);
+  menu.addSeparator();
+  QAction* rename = menu.addAction(QStringLiteral("名前を変更…"));
+  QAction* remove = menu.addAction(theme::icon(QStringLiteral("trash")), QStringLiteral("削除"));
+  QAction* chosen = menu.exec(globalPos);
+  if (!chosen) return;
+  // メニューを閉じたあとは、一覧が作り直されて parent が消えることがあるので、ダイアログはウィンドウに出す
+  QWidget* owner = parent ? parent->window() : nullptr;
+  if (chosen == apply) {
+    applyAnimTemplateWithToast(templateId);
+  } else if (chosen == rename) {
+    bool ok = false;
+    const QString next = QInputDialog::getText(owner, QStringLiteral("マイテンプレートの名前"), QStringLiteral("新しい名前"), QLineEdit::Normal, name, &ok);
+    if (ok && !animTemplates().rename(templateId, next)) {
+      QMessageBox::warning(owner, QStringLiteral("マイテンプレート"), QStringLiteral("名前を変更できませんでした"));
+    }
+  } else if (chosen == remove) {
+    const QString question = QStringLiteral("マイテンプレート「%1」を削除しますか？\n（このテンプレートを適用したテキストのアニメーションは、そのまま残ります）").arg(name);
+    if (QMessageBox::question(owner, QStringLiteral("マイテンプレートを削除"), question) != QMessageBox::Yes) return;
+    if (!animTemplates().remove(templateId)) QMessageBox::warning(owner, QStringLiteral("マイテンプレート"), QStringLiteral("削除できませんでした"));
+  }
 }
 
 namespace {
@@ -458,12 +523,79 @@ void NumberSpin::leaveEvent(QEvent* e) {
   setStyleSheet(QString());
 }
 
+// ---- LineSlider -------------------------------------------------------------
+
+QRect LineSlider::handleRect() const {
+  QStyleOptionSlider opt;
+  initStyleOption(&opt);
+  return style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
+}
+
+QRect LineSlider::grooveRect() const {
+  QStyleOptionSlider opt;
+  initStyleOption(&opt);
+  return style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderGroove, this);
+}
+
+bool LineSlider::hitsLine(const QPoint& pos) const {
+  const QRect handle = handleRect();
+  if (handle.adjusted(-2, -2, 2, 2).contains(pos)) return true;  // つまみ（少し外側まで）
+  const QRect groove = grooveRect();
+  // 線: 線の長さの範囲で、線の中心から上下（縦のスライダーは左右）に、つまみの高さの半分（最低 6px）まで
+  if (orientation() == Qt::Horizontal) {
+    const int half = std::max(6, (handle.height() + 1) / 2);
+    return pos.x() >= groove.left() && pos.x() <= groove.right() && std::abs(pos.y() - groove.center().y()) <= half;
+  }
+  const int half = std::max(6, (handle.width() + 1) / 2);
+  return pos.y() >= groove.top() && pos.y() <= groove.bottom() && std::abs(pos.x() - groove.center().x()) <= half;
+}
+
+void LineSlider::mousePressEvent(QMouseEvent* e) {
+  const QPoint pos = e->position().toPoint();
+  // 線とつまみの周りの余白: 何もしない（値は変えない）
+  if (!hitsLine(pos)) {
+    e->ignore();
+    return;
+  }
+  if (e->button() == Qt::LeftButton && !handleRect().adjusted(-2, -2, 2, 2).contains(pos)) {
+    // 線の上: 押した位置へつまみを動かしてから、つまみを掴んだのと同じようにドラッグを始める
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+    const QRect groove = grooveRect();
+    const QRect handle = handleRect();
+    const bool horizontal = orientation() == Qt::Horizontal;
+    const int len = horizontal ? handle.width() : handle.height();
+    const int from = horizontal ? groove.left() : groove.top();
+    const int span = std::max(1, (horizontal ? groove.width() : groove.height()) - len);
+    const int at = (horizontal ? pos.x() : pos.y()) - from - len / 2;
+    setSliderPosition(QStyle::sliderValueFromPosition(minimum(), maximum(), at, span, opt.upsideDown));
+    // 刻みが粗くて、動かしたつまみが押した位置から外れたときは、つまみの真ん中を押したことにする（溝を押したときの「少しずつ動く」にしない）
+    const QRect moved = handleRect();
+    if (!moved.contains(pos)) {
+      QMouseEvent onHandle(e->type(), QPointF(moved.center()), e->scenePosition(), e->globalPosition(), e->button(), e->buttons(), e->modifiers(),
+                           e->pointingDevice());
+      QSlider::mousePressEvent(&onHandle);
+      e->setAccepted(onHandle.isAccepted());
+      return;
+    }
+  }
+  QSlider::mousePressEvent(e);
+}
+
+void LineSlider::mouseDoubleClickEvent(QMouseEvent* e) {
+  if (!hitsLine(e->position().toPoint())) {
+    e->ignore();
+    return;
+  }
+  QSlider::mouseDoubleClickEvent(e);
+}
+
 // ---- SliderRow --------------------------------------------------------------
 
 /** SliderRow のスライダー。ダブルクリックで基準値、ホイール・矢印キーは SliderRow の決め方で動かす */
-class NumberSlider : public QSlider {
+class NumberSlider : public LineSlider {
  public:
-  using QSlider::QSlider;
+  using LineSlider::LineSlider;
   std::function<void()> onDoubleClick;
   SliderRow* row = nullptr;
   /** つまみの中心（スライダー内の座標） */
@@ -475,6 +607,11 @@ class NumberSlider : public QSlider {
 
  protected:
   void mouseDoubleClickEvent(QMouseEvent* e) override {
+    // 線・つまみの周りの余白のダブルクリックでは、元の値に戻さない
+    if (!hitsLine(e->position().toPoint())) {
+      e->ignore();
+      return;
+    }
     if (onDoubleClick) onDoubleClick();
     e->accept();
   }

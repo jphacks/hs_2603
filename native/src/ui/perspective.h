@@ -56,8 +56,24 @@ class PerspectiveManager : public QObject {
   /** 今の並びを、すぐに保存する（終了するとき） */
   void storeNow();
 
-  /** ビューを前に出す。閉じていれば、そのビューの欄に開く */
+  /** ビューを前に出す。閉じていれば、そのビューの欄に開く（左の欄を折りたたんでいれば、開く） */
   void showView(const QString& id);
+
+  /**
+   * 左の欄を折りたたむ（左端に細い帯だけを残し、空いた幅はプレビューが使う）/ 開く（折りたたむ前の幅・タブに戻す）。
+   * 中のビュー（一覧・選んでいるタブ）はそのまま。次に起動したときも同じ状態にする
+   */
+  void setLeftCollapsed(bool on);
+  bool leftCollapsed() const { return leftCollapsed_; }
+  /** 左の欄にビューがあるか（無ければ、欄そのものを出していない） */
+  bool leftHasViews() const;
+
+ signals:
+  void leftCollapsedChanged(bool collapsed);
+  /** 左の欄のビューが増えた・減った（ビューが無くなると、左の欄は出さない） */
+  void leftViewsChanged();
+
+ public:
 
   /** 表示メニューの「パースペクティブ」「ビュー」の中身を作り直す（メニューを開く直前に呼ぶ） */
   void fillPerspectiveMenu(QMenu* menu);
@@ -68,8 +84,6 @@ class PerspectiveManager : public QObject {
   void dragMove(const QPoint& globalPos);
   void endDrag(const QPoint& globalPos, bool drop);
   void execTabMenu(ViewArea* area, int index, const QPoint& globalPos);
-  /** タブの × で、そのビューを閉じる（「表示 → ビュー」で開き直せる） */
-  void closeTab(ViewArea* area, int index);
   /** タブの切り替え・欄の幅の変更（少し待ってから保存する） */
   void scheduleSave();
 
@@ -124,6 +138,8 @@ class PerspectiveManager : public QObject {
   int rightIndex_ = 2;
   int leftWidth_ = 264;
   int rightWidth_ = 316;
+  /** 左の欄を折りたたんでいる（leftWidth_ は、開いたときに戻す幅のまま） */
+  bool leftCollapsed_ = false;
   std::vector<View> views_;
 
   QString current_;

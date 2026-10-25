@@ -72,6 +72,8 @@ class MainWindow : public QMainWindow {
   void setAiVisible(bool on);
   /** AI サーバーのアドレス（.env の KANTAN_AI_SERVER か、exe に組み込んだもの）が決まっていなければ、AI アシスタントを隠す */
   void refreshAiAvailability();
+  /** 左上のボタンの絵・説明を、左の欄を折りたたんでいるかに合わせる */
+  void refreshLeftPanelButton();
 
   PreviewEngine* engine_;
   AiPanel* aiPanel_;
@@ -88,6 +90,8 @@ class MainWindow : public QMainWindow {
   QHash<int, QString> plainKeys_;
   QToolButton* undoButton_ = nullptr;
   QToolButton* redoButton_ = nullptr;
+  /** 左上（メニューの「ファイル」の左隣）の、左の欄を折りたたむ / 開くボタン */
+  QToolButton* leftPanelButton_ = nullptr;
   PreviewPanel* preview_;
   TimelineWidget* timeline_;
   Inspector* inspector_;
@@ -99,6 +103,8 @@ class MainWindow : public QMainWindow {
   QTimer toastTimer_;
   QTimer autosave_;
   QWidget* dropOverlay_;
+  /** ブラウザーの画像をドラッグしているときの案内（著作権の注意も） */
+  QLabel* dropHint_ = nullptr;
   void* taskbar_ = nullptr;
 };
 

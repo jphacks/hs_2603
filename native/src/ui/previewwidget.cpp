@@ -394,9 +394,12 @@ QString PreviewStage::hitText(QPointF pos) const {
   const double t = ed.currentTime();
   const QString editing = ed.selection().type == Selection::Text ? ed.selection().id : QString();
   const auto& texts = ed.project().texts;
-  for (auto it = texts.rbegin(); it != texts.rend(); ++it) {
-    if (!isTextVisible(*it, t) || it->text.isEmpty()) continue;
-    if (textQuad(*it, t, d, editing, 0).containsPoint(dp, Qt::WindingFill)) return it->id;
+  // 手前に描いている文字（タイムラインの上の段）から探す。描く順の逆
+  const std::vector<size_t> order = textPaintOrder(texts);
+  for (auto it = order.rbegin(); it != order.rend(); ++it) {
+    const TextItem& item = texts[*it];
+    if (!isTextVisible(item, t) || item.text.isEmpty()) continue;
+    if (textQuad(item, t, d, editing, 0).containsPoint(dp, Qt::WindingFill)) return item.id;
   }
   return {};
 }

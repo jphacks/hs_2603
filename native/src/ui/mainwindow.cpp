@@ -43,6 +43,7 @@
 #include "core/timeline.h"
 #include "export/exporter.h"
 #include "media/mediamanager.h"
+#include "media/webimage.h"
 #include "render/previewengine.h"
 #include "ui/accountdialog.h"
 #include "ui/aipanel.h"
@@ -150,6 +151,20 @@ MainWindow::MainWindow() {
   dropOverlay_ = new QWidget(this);
   dropOverlay_->setAttribute(Qt::WA_TransparentForMouseEvents);
   dropOverlay_->setStyleSheet(QStringLiteral("background: rgba(38,128,235,30); border: 2px solid #2680eb;"));
+  // ブラウザーの画像をドラッグしているときの案内（メディアの一覧に入れること・著作権の注意）
+  {
+    auto* box = new QVBoxLayout(dropOverlay_);
+    dropHint_ = new QLabel(dropOverlay_);
+    dropHint_->setAttribute(Qt::WA_TransparentForMouseEvents);
+    dropHint_->setAlignment(Qt::AlignCenter);
+    dropHint_->setWordWrap(true);
+    dropHint_->setStyleSheet(QStringLiteral("QLabel{background:#1f2d40;color:#e6e6e6;border:1px solid #2680eb;border-radius:8px;padding:14px 22px;font-size:11pt}"));
+    dropHint_->setText(QStringLiteral("Web の画像を、メディアの一覧に追加します\n※ 画像の著作権・利用規約を確かめてから使ってください"));
+    dropHint_->hide();
+    box->addStretch(1);
+    box->addWidget(dropHint_, 0, Qt::AlignCenter);
+    box->addStretch(1);
+  }
   dropOverlay_->hide();
 
   Editor& ed = editor();
@@ -202,6 +217,11 @@ void MainWindow::buildMenus() {
   bindCommand(QStringLiteral("file.saveAs"), file->addAction(QStringLiteral("名前を付けて保存..."), this, [this] { saveProject(true); }));
   file->addSeparator();
   bindCommand(QStringLiteral("file.import"), file->addAction(QStringLiteral("メディアを追加..."), this, [this] { LibraryPanel::pickAndImport(this); }));
+  // フォルダの中の動画・写真・音声を、まとめて一覧に登録する（サブフォルダも含めるかは、選んだあとに聞く）
+  bindCommand(QStringLiteral("file.importFolder"), file->addAction(QStringLiteral("フォルダからメディアを追加..."), this, [this] {
+    perspective_->showView(QStringLiteral("media"));
+    LibraryPanel::pickFolderAndImport(this, false);
+  }));
   bindCommand(QStringLiteral("file.export"), file->addAction(QStringLiteral("書き出し..."), this, &MainWindow::openExport));
   // 書き出す範囲（タイムラインの一部だけを書き出す）。目盛りを Shift+ドラッグ、または右クリックでも決められる
   QMenu* rangeMenu = file->addMenu(QStringLiteral("書き出す範囲"));
@@ -349,6 +369,15 @@ void MainWindow::buildMenus() {
   view->addSeparator();
   bindCommand(QStringLiteral("view.fullScreen"),
               view->addAction(QStringLiteral("プレビューを全画面表示"), this, [this] { preview_->toggleFullScreen(); }));
+  // 左の欄（メディア・オーディオ・テキスト）を折りたたむ。一番上のメニューの「ファイル」の左隣のボタンでも折りたたむ・開くができ、
+  // 折りたたんだときに左端に残る細い帯を押しても開く
+  QAction* leftPanel = view->addAction(QStringLiteral("左の欄を折りたたむ"));
+  leftPanel->setCheckable(true);
+  leftPanel->setChecked(perspective_->leftCollapsed());
+  connect(leftPanel, &QAction::triggered, this, [this](bool on) { perspective_->setLeftCollapsed(on); });
+  connect(perspective_, &PerspectiveManager::leftCollapsedChanged, leftPanel, &QAction::setChecked);
+  connect(view, &QMenu::aboutToShow, leftPanel, [this, leftPanel] { leftPanel->setEnabled(perspective_->leftHasViews()); });
+  bindCommand(QStringLiteral("view.leftPanel"), leftPanel);
   view->addSeparator();
   aiAction_ = view->addAction(QStringLiteral("AI アシスタント"), this, [this] { setAiVisible(!aiPanel_->isVisible()); });
   aiAction_->setCheckable(true);
@@ -387,6 +416,19 @@ void MainWindow::buildMenus() {
                        QStringLiteral("<b>かんたん動画エディタ</b><br>バージョン %1<br><br>Qt %2 / FFmpeg / miniaudio / Lucide")
                            .arg(QStringLiteral(KV_VERSION), QString::fromLatin1(qVersion())));
   });
+
+  // 左上（一番上のメニューの「ファイル」の左隣）: 左の欄（メディア・オーディオ・テキスト）を折りたたむ / 開く
+  auto* leftCorner = new QWidget(menuBar());
+  auto* lh = new QHBoxLayout(leftCorner);
+  lh->setContentsMargins(6, 0, 0, 6);  // メニューの文字の高さにそろえる（下に余白を寄せて、少し上げる）
+  lh->setSpacing(0);
+  leftPanelButton_ = makeToolButton(QStringLiteral("panel-left-close"), QStringLiteral("左の欄を折りたたむ"), leftCorner);
+  lh->addWidget(leftPanelButton_);
+  menuBar()->setCornerWidget(leftCorner, Qt::TopLeftCorner);
+  connect(leftPanelButton_, &QToolButton::clicked, this, [this] { perspective_->setLeftCollapsed(!perspective_->leftCollapsed()); });
+  connect(perspective_, &PerspectiveManager::leftCollapsedChanged, this, &MainWindow::refreshLeftPanelButton);
+  connect(perspective_, &PerspectiveManager::leftViewsChanged, this, &MainWindow::refreshLeftPanelButton);
+  refreshLeftPanelButton();
 
   // 右上: 元に戻す・やり直し・書き出し
   auto* corner = new QWidget(menuBar());
@@ -454,6 +496,19 @@ void MainWindow::applyShortcuts() {
   if (undoButton_) undoButton_->setToolTip(tip(QStringLiteral("元に戻す"), QStringLiteral("edit.undo")));
   if (redoButton_) redoButton_->setToolTip(tip(QStringLiteral("やり直し"), QStringLiteral("edit.redo")));
   if (aiButton_) aiButton_->setToolTip(tip(QStringLiteral("AI アシスタント"), QStringLiteral("view.ai")));
+  refreshLeftPanelButton();  // 割り当てたキーをツールチップに出す
+}
+
+void MainWindow::refreshLeftPanelButton() {
+  if (!leftPanelButton_ || !perspective_) return;
+  // 折りたたんでいるときは「開く」、開いているときは「折りたたむ」。左の欄にビューが無いときは押せない
+  const bool collapsed = perspective_->leftCollapsed();
+  const QString label = collapsed ? QStringLiteral("左の欄を開く") : QStringLiteral("左の欄を折りたたむ");
+  const QString keys = keymap::text(keymap::keys(QStringLiteral("view.leftPanel")));
+  leftPanelButton_->setIcon(theme::icon(collapsed ? QStringLiteral("panel-left-open") : QStringLiteral("panel-left-close")));
+  leftPanelButton_->setToolTip(keys.isEmpty() ? label : QStringLiteral("%1 (%2)").arg(label, keys));
+  leftPanelButton_->setAccessibleName(label);
+  leftPanelButton_->setEnabled(perspective_->leftHasViews());
 }
 
 QString MainWindow::plainCommandFor(const QKeyEvent* e) const {
@@ -778,9 +833,22 @@ void MainWindow::closeEvent(QCloseEvent* e) {
   e->accept();
 }
 
+/** ドラッグしているものに、ローカルのファイルがあるか */
+static bool hasLocalFiles(const QMimeData* m) {
+  for (const QUrl& u : m->urls()) {
+    if (u.isLocalFile()) return true;
+  }
+  return false;
+}
+
 void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
-  if (!e->mimeData()->hasUrls()) return;
+  const QMimeData* m = e->mimeData();
+  // ローカルのファイル（これまでどおり）か、ブラウザーの画像（画像のデータ・画像の URL）
+  const bool local = hasLocalFiles(m);
+  const bool web = !local && WebImageImporter::canAccept(m);
+  if (!local && !web) return;
   e->acceptProposedAction();
+  dropHint_->setVisible(web);
   dropOverlay_->setGeometry(rect());
   dropOverlay_->raise();
   dropOverlay_->show();
@@ -796,9 +864,16 @@ void MainWindow::dropEvent(QDropEvent* e) {
   for (const QUrl& u : e->mimeData()->urls()) {
     if (u.isLocalFile()) paths << u.toLocalFile();
   }
-  if (paths.isEmpty()) return;
-  e->acceptProposedAction();
-  media().importPaths(paths, true);
+  if (!paths.isEmpty()) {
+    e->acceptProposedAction();
+    media().importPaths(paths, true);
+    return;
+  }
+  // ブラウザーからドラッグした画像: 安全を確かめてから（URL ならダウンロードしてから）、メディアの一覧に追加する
+  if (webImages().importFromMime(e->mimeData())) {
+    e->acceptProposedAction();
+    perspective_->showView(QStringLiteral("media"));
+  }
 }
 
 static bool isTextInput(QObject* o) {

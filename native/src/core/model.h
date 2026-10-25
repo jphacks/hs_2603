@@ -214,9 +214,11 @@ struct TextItem {
   double letterSpacing = 0;
   TextAnimation animation = TextAnimation::Fade;
   /**
-   * タイムラインの段（0 が一番上）。追加するときに一度だけ決め、開始時間や長さを変えても、
+   * タイムラインの段の並び順（0 が一番上。上の段ほどプレビュー・書き出しで手前に重なる）。段そのものの ID は
+   * ProjectData::textTrackIds[track]。追加するときに一度だけ決め、開始時間や長さを変えても、
    * ほかのテキストが増えたり減ったりしても変わらない。変えるのは、段を移す操作（Alt+↑↓・右クリック）と、
-   * タイムラインでテキストを上下にドラッグしたときだけ
+   * タイムラインでテキストを上下にドラッグしたとき（段の境目に落とすと、そこに新しい段を差し込む）だけ。
+   * 同じ段の中では、時間が重ならない（重なりそうなときは、時間をずらすか、空いている段へ入れる）
    */
   int track = 0;
   /** 拡大率・回転(度。時計回りが正)・不透明度。位置は x, y。文字の中心を基準に動かす */
@@ -234,6 +236,12 @@ struct AudioItem {
   double start = 0;
   double in = 0;
   double out = 0;
+  /**
+   * タイムラインのオーディオの段（0 が一番上）。テキストと同じく、追加するときに一度だけ決め、時間を変えても段は変わらない。
+   * 同じ段の中では時間が重ならない（重なりそうなときは、空いている段へ入れる）。段を変えるのは、見出しの列のドラッグ（段の入れ替え）と、
+   * タイムラインでオーディオを上下にドラッグしたとき（段の境目に落とすと、そこに新しい段を差し込む）だけ
+   */
+  int track = 0;
   double volume = kMaxVolume;
   /** 音量キーフレーム（t の順）。空ならクリップ全体を volume で鳴らす。あるときは、キーフレームの音量が優先される */
   std::vector<VolumePoint> volumePoints;
@@ -266,7 +274,20 @@ struct ProjectData {
   /** 重ねるトラックの映像・画像（並びは追加した順。重なりの順は track で決める） */
   std::vector<OverlayItem> overlays;
   std::vector<TextItem> texts;
+  /**
+   * テキストの段の ID（上の段から順。添字が TextItem::track）。並び順と ID を分けて持つので、段を差し込んだり
+   * 並べ替えたりしても、それぞれの段の ID は変わらない（保存するときは、テキストごとに段の ID も書く）。
+   * 段の数（textTrackCount）にいつもそろえる（syncTextTrackIds）
+   */
+  std::vector<QString> textTrackIds;
+  /**
+   * 段の番号（タイムラインの見出しの「テキスト 1」「オーディオ 2」の数字。上の段から順。添字が track）。
+   * 段を入れ替えると、番号も中身と一緒に動く（「オーディオ 1」を下へ動かすと、見出しも「オーディオ 1」が下になる）。
+   * 段の数にいつもそろえる（syncTextTrackIds・syncAudioTrackNos）。段が 1 つだけになったら 1 に戻す
+   */
+  std::vector<int> textTrackNos;
   std::vector<AudioItem> audios;
+  std::vector<int> audioTrackNos;
 };
 
 /** 1 つの編集場所（タブ）の保存・読み込み用データ */

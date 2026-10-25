@@ -22,11 +22,13 @@
 #include <QStandardPaths>
 #include <QEnterEvent>
 #include <QIcon>
+#include <QStackedWidget>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QToolButton>
 
 #include <algorithm>
+#include <functional>
 
 #include "ui/theme.h"
 
@@ -38,48 +40,9 @@ static const QString kBuiltinName = QStringLiteral("標準");
 
 // ---- 欄のタブ ---------------------------------------------------------------------
 
-/** タブの × の絵（size の倍数の大きさも入れて、高 DPI の画面でもぼけないようにする） */
-static QIcon closeIcon(const QColor& color) {
-  QIcon ic;
-  for (int s : {10, 15, 20, 30}) ic.addPixmap(theme::iconPixmap(QStringLiteral("x"), s, color));
-  return ic;
-}
-
-/** タブの右上の、薄い ×。カーソルを合わせると濃くなり、押すとそのビューを閉じる */
-class TabCloseButton : public QToolButton {
- public:
-  TabCloseButton(const QString& title, QWidget* parent) : QToolButton(parent) {
-    setFocusPolicy(Qt::NoFocus);  // タブのキー操作の邪魔をしない（閉じるのは右クリックや「表示 → ビュー」でもできる）
-    setFixedSize(16, 16);
-    setIconSize(QSize(10, 10));
-    setToolTip(QStringLiteral("「%1」を閉じる").arg(title));
-    setAccessibleName(toolTip());
-    setStyleSheet(QStringLiteral("QToolButton{border:none;padding:0;margin:0;background:transparent;border-radius:3px}"
-                                 "QToolButton:hover{background:#363636}QToolButton:pressed{background:#2c2c2c}"));
-    setHovered(false);
-  }
-
- protected:
-  void enterEvent(QEnterEvent* e) override {
-    QToolButton::enterEvent(e);
-    setHovered(true);
-  }
-  void leaveEvent(QEvent* e) override {
-    QToolButton::leaveEvent(e);
-    setHovered(false);
-  }
-
- private:
-  void setHovered(bool on) {
-    static const QIcon faint = closeIcon(theme::dim);
-    static const QIcon strong = closeIcon(theme::text);
-    setIcon(on ? strong : faint);
-  }
-};
-
 /**
  * 欄のタブ。どのタブも同じ幅にする。タブをドラッグすると、左右の欄へ動かしたり並べ替えたりできる。
- * タブの右上の × で閉じる。右クリックで、ほかの欄へ動かす・閉じる
+ * タブに × は付けない。閉じるのは、右クリックの「閉じる」か「表示 → ビュー」（どちらからでも開き直せる）
  */
 class ViewTabBar : public QTabBar {
  public:
@@ -94,11 +57,24 @@ class ViewTabBar : public QTabBar {
     dropIndex_ = index;
     update();
   }
-
  protected:
   QSize tabSizeHint(int index) const override {
     QSize s = QTabBar::tabSizeHint(index);
-    if (count() > 0) s.setWidth(width() / count());
+    const int n = count();
+    if (n == 0) return s;
+    // どのタブも同じ幅にする。ただし、同じ幅では名前が入りきらないタブがあり、名前の長さに合わせれば全部入りきるときは、
+    // 名前の長さに合わせて分ける（欄が少し狭くても、名前を省かずに済むように）
+    const int avail = std::max(0, width());
+    const int equal = avail / n;
+    int need = 0;
+    int widest = 0;
+    for (int i = 0; i < n; ++i) {
+      const int w = QTabBar::tabSizeHint(i).width();
+      need += w;
+      widest = std::max(widest, w);
+    }
+    if (equal >= widest || need > avail) s.setWidth(equal);
+    else s.setWidth(s.width() + (avail - need) / n);
     return s;
   }
   void resizeEvent(QResizeEvent* e) override {
@@ -108,19 +84,7 @@ class ViewTabBar : public QTabBar {
   }
   void tabInserted(int index) override {
     QTabBar::tabInserted(index);
-    // タブごとの ×（タブを外すと、QTabBar が × も消す）
-    auto* close = new TabCloseButton(tabText(index), this);
-    connect(close, &QToolButton::clicked, this, [this, close] {
-      // 前のタブを閉じたり動かしたりすると番号が変わるので、押したときに探す
-      for (int i = 0; i < count(); ++i) {
-        if (tabButton(i, QTabBar::RightSide) == close) {
-          manager_->closeTab(area_, i);
-          return;
-        }
-      }
-    });
-    setTabButton(index, QTabBar::RightSide, close);
-    if (count() > 0) setTabText(0, tabText(0));
+    if (count() > 0) setTabText(0, tabText(0));  // タブの幅を引き直す
   }
   void tabRemoved(int index) override {
     QTabBar::tabRemoved(index);
@@ -191,6 +155,113 @@ class ViewTabBar : public QTabBar {
   int dropIndex_ = -1;
 };
 
+static constexpr int kStripWidth = 28;  // 左の欄を折りたたんだときに残す帯の幅
+
+/**
+ * 左の欄を折りたたんだときに残る、細い帯。いちばん上に「開く」ボタン、その下に欄のタブの名前（縦書き）。
+ * 帯のどこを押しても開く（タブの名前を押すと、そのタブを前にして開く）
+ */
+class CollapsedStrip : public QWidget {
+ public:
+  /** expand: 開く（引数は前にするタブ。-1 なら、折りたたむ前のタブのまま） */
+  CollapsedStrip(QTabWidget* tabs, std::function<void(int)> expand, QWidget* parent)
+      : QWidget(parent), tabs_(tabs), expand_(std::move(expand)) {
+    setMouseTracking(true);
+    setCursor(Qt::PointingHandCursor);
+    setToolTip(QStringLiteral("左の欄を開く"));
+    button_ = new QToolButton(this);
+    button_->setIcon(theme::icon(QStringLiteral("panel-left-open"), theme::muted));
+    button_->setIconSize(QSize(16, 16));
+    button_->setFixedSize(24, 24);
+    button_->setStyleSheet(QStringLiteral("QToolButton{padding:0}"));
+    button_->setToolTip(QStringLiteral("左の欄を開く"));
+    button_->setAccessibleName(QStringLiteral("左の欄を開く"));
+    connect(button_, &QToolButton::clicked, this, [this] { expand_(-1); });
+    hide();
+  }
+  QToolButton* button() const { return button_; }
+
+ protected:
+  void resizeEvent(QResizeEvent*) override { button_->move((width() - 1 - button_->width()) / 2, 5); }
+  void paintEvent(QPaintEvent*) override {
+    QPainter p(this);
+    p.fillRect(rect(), theme::panel);
+    p.fillRect(QRect(width() - 1, 0, 1, height()), theme::border);
+    const QFont f = stripFont();
+    p.setFont(f);
+    const QFontMetrics fm(f);
+    for (const auto& [r, i] : titleRects()) {
+      const bool current = i == tabs_->currentIndex();
+      const bool hover = i == hover_;
+      if (hover) {
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(theme::hover);
+        p.drawRoundedRect(QRectF(r).adjusted(3, 0, -3, 0), 4, 4);
+      }
+      if (current) p.fillRect(QRect(0, r.top() + 4, 2, r.height() - 8), theme::accent);  // 開いたときに前に出るタブ
+      const QColor fg = current || hover ? theme::text : theme::muted;
+      p.setPen(fg);
+      // 縦書き: 1 文字ずつ上から並べる。伸ばす音の「ー」は、縦の線にする
+      int y = r.top() + 6;
+      const int cx = (width() - 1) / 2;
+      for (const QChar c : tabs_->tabText(i)) {
+        if (c == QChar(0x30FC)) {
+          p.setRenderHint(QPainter::Antialiasing, false);
+          p.fillRect(QRect(cx, y + 2, 1, fm.height() - 4), fg);
+        } else {
+          p.drawText(QRect(0, y, width() - 1, fm.height()), Qt::AlignCenter, QString(c));
+        }
+        y += fm.height() - 1;
+      }
+    }
+  }
+  void mouseMoveEvent(QMouseEvent* e) override {
+    const int h = indexAt(e->position().toPoint());
+    if (h != hover_) {
+      hover_ = h;
+      update();
+    }
+  }
+  void leaveEvent(QEvent*) override {
+    hover_ = -1;
+    update();
+  }
+  void mousePressEvent(QMouseEvent* e) override {
+    if (e->button() == Qt::LeftButton) expand_(indexAt(e->position().toPoint()));
+  }
+
+ private:
+  QFont stripFont() const {
+    QFont f = font();
+    f.setPointSizeF(8.5);
+    return f;
+  }
+  /** タブの名前を書く所と、そのタブの番号 */
+  std::vector<std::pair<QRect, int>> titleRects() const {
+    const QFontMetrics fm(stripFont());
+    std::vector<std::pair<QRect, int>> out;
+    int y = 5 + button_->height() + 8;
+    for (int i = 0; i < tabs_->count(); ++i) {
+      const int h = 12 + int(tabs_->tabText(i).size()) * (fm.height() - 1);
+      out.push_back({QRect(0, y, width() - 1, h), i});
+      y += h + 4;
+    }
+    return out;
+  }
+  int indexAt(const QPoint& pos) const {
+    for (const auto& [r, i] : titleRects()) {
+      if (r.contains(pos)) return i;
+    }
+    return -1;
+  }
+
+  QTabWidget* tabs_;
+  std::function<void(int)> expand_;
+  QToolButton* button_;
+  int hover_ = -1;
+};
+
 /** 左・右の欄。ビューをタブで重ねて置く */
 class ViewArea : public QTabWidget {
  public:
@@ -201,6 +272,13 @@ class ViewArea : public QTabWidget {
     setMovable(false);  // 並べ替えも、ドラッグ（ViewTabBar）でまとめて扱う
     bar_->setExpanding(true);
     setAutoFillBackground(true);
+    if (side == Side::Left) {
+      // 左の欄を折りたたんだときに残る細い帯（押すと開く）。折りたたむ・開くボタンは、画面の一番上（メニューの「ファイル」の左隣）
+      strip_ = new CollapsedStrip(this, [this, manager](int index) {
+        manager->setLeftCollapsed(false);
+        if (index >= 0 && index < count()) setCurrentIndex(index);
+      }, this);
+    }
     // ドラッグしている間に、置ける欄を囲む枠
     overlay_ = new QWidget(this);
     overlay_->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -217,15 +295,40 @@ class ViewArea : public QTabWidget {
     if (on) overlay_->raise();
   }
   QSize minimumSizeHint() const override {
+    if (collapsed_) return QSize(kStripWidth, 0);
     // ビューが無い欄は、ドラッグしている間だけ、置き場所として出す
     if (count() == 0) return QSize(180, 0);
     return QTabWidget::minimumSizeHint();
+  }
+  bool collapsed() const { return collapsed_; }
+  CollapsedStrip* strip() const { return strip_; }
+  /** 折りたたむ（細い帯だけにする）/ 開く。中のタブとビューは、そのままの状態で隠しておく（開いたときに、同じ状態で戻る） */
+  void setCollapsed(bool on) {
+    if (!strip_ || on == collapsed_) return;
+    collapsed_ = on;
+    if (auto* stack = findChild<QStackedWidget*>(QString(), Qt::FindDirectChildrenOnly)) stack->setVisible(!on);
+    bar_->setVisible(!on);
+    if (on) {
+      setMinimumWidth(kStripWidth);
+      setMaximumWidth(kStripWidth);
+      strip_->setGeometry(rect());
+      strip_->show();
+      strip_->raise();
+    } else {
+      strip_->hide();
+      setMinimumWidth(0);
+      setMaximumWidth(QWIDGETSIZE_MAX);
+    }
+    if (overlay_->isVisible()) overlay_->raise();
+    QCoreApplication::postEvent(this, new QEvent(QEvent::LayoutRequest));  // タブと中身の置き場所を引き直す
+    updateGeometry();
   }
 
  protected:
   void resizeEvent(QResizeEvent* e) override {
     QTabWidget::resizeEvent(e);
     overlay_->setGeometry(rect());
+    if (strip_) strip_->setGeometry(rect());
   }
   void paintEvent(QPaintEvent* e) override {
     QTabWidget::paintEvent(e);
@@ -243,6 +346,8 @@ class ViewArea : public QTabWidget {
   Side side_;
   ViewTabBar* bar_;
   QWidget* overlay_;
+  CollapsedStrip* strip_ = nullptr;
+  bool collapsed_ = false;
 };
 
 // ---- 保存の形 ---------------------------------------------------------------------
@@ -362,8 +467,8 @@ void PerspectiveManager::captureWidths() {
   if (!splitter_ || !splitter_->isVisible()) return;
   const QList<int> s = splitter_->sizes();
   if (s.size() <= std::max({leftIndex_, centerIndex_, rightIndex_})) return;
-  // ビューの無い欄（ドラッグしている間の置き場所）の幅は覚えない
-  if (!left_->isHidden() && left_->count() > 0 && s[leftIndex_] > 0) leftWidth_ = s[leftIndex_];
+  // ビューの無い欄（ドラッグしている間の置き場所）と、折りたたんでいる左の欄（開いたときに戻す幅を残す）の幅は覚えない
+  if (!leftCollapsed_ && !left_->isHidden() && left_->count() > 0 && s[leftIndex_] > 0) leftWidth_ = s[leftIndex_];
   if (!right_->isHidden() && right_->count() > 0 && s[rightIndex_] > 0) rightWidth_ = s[rightIndex_];
 }
 
@@ -398,6 +503,7 @@ void PerspectiveManager::apply(const PerspectiveLayout& layout) {
   place(right_, layout.right, layout.rightCurrent);
   leftWidth_ = layout.leftWidth;
   rightWidth_ = layout.rightWidth;
+  left_->setCollapsed(leftCollapsed_);  // 折りたたんでいるかは、並びを変えてもそのまま
   applying_ = false;
   updateAreaVisibility();
   applySizes();
@@ -405,6 +511,7 @@ void PerspectiveManager::apply(const PerspectiveLayout& layout) {
 
 void PerspectiveManager::updateAreaVisibility() {
   for (ViewArea* a : {left_, right_}) a->setVisible(dragging_ || a->count() > 0);
+  emit leftViewsChanged();
 }
 
 void PerspectiveManager::applySizes() {
@@ -419,7 +526,8 @@ void PerspectiveManager::applySizes() {
   for (int i = 0; i < s.size(); ++i) {
     if (i != leftIndex_ && i != centerIndex_ && i != rightIndex_) others += s[i];
   }
-  s[leftIndex_] = left_->isHidden() ? 0 : leftWidth_;
+  // 折りたたんでいる左の欄は細い帯の幅だけ（空いた幅は、プレビューが使う）
+  s[leftIndex_] = left_->isHidden() ? 0 : leftCollapsed_ ? kStripWidth : leftWidth_;
   s[rightIndex_] = right_->isHidden() ? 0 : rightWidth_;
   s[centerIndex_] = std::max(200, total - s[leftIndex_] - s[rightIndex_] - others);
   splitter_->setSizes(s);
@@ -428,6 +536,8 @@ void PerspectiveManager::applySizes() {
 void PerspectiveManager::moveView(const QString& id, Side side, int index) {
   const View* v = view(id);
   if (!v) return;
+  // 折りたたんでいる左の欄へ置くときは、開いてから（置いたビューが見えるように）
+  if (side == Side::Left && leftCollapsed_) setLeftCollapsed(false);
   ViewArea* to = areaOf(side);
   ViewArea* from = areaContaining(id);
   if (index < 0 || index > to->count()) index = to->count();
@@ -470,10 +580,33 @@ void PerspectiveManager::showView(const QString& id) {
   const View* v = view(id);
   if (!v) return;
   if (ViewArea* a = areaContaining(id)) {
+    if (a == left_ && leftCollapsed_) setLeftCollapsed(false);
     a->setCurrentWidget(v->widget);
     return;
   }
   moveView(id, v->home);
+}
+
+bool PerspectiveManager::leftHasViews() const {
+  return left_->count() > 0;
+}
+
+void PerspectiveManager::setLeftCollapsed(bool on) {
+  if (on == leftCollapsed_) return;
+  if (on) captureWidths();  // 開いたときに、今の幅に戻す
+  // 折りたたむ欄の中で文字を入力していたら、入力先を帯の「開く」ボタンへ移す（隠れた所に文字が入らないように）。
+  // 開くときに帯のボタンにいたら、欄のタブへ移す
+  QWidget* focus = QApplication::focusWidget();
+  const bool focusInside = focus && left_->isAncestorOf(focus);
+  leftCollapsed_ = on;
+  left_->setCollapsed(on);
+  applySizes();
+  if (focusInside) {
+    if (on) left_->strip()->button()->setFocus(Qt::OtherFocusReason);
+    else left_->setFocus(Qt::OtherFocusReason);
+  }
+  scheduleSave();  // 次に起動したときも、同じ状態にする
+  emit leftCollapsedChanged(on);
 }
 
 // ---- ドラッグ -------------------------------------------------------------------------
@@ -547,12 +680,6 @@ void PerspectiveManager::endDrag(const QPoint& globalPos, bool drop) {
   // 置き場所として出していた、ビューの無い欄をしまう
   updateAreaVisibility();
   applySizes();
-}
-
-void PerspectiveManager::closeTab(ViewArea* area, int index) {
-  if (dragging_) return;
-  const QString id = idOf(area->widget(index));
-  if (!id.isEmpty()) closeView(id);
 }
 
 void PerspectiveManager::execTabMenu(ViewArea* area, int index, const QPoint& globalPos) {
@@ -730,6 +857,7 @@ void PerspectiveManager::readStore() {
   }
   const QString cur = root.value(QStringLiteral("current")).toString();
   if (isKnown(cur)) current_ = cur;
+  leftCollapsed_ = root.value(QStringLiteral("leftCollapsed")).toBool(false);
 }
 
 void PerspectiveManager::writeStore() {
@@ -737,7 +865,10 @@ void PerspectiveManager::writeStore() {
   for (const auto& [n, l] : saved_) saved.append(QJsonObject{{QStringLiteral("name"), n}, {QStringLiteral("layout"), toJson(l)}});
   QJsonObject st;
   for (auto it = state_.cbegin(); it != state_.cend(); ++it) st.insert(it.key(), toJson(it.value()));
-  const QJsonObject root{{QStringLiteral("current"), current_}, {QStringLiteral("saved"), saved}, {QStringLiteral("state"), st}};
+  const QJsonObject root{{QStringLiteral("current"), current_},
+                         {QStringLiteral("saved"), saved},
+                         {QStringLiteral("state"), st},
+                         {QStringLiteral("leftCollapsed"), leftCollapsed_}};
   QDir().mkpath(QFileInfo(storePath()).absolutePath());
   QSaveFile f(storePath());
   if (!f.open(QIODevice::WriteOnly)) return;

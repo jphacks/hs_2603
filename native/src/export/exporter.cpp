@@ -248,7 +248,9 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
   }
   std::vector<PlannedText> texts;
   int i = 0;
-  for (const auto& t : p.texts) {
+  // 下の段の文字から重ねる（タイムラインの上の段の文字ほど手前。プレビューと同じ順）
+  for (const size_t index : textPaintOrder(p.texts)) {
+    const TextItem& t = p.texts[index];
     if (t.start >= layout.total || t.text.trimmed().isEmpty()) continue;
     const QString png = work_->filePath(QStringLiteral("text-%1.png").arg(i++));
     PlannedText pt;

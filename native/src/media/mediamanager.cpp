@@ -1,8 +1,10 @@
 #include "media/mediamanager.h"
 
+#include <QCollator>
 #include <QCryptographicHash>
 #include <QDataStream>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
@@ -63,7 +65,16 @@ static void onUi(std::function<void()> fn) {
   QMetaObject::invokeMethod(&media(), std::move(fn), Qt::QueuedConnection);
 }
 
-void MediaManager::importPaths(const QStringList& paths, bool addToTimeline, std::optional<int> index, std::optional<double> at) {
+/** 一覧にあるメディアのファイル（同じファイルは使い回す） */
+static std::map<QString, QString> existingAssets() {
+  std::map<QString, QString> existing;
+  for (const auto& [id, a] : editor().assets()) {
+    if (a.status != AssetStatus::Error) existing[QFileInfo(a.path).absoluteFilePath()] = id;
+  }
+  return existing;
+}
+
+void MediaManager::importPaths(const QStringList& paths, bool addToTimeline, std::optional<int> index, std::optional<double> at, const QString& note) {
   for (const auto& p : paths) {
     if (p.endsWith(QStringLiteral(".kvproj"), Qt::CaseInsensitive)) {
       openProject(p);
@@ -71,18 +82,86 @@ void MediaManager::importPaths(const QStringList& paths, bool addToTimeline, std
     }
   }
   // 同じファイルがすでに一覧にあれば使い回す
-  std::map<QString, QString> existing;
-  for (const auto& [id, a] : editor().assets()) {
-    if (a.status != AssetStatus::Error) existing[QFileInfo(a.path).absoluteFilePath()] = id;
-  }
+  const std::map<QString, QString> existing = existingAssets();
   // 読み込みの途中でタブを切り替えたり閉じたりしても、取り込んだタブにメディアを入れる
   const int workspace = editor().workspaceUid(editor().workspaceIndex());
   ++pending_;
-  pool_.start([this, paths, existing, addToTimeline, index, at, workspace] {
+  pool_.start([this, paths, existing, addToTimeline, index, at, workspace, note] {
+    runImport(paths, existing, addToTimeline, index, at, workspace, note, nullptr);
+  });
+}
+
+bool MediaManager::importFolder(const QString& dir, bool recursive, const QStringList& exts) {
+  if (batchRunning_) {
+    editor().toast(QStringLiteral("フォルダから読み込んでいる途中です。終わってから、もう一度選んでください"));
+    return false;
+  }
+  batchRunning_ = true;
+  cancel_ = false;
+  const std::map<QString, QString> existing = existingAssets();
+  const int workspace = editor().workspaceUid(editor().workspaceIndex());
+  ++pending_;
+  emit importProgress(0, 0);  // ファイルを探している途中
+  pool_.start([this, dir, recursive, exts, existing, workspace] {
+    // ファイルを探す（画面を止めないよう、裏で）。隠しファイル・システムのファイルは入れない。ショートカット（リンク）はたどらない
+    BatchReport report;
+    QStringList files;
+    QDirIterator it(dir, QDir::Files | QDir::NoDotAndDotDot, recursive ? QDirIterator::Subdirectories : QDirIterator::NoIteratorFlags);
+    while (it.hasNext()) {
+      if (cancel_) {
+        report.canceled = true;
+        break;
+      }
+      const QString f = it.next();
+      if (!exts.contains(QFileInfo(f).suffix().toLower())) {
+        ++report.unsupported;  // 対応していない形式は飛ばす
+        continue;
+      }
+      if (files.size() >= kMaxFolderFiles) {
+        report.truncated = true;
+        break;
+      }
+      files << f;
+    }
+    // 名前の順（「2」は「10」より前）。サブフォルダのファイルは、フォルダごとにまとまる
+    QCollator collator;
+    collator.setNumericMode(true);
+    collator.setCaseSensitivity(Qt::CaseInsensitive);
+    std::sort(files.begin(), files.end(), [&](const QString& a, const QString& b) { return collator.compare(a, b) < 0; });
+    report.found = int(files.size());
+    runImport(report.canceled ? QStringList() : files, existing, false, std::nullopt, std::nullopt, workspace, QString(), &report);
+  });
+  return true;
+}
+
+void MediaManager::cancelImport() {
+  cancel_ = true;
+}
+
+void MediaManager::runImport(const QStringList& paths, const std::map<QString, QString>& existing, bool addToTimeline, std::optional<int> index,
+                             std::optional<double> at, int workspace, const QString& note, BatchReport* batch) {
+  {
     std::vector<QString> ids;
     std::vector<QString> reused;  // すでに登録してあった素材（同じファイルは 1 つにまとめる）
     int created = 0;
+    const int total = int(paths.size());
+    int done = 0;
+    QElapsedTimer sinceProgress;
+    sinceProgress.start();
+    if (batch) onUi([this, total] { emit importProgress(0, total); });
     for (const QString& raw : paths) {
+      // まとめて読み込んでいるときは、途中でやめられる。進み具合は、1 秒に 20 回まで知らせる
+      if (batch) {
+        if (cancel_) {
+          batch->canceled = true;
+          break;
+        }
+        if (sinceProgress.elapsed() >= 50) {
+          sinceProgress.restart();
+          onUi([this, done, total] { emit importProgress(done, total); });
+        }
+      }
+      ++done;
       const QString path = QFileInfo(raw).absoluteFilePath();
       auto it = existing.find(path);
       if (it != existing.end()) {
@@ -93,6 +172,11 @@ void MediaManager::importPaths(const QStringList& paths, bool addToTimeline, std
       ProbeInfo info;
       QString error;
       if (!probeMedia(path, info, error)) {
+        // まとめて読み込むときは、1 件ずつ知らせず、最後にまとめて数を知らせる
+        if (batch) {
+          ++batch->failed;
+          continue;
+        }
         const QString name = QFileInfo(path).fileName();
         onUi([name, error] { editor().toast(QStringLiteral("%1: %2").arg(name, error), ToastKind::Error); });
         continue;
@@ -109,23 +193,28 @@ void MediaManager::importPaths(const QStringList& paths, bool addToTimeline, std
       a.status = AssetStatus::Loading;
       ids.push_back(a.id);
       ++created;
+      if (batch) ++(a.kind == AssetKind::Audio ? batch->audio : batch->visual);
       onUi([this, a, workspace] {
         editor().addAsset(a, workspace);
         // 読み込み中にそのタブが閉じられていたら、あとの処理はしない
         if (editor().hasAsset(a.id)) prepare(a);
       });
     }
-    onUi([this, ids, reused, created, addToTimeline, index, at, workspace] {
+    const std::optional<BatchReport> report = batch ? std::optional<BatchReport>(*batch) : std::nullopt;
+    onUi([this, ids, reused, created, addToTimeline, index, at, workspace, note, report] {
       const int target = editor().indexOfWorkspaceUid(workspace);
       // 一覧から外してあった素材（元に戻す用に情報だけ残っていたもの）を選び直したときは、一覧に戻す
       if (target >= 0) {
         for (const QString& id : reused) {
           if (const Asset* known = editor().asset(id); known && target == editor().workspaceIndex()) editor().addAsset(*known, workspace);
         }
-        if (!addToTimeline && !ids.empty()) {
+        if (report) {
+          editor().toast(batchMessage(*report, int(reused.size())), created > 0 ? ToastKind::Success : ToastKind::Info);
+        } else if (!addToTimeline && !ids.empty()) {
           // 一覧に登録するだけのとき（オーディオ一覧の「追加」）は、結果を知らせる
-          editor().toast(created == 0 ? QStringLiteral("すでに登録されています") : QStringLiteral("%1 件を登録しました").arg(created),
-                         created == 0 ? ToastKind::Info : ToastKind::Success);
+          QString message = created == 0 ? QStringLiteral("すでに登録されています") : QStringLiteral("%1 件を登録しました").arg(created);
+          if (created > 0 && !note.isEmpty()) message += QStringLiteral("。") + note;
+          editor().toast(message, created == 0 ? ToastKind::Info : ToastKind::Success);
         }
       }
       if (addToTimeline && !ids.empty() && target >= 0) {
@@ -137,9 +226,34 @@ void MediaManager::importPaths(const QStringList& paths, bool addToTimeline, std
           editor().toast(QStringLiteral("メディアを「%1」の一覧に追加しました").arg(editor().workspaceName(target)));
         }
       }
+      if (report) {
+        batchRunning_ = false;
+        emit importFinished();
+      }
       --pending_;
     });
-  });
+  }
+}
+
+QString MediaManager::batchMessage(const BatchReport& r, int reused) {
+  QStringList parts;
+  const int created = r.visual + r.audio;
+  if (created > 0) {
+    QStringList kinds;
+    if (r.visual > 0) kinds << QStringLiteral("動画・写真 %1 件").arg(r.visual);
+    if (r.audio > 0) kinds << QStringLiteral("オーディオ %1 件").arg(r.audio);
+    parts << QStringLiteral("フォルダから %1 件を登録しました（%2）").arg(created).arg(kinds.join(QStringLiteral("・")));
+  } else if (reused > 0) {
+    parts << QStringLiteral("フォルダのファイルは、すでに登録されています");
+  } else if (!r.canceled) {
+    parts << QStringLiteral("このフォルダには、追加できる動画・写真・オーディオがありません");
+  }
+  if (created > 0 && reused > 0) parts << QStringLiteral("登録済みの %1 件はそのままです").arg(reused);
+  if (r.unsupported > 0) parts << QStringLiteral("対応していない形式の %1 件は飛ばしました").arg(r.unsupported);
+  if (r.failed > 0) parts << QStringLiteral("読み込めなかったファイルが %1 件あります").arg(r.failed);
+  if (r.truncated) parts << QStringLiteral("ファイルが多いため、最初の %1 件だけを読み込みました").arg(kMaxFolderFiles);
+  if (r.canceled) parts << QStringLiteral("途中でやめました");
+  return parts.join(QStringLiteral("。"));
 }
 
 void MediaManager::prepare(const Asset& a) {

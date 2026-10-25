@@ -102,6 +102,26 @@ class NumberSpin : public QDoubleSpinBox {
 };
 
 /**
+ * 線（バー）とつまみの上だけが反応するスライダー。線の上を押すと、その位置へつまみが動き、そのままドラッグできる。
+ * つまみは、そのままなめらかにドラッグできる。線とつまみの周りの余白を押しても、値は変わらない
+ * （細い線でも、上下につまみの高さぶん（最低 12px）は押せる）。ホイール・キーの操作は、これまでどおり
+ */
+class LineSlider : public QSlider {
+ public:
+  using QSlider::QSlider;
+  /** その位置（スライダーの座標）が、線かつまみの上か */
+  bool hitsLine(const QPoint& pos) const;
+
+ protected:
+  void mousePressEvent(QMouseEvent* e) override;
+  void mouseDoubleClickEvent(QMouseEvent* e) override;
+
+ private:
+  QRect handleRect() const;
+  QRect grooveRect() const;
+};
+
+/**
  * 見出し・値の表示つきのスライダー。ダブルクリックで基準値に戻す。
  * ホイール（スライダーや数値の上で回す）と矢印キー（数値をクリックするか Tab で選んだとき）でも値を変えられる。
  */
@@ -226,6 +246,14 @@ void makeTextPresetDraggable(QToolButton* button, const TextPreset& preset);
 void execTemplateMenu(QWidget* parent, const QString& templateId, const QPoint& globalPos);
 /** テキスト textId の見た目を、名前を聞いてマイテンプレートに保存する（右の設定欄と、右クリックのメニューから） */
 void saveTextAsTemplate(QWidget* parent, const QString& textId);
+
+// ---- アニメーションのマイテンプレート（テキストのキーフレームと登場のアニメーションだけ。文字・見た目は保存しない） ----
+/** テキスト textId のアニメーションを、名前を聞いてマイテンプレートに保存する。保存したら true */
+bool saveAnimTemplate(QWidget* parent, const QString& textId);
+/** マイテンプレートを、選んでいるテキストに当てはめて、結果を知らせる */
+void applyAnimTemplateWithToast(const QString& templateId);
+/** マイテンプレートのメニュー（適用・名前を変更・削除） */
+void execAnimTemplateMenu(QWidget* parent, const QString& templateId, const QPoint& globalPos);
 /** ホイールでは値を変えない。ホイールは親に渡すので、パネルはそのままスクロールできる */
 void disableWheel(QWidget* w);
 

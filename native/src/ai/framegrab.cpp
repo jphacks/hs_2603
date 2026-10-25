@@ -125,7 +125,9 @@ void grabFrames(const ProjectData& project, const std::vector<double>& times, in
         job.fade = 1 - fadeFactor(local, cur->duration, c.fadeIn, c.fadeOut);
       }
     }
-    for (const TextItem& item : project.texts) {
+    // 下の段の文字から描く（上の段の文字ほど手前。プレビュー・書き出しと同じ順）
+    for (const size_t index : textPaintOrder(project.texts)) {
+      const TextItem& item = project.texts[index];
       if (isTextVisible(item, job.t) && !item.text.isEmpty()) job.texts.push_back(item);
     }
     jobs.push_back(std::move(job));

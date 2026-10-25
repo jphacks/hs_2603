@@ -34,6 +34,7 @@ set(SOURCES
   src/core/filters.h src/core/filters.cpp
   src/core/textstyles.h src/core/textstyles.cpp
   src/core/texttemplates.h src/core/texttemplates.cpp
+  src/core/animtemplates.h src/core/animtemplates.cpp
   src/core/fontlibrary.h src/core/fontlibrary.cpp
   src/core/editor.h src/core/editor.cpp
   src/core/projectio.h src/core/projectio.cpp
@@ -42,6 +43,7 @@ set(SOURCES
   src/media/videosource.h src/media/videosource.cpp
   src/media/audioengine.h src/media/audioengine.cpp
   src/media/mediamanager.h src/media/mediamanager.cpp
+  src/media/webimage.h src/media/webimage.cpp
   src/media/audiopreview.h src/media/audiopreview.cpp
   src/render/imageops.h src/render/imageops.cpp
   src/render/textrender.h src/render/textrender.cpp

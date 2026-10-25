@@ -130,6 +130,14 @@ class AnimPanel : public QWidget {
   QPushButton* copy_;
   QPushButton* paste_;
   QPushButton* clear_;
+
+  // ---- マイテンプレート（保存したテキストのアニメーション。文字を選んでいるときだけ出す） ----
+  /** 保存したテンプレートの一覧を作り直す */
+  void rebuildMyTemplates();
+  QWidget* myBox_ = nullptr;
+  QWidget* myList_ = nullptr;
+  QLabel* myEmpty_ = nullptr;
+  QPushButton* mySave_ = nullptr;
 };
 
 }  // namespace kv

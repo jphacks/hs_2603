@@ -40,5 +40,7 @@
   <file>icons/message-square.svg</file>
   <file>icons/send.svg</file>
   <file>icons/stop.svg</file>
+  <file>icons/panel-left-close.svg</file>
+  <file>icons/panel-left-open.svg</file>
 </qresource>
 </RCC>

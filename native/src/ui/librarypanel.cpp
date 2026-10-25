@@ -2,19 +2,26 @@
 
 #include <QButtonGroup>
 #include <QContextMenuEvent>
+#include <QDir>
 #include <QFileDialog>
 #include <QGridLayout>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QPainter>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QMouseEvent>
 #include <QPainterPath>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QStandardPaths>
 #include <QStyledItemDelegate>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <functional>
 
 #include "ai/account.h"
 #include "ai/workshop.h"
@@ -56,6 +63,36 @@ void LibraryPanel::pickAndImport(QWidget* parent, bool audioOnly, bool addToTime
   // 登録の処理はメディアもオーディオも同じ（同じファイルは 1 つにまとめられる）。違うのは、タイムラインに置くかどうかだけ
   if (audioOnly) media().importPaths(files, addToTimeline, std::nullopt, editor().currentTime());
   else media().importPaths(files, addToTimeline);
+}
+
+void LibraryPanel::pickFolderAndImport(QWidget* parent, bool audioOnly) {
+  if (media().batchRunning()) {
+    editor().toast(QStringLiteral("フォルダから読み込んでいる途中です。終わってから、もう一度選んでください"));
+    return;
+  }
+  static QString lastDir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+  QWidget* owner = parent ? parent->window() : nullptr;
+  const QString title = audioOnly ? QStringLiteral("オーディオのフォルダを選択") : QStringLiteral("メディアのフォルダを選択");
+  const QString dir = QFileDialog::getExistingDirectory(owner, title, lastDir);
+  if (dir.isEmpty()) return;
+  lastDir = dir;
+  // サブフォルダがあるときは、その中のファイルも追加するかを聞く
+  bool recursive = false;
+  if (!QDir(dir).entryList(QDir::Dirs | QDir::NoDotAndDotDot).isEmpty()) {
+    QMessageBox box(QMessageBox::Question, title,
+                    QStringLiteral("「%1」の中には、フォルダがあります。\nサブフォルダの中のファイルも追加しますか？").arg(QDir::toNativeSeparators(dir)),
+                    QMessageBox::NoButton, owner);
+    QPushButton* only = box.addButton(QStringLiteral("このフォルダだけ"), QMessageBox::AcceptRole);
+    QPushButton* sub = box.addButton(QStringLiteral("サブフォルダも含める"), QMessageBox::AcceptRole);
+    QPushButton* cancel = box.addButton(QStringLiteral("キャンセル"), QMessageBox::RejectRole);
+    box.setDefaultButton(only);
+    box.setEscapeButton(cancel);
+    box.exec();
+    if (box.clickedButton() == sub) recursive = true;
+    else if (box.clickedButton() != only) return;
+  }
+  // 動画・写真はメディアの一覧、音声はオーディオの一覧に入る（ファイル名はそのまま）。対応していない形式は飛ばす
+  media().importFolder(dir, recursive, audioOnly ? kAudioExts : kVideoExts + kImageExts + kAudioExts);
 }
 
 // ---- AssetList --------------------------------------------------------------
@@ -240,17 +277,31 @@ AssetList::AssetList(Kind kind, QWidget* parent) : QListWidget(parent), kind_(ki
     const Asset* a = editor().asset(id);
     if (a && a->status != AssetStatus::Error && a->status != AssetStatus::Missing) editor().addToTimeline({id});
   });
+  // 登録・サムネイルの知らせが続けて来ても（フォルダからまとめて登録しているときなど）、作り直すのは少しあとにまとめて 1 回
+  rebuildTimer_ = new QTimer(this);
+  rebuildTimer_->setSingleShot(true);
+  rebuildTimer_->setInterval(60);
+  connect(rebuildTimer_, &QTimer::timeout, this, &AssetList::rebuild);
   Editor& ed = editor();
-  connect(&ed, &Editor::assetsChanged, this, &AssetList::rebuild);
-  if (kind_ == Kind::Media) connect(&ed, &Editor::thumbsChanged, this, &AssetList::rebuild);
+  connect(&ed, &Editor::assetsChanged, this, &AssetList::scheduleRebuild);
+  if (kind_ == Kind::Media) connect(&ed, &Editor::thumbsChanged, this, &AssetList::scheduleRebuild);
+  rebuild();
+}
+
+void AssetList::scheduleRebuild() {
+  if (!rebuildTimer_->isActive()) rebuildTimer_->start();
 }
 
 void AssetList::rebuild() {
+  rebuildTimer_->stop();
   const Editor& ed = editor();
   const qreal dpr = devicePixelRatioF();
   QStringList selected;
   for (auto* it : selectedItems()) selected << it->data(Qt::UserRole).toString();
+  const int scroll = verticalScrollBar()->value();
+  setUpdatesEnabled(false);
   clear();
+  std::map<QString, Card> cards;
   for (const QString& id : ed.assetOrder()) {
     const Asset* a = ed.asset(id);
     if (!a) continue;
@@ -266,12 +317,31 @@ void AssetList::rebuild() {
     }
     const auto* thumbs = ed.thumbs(id);
     const QImage* thumb = thumbs && !thumbs->empty() ? &thumbs->front() : nullptr;
-    auto* item = new QListWidgetItem(QIcon(cardPixmap(*a, thumb, dpr)), a->name, this);
+    // 絵が変わっていないカードは、前に描いたものを使う（たくさん並んでいても、作り直しが重くならない）
+    Card card;
+    card.status = int(a->status);
+    card.duration = a->duration;
+    card.thumb = thumb ? thumb->cacheKey() : 0;
+    card.dpr = dpr;
+    const auto old = cards_.find(id);
+    if (old != cards_.end() && old->second.status == card.status && old->second.duration == card.duration && old->second.thumb == card.thumb &&
+        old->second.dpr == card.dpr) {
+      card.icon = old->second.icon;
+    } else {
+      card.icon = QIcon(cardPixmap(*a, thumb, dpr));
+    }
+    auto* item = new QListWidgetItem(card.icon, a->name, this);
+    cards[id] = card;
     item->setData(Qt::UserRole, id);
     item->setToolTip(a->name);
     item->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     if (selected.contains(id)) item->setSelected(true);
   }
+  cards_ = std::move(cards);  // 一覧から無くなったものの絵は手放す
+  // 作り直しても、見ていた位置のままにする（並べ直してから、スクロールの位置を戻す）
+  doItemsLayout();
+  verticalScrollBar()->setValue(scroll);
+  setUpdatesEnabled(true);
 }
 
 QStringList AssetList::mimeTypes() const {
@@ -374,16 +444,112 @@ void AssetList::paintEvent(QPaintEvent* e) {
 // 欄の幅をこれより狭くしない（メディアのカードが 1 列は入る幅）
 static constexpr int kViewMinWidth = 220;
 
+/**
+ * 幅が足りないときは短い名前に、さらに足りなければアイコンだけにするボタン（名前が切れて読めなくならないように）。
+ * 幅は並べる側で決める（欄が狭くても、横に並べられる）
+ */
+class FitButton : public QPushButton {
+ public:
+  FitButton(const QIcon& icon, const QString& longText, const QString& shortText, QWidget* parent)
+      : QPushButton(icon, longText, parent), long_(longText), short_(shortText) {
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    setMinimumWidth(40);
+    // 左右の余白は少なめにして、なるべく元の名前のまま出す（名前は中央に置くので、広いときの見た目は変わらない）
+    setStyleSheet(QStringLiteral("QPushButton{padding-left:4px;padding-right:4px}"));
+    setAccessibleName(longText);  // アイコンだけのときも、読み上げでは名前がわかる
+  }
+
+ protected:
+  void resizeEvent(QResizeEvent* e) override {
+    QPushButton::resizeEvent(e);
+    fit();
+  }
+
+ private:
+  void fit() {
+    const QFontMetrics fm(font());
+    // 名前のほかに要る幅（アイコン・余白・枠）。名前が出ているときに測っておく
+    if (!text().isEmpty()) overhead_ = std::max(overhead_, QPushButton::sizeHint().width() - fm.horizontalAdvance(text()));
+    QString next;
+    if (width() >= overhead_ + fm.horizontalAdvance(long_)) next = long_;
+    else if (width() >= overhead_ + fm.horizontalAdvance(short_)) next = short_;
+    if (next != text()) setText(next);
+  }
+  QString long_;
+  QString short_;
+  int overhead_ = 0;
+};
+
+/** 「ファイルを選択」「フォルダを選択」のボタンを横に並べた行 */
+static QWidget* makeAddRow(QWidget* parent, const QString& fileTip, const QString& folderTip, std::function<void()> pickFiles,
+                           std::function<void()> pickFolder) {
+  auto* row = new QWidget(parent);
+  auto* h = new QHBoxLayout(row);
+  h->setContentsMargins(0, 0, 0, 0);
+  h->setSpacing(4);
+  auto* files = new FitButton(theme::icon(QStringLiteral("plus")), QStringLiteral("ファイルを選択"), QStringLiteral("ファイル"), row);
+  auto* folder = new FitButton(theme::icon(QStringLiteral("folder-open")), QStringLiteral("フォルダを選択"), QStringLiteral("フォルダ"), row);
+  files->setToolTip(fileTip);
+  folder->setToolTip(folderTip);
+  for (QPushButton* b : {static_cast<QPushButton*>(files), static_cast<QPushButton*>(folder)}) {
+    b->setFocusPolicy(Qt::TabFocus);
+    b->setAccessibleDescription(b->toolTip());
+    h->addWidget(b, 1);
+  }
+  QObject::connect(files, &QPushButton::clicked, row, std::move(pickFiles));
+  QObject::connect(folder, &QPushButton::clicked, row, std::move(pickFolder));
+  return row;
+}
+
+/** フォルダからまとめて読み込んでいる間の、進み具合（件数・バー・やめるボタン） */
+static QWidget* makeImportProgress(QWidget* parent) {
+  auto* box = new QWidget(parent);
+  auto* v = new QVBoxLayout(box);
+  v->setContentsMargins(0, 0, 0, 0);
+  v->setSpacing(4);
+  auto* top = new QHBoxLayout();
+  top->setSpacing(4);
+  auto* label = makeLabel(QString(), "muted", box);
+  auto* stop = new QToolButton(box);
+  stop->setIcon(theme::icon(QStringLiteral("x"), theme::muted));
+  stop->setIconSize(QSize(12, 12));
+  stop->setToolTip(QStringLiteral("読み込みをやめる（そこまでに登録したものは残ります）"));
+  stop->setAccessibleName(QStringLiteral("フォルダからの読み込みをやめる"));
+  top->addWidget(label, 1);
+  top->addWidget(stop);
+  v->addLayout(top);
+  auto* bar = new QProgressBar(box);
+  bar->setTextVisible(false);
+  bar->setAccessibleName(QStringLiteral("フォルダからの読み込みの進み具合"));
+  v->addWidget(bar);
+  box->hide();
+  QObject::connect(&media(), &MediaManager::importProgress, box, [box, label, bar](int done, int total) {
+    box->show();
+    if (total <= 0) {
+      label->setText(QStringLiteral("フォルダの中を調べています…"));
+      bar->setRange(0, 0);  // 数がわかるまでは、動き続けるバー
+      return;
+    }
+    label->setText(QStringLiteral("読み込み中… %1 / %2 件").arg(done).arg(total));
+    bar->setRange(0, total);
+    bar->setValue(done);
+  });
+  QObject::connect(&media(), &MediaManager::importFinished, box, [box] { box->hide(); });
+  QObject::connect(stop, &QToolButton::clicked, box, [] { media().cancelImport(); });
+  return box;
+}
+
 QWidget* LibraryPanel::createMediaView(QWidget* parent) {
   auto* mediaPage = new QWidget(parent);
   mediaPage->setMinimumWidth(kViewMinWidth);
   auto* mv = new QVBoxLayout(mediaPage);
   mv->setContentsMargins(10, 10, 6, 0);
   mv->setSpacing(10);
-  auto* addBtn = new QPushButton(theme::icon(QStringLiteral("plus")), QStringLiteral("メディアを追加"), mediaPage);
-  addBtn->setFocusPolicy(Qt::TabFocus);
-  QObject::connect(addBtn, &QPushButton::clicked, mediaPage, [mediaPage] { pickAndImport(mediaPage); });
-  mv->addWidget(addBtn);
+  // ファイルを選ぶ（これまでどおり、選んだものはタイムラインにも置く）/ フォルダを選ぶ（中のものをまとめて一覧に登録する）
+  mv->addWidget(makeAddRow(mediaPage, QStringLiteral("動画・写真・音声のファイルを選んで追加します（タイムラインにも置きます）"),
+                           QStringLiteral("フォルダの中の動画・写真・音声を、まとめて一覧に登録します（動画・写真はメディア、音声はオーディオの一覧へ）"),
+                           [mediaPage] { pickAndImport(mediaPage); }, [mediaPage] { pickFolderAndImport(mediaPage, false); }));
+  mv->addWidget(makeImportProgress(mediaPage));
   mv->addWidget(new AssetList(AssetList::Kind::Media, mediaPage), 1);
   return mediaPage;
 }
@@ -395,11 +561,11 @@ QWidget* LibraryPanel::createAudioView(QWidget* parent) {
   auto* av = new QVBoxLayout(audioPage);
   av->setContentsMargins(10, 10, 6, 0);
   av->setSpacing(10);
-  auto* addAudio = new QPushButton(theme::icon(QStringLiteral("plus")), QStringLiteral("オーディオを追加"), audioPage);
-  addAudio->setFocusPolicy(Qt::TabFocus);
   // 一覧に登録するだけ（タイムラインには置かない）。置くのは、一覧からドラッグするか、ダブルクリック
-  QObject::connect(addAudio, &QPushButton::clicked, audioPage, [audioPage] { pickAndImport(audioPage, true, false); });
-  av->addWidget(addAudio);
+  av->addWidget(makeAddRow(audioPage, QStringLiteral("音楽・効果音・ナレーションのファイルを選んで、一覧に登録します"),
+                           QStringLiteral("フォルダの中の音声ファイルを、まとめて一覧に登録します"),
+                           [audioPage] { pickAndImport(audioPage, true, false); }, [audioPage] { pickFolderAndImport(audioPage, true); }));
+  av->addWidget(makeImportProgress(audioPage));
   av->addWidget(new AssetList(AssetList::Kind::Audio, audioPage), 1);
   return audioPage;
 }

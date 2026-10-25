@@ -27,12 +27,6 @@ class TimelineView : public QAbstractScrollArea {
     std::map<QString, int> lane;
     int count = 1;
   };
-  /** 前回のオーディオの段の割り当て（段と、そのときの時間）。並べ直すときに、動いていない物の段を変えないために使う */
-  struct LaneMemo {
-    int lane = 0;
-    double start = 0;
-    double end = 0;
-  };
 
   explicit TimelineView(QWidget* parent = nullptr);
   void fitAll();
@@ -72,7 +66,7 @@ class TimelineView : public QAbstractScrollArea {
  private:
   /** Overlay は重ねるトラックの段（テキストの段とビデオの段の間。下の段ほどメインに近く、上の段ほど前に重なる） */
   enum class Row { None, Ruler, Text, Overlay, Video, Audio };
-  enum class Drag { None, Scrub, ClipMove, ClipTrim, ItemMove, ItemTrim, KeyMove, Fade, Range, RangeEdge, TrackResize };
+  enum class Drag { None, Scrub, ClipMove, ClipTrim, ItemMove, ItemTrim, KeyMove, Fade, Range, RangeEdge, TrackResize, LaneSwap };
   struct Hit {
     Row row = Row::None;
     Selection::Type type = Selection::None;
@@ -92,8 +86,14 @@ class TimelineView : public QAbstractScrollArea {
   int textH() const;
   int overlayH() const;
   int audioH() const;
-  /** テキストをドラッグしているときの、縦の位置にあたる段（テキストの段の外なら -1） */
-  int textLaneAt(double y) const;
+  /**
+   * テキスト（kind = Text）かオーディオ（kind = Audio）を上下にドラッグしているときの、縦の位置にあたる行き先。段の中ほどならその段、
+   * 段の境目（一番上の段の上・一番下の段の下も）ならそこに新しい段を差し込む。その種類の段から大きく外れて、ほかの種類の段
+   * （テキストなら重ねるトラック、オーディオならビデオ）に入ったら nullopt
+   */
+  std::optional<TextTrackTarget> laneTargetAt(Selection::Type kind, double y) const;
+  /** index の段の上の境目の縦の位置（段の数を渡すと、一番下の段の下の境目） */
+  double textBoundaryY(int index) const;
   /** 重ねるトラックの映像をドラッグしているときの、縦の位置にあたる段（重ねるトラックの段の外なら -1） */
   int overlayLaneAt(double y) const;
   QRectF overlayRect(const OverlayItem& o) const;
@@ -118,6 +118,44 @@ class TimelineView : public QAbstractScrollArea {
 
   /** マウスの位置に合わせて、ドラッグの途中経過を反映する（押した位置の時間からの差で動かす） */
   void dragTo(QPointF pos, Qt::KeyboardModifiers mods);
+  /**
+   * テキスト・オーディオを動かす（wantStart は吸着させたあとの始まり、floorStart は一緒に動かすものも 0:00 より前に出ない始まり）。
+   * 左右に動かしているあいだは段を変えず、同じ段のほかのものに重ならない位置までにする（すぐに編集データへ反映する）。
+   * はっきり上下に動かしたら、行き先（段・段の境目）を決めて半透明で見せ、離したときに段を移す
+   */
+  void laneMoveTo(QPointF pos, double wantStart, double floorStart);
+  /**
+   * 押したものの始まり start（時間をずらしたあと）を、左端か右端のうち、吸着したほうで、ずれが小さいほうに合わせる（吸着の印も付ける）。
+   * floor より前には出さない
+   */
+  double snapMoveStart(double start, double duration, double floor, bool snapOn);
+  /** 押したもの（始まり start。lane が 0 以上なら、重ねるトラックの段も）と一緒に動かすもの（delta だけずらす）を、p に反映する */
+  bool applyMove(ProjectData& p, double start, double delta, int lane) const;
+  /**
+   * 左右に動かすときに、同じ段のほかのものと重ならないよう調べる材料（一緒に動かすテキスト・オーディオの、動かす前の段・始まり・長さ。
+   * includeMain なら、押したものも入れる）。exclude には、重なりを調べる相手から外すもの（押したもの・一緒に動かすもの）の ID を入れる
+   */
+  std::vector<ShiftItem> shiftMovers(bool includeMain, std::vector<QString>* exclude) const;
+  /** 重ならないようにずらしたあと: 吸着の印を、当たった端（吸着先と同じ所なら）に付け直す */
+  void fixSnapMark(double start, double dur);
+  /** ドラッグして動かしている途中のものか（半透明で描く） */
+  bool movingItem(Selection::Type type, const QString& id) const;
+  /** テキスト・オーディオを動かしている途中か */
+  bool laneDragActive() const;
+  /**
+   * 動かしているテキスト・オーディオ（と一緒に動かすテキスト・オーディオ）を、元の場所には描かず、行き先に半透明で描く途中か
+   * （テキストはいつも。オーディオは段を変えるときだけで、左右に動かしているあいだは、波形ごとその場で描く）
+   */
+  bool laneGhosts() const;
+  /** 動かしているテキスト・オーディオを、行き先に半透明で描く。段を変えるときは、行き先の段・差し込む境目も描く */
+  void paintLaneDrag(QPainter& p);
+  /**
+   * メインのビデオと重ねるトラックの間で動かしている途中の、行き先の半透明のバー・差し込む位置と、カーソルの横の札
+   * （ビデオへ移せないときは、その理由）
+   */
+  void paintCrossDrag(QPainter& p);
+  /** ビデオのクリップを重ねるトラックへ動かしているときの、縦の位置にあたる段（重ねるトラックより上なら、一番上の段のさらに上） */
+  int crossOverlayLane(double y) const;
   /** 音量キーフレームの点を、マウスの位置へ動かす */
   void keyMoveTo(QPointF pos);
   /** 最後のマウスの位置で、今のドラッグの途中経過を引き直す（自動スクロールのたびに呼ぶ） */
@@ -278,9 +316,43 @@ class TimelineView : public QAbstractScrollArea {
   Lanes textLanes_;
   Lanes overlayLanes_;
   Lanes audioLanes_;
-  std::map<QString, LaneMemo> audioMemo_;  // 前回のオーディオの段の割り当て
-  QString laneHoldId_;                     // ドラッグ中のオーディオ。ドラッグを始めたときの段（laneHold_）にとどめる
-  int laneHold_ = -1;
+
+  // ---- 段の入れ替え（左の見出しの列で、段の名前を上下にドラッグする。テキスト・オーディオの段が 2 つ以上あるとき） ----
+  struct LaneRef {
+    Selection::Type kind = Selection::None;  // Text / Audio
+    int index = 0;                           // 段（0 が一番上）
+    bool operator==(const LaneRef&) const = default;
+  };
+  /** 見出しの列の、その位置にある段の名前（段の境目の高さを変える所は除く）。無ければ nullopt */
+  std::optional<LaneRef> laneHeadAt(QPointF pos) const;
+  /** その種類の段の、縦の位置にあたる段（段の外なら、近いほうの端の段） */
+  int laneAtY(Selection::Type kind, double y) const;
+  /** その種類の段 index の、上端の縦の位置と高さ */
+  double laneTop(Selection::Type kind, int index) const;
+  int laneHeight(Selection::Type kind) const;
+  int laneCount(Selection::Type kind) const;
+  /** 見出しに出す段の名前（「テキスト 1」「オーディオ 2」。段の番号は中身と一緒に動く） */
+  QString laneName(Selection::Type kind, int index) const;
+  /** 見出しの列の、段ごとの名前（段が 2 つ以上のとき） */
+  void paintLaneHeads(QPainter& p, Selection::Type kind, int sectionY, int sectionH, const QString& icon, const QString& label);
+  /** 入れ替えのドラッグ中の、元の段・行き先の段の印と、札 */
+  void paintLaneSwap(QPainter& p);
+  /** 入れ替えのドラッグ中に、上下の端へ近づいたときの縦の自動スクロールの速さ（px/秒。上へは負。端から遠いときは 0） */
+  double laneScrollSpeed(double y) const;
+  LaneRef swapFrom_;
+  int swapTo_ = 0;
+  /** カーソルの下の見出しの段（掴める目印を出す） */
+  std::optional<LaneRef> laneHover_;
+
+  // ---- 見出しの列の上のホイールで、縦にスクロールする（目標の位置まで、なめらかに動かす） ----
+  void scrollVerticallyBy(double dy);
+  void vScrollTick();
+  void stopVScroll();
+  QTimer* vScroll_ = nullptr;
+  QElapsedTimer vScrollClock_;
+  double vScrollPos_ = 0;     // 今の位置（端数も持つ）
+  double vScrollTarget_ = 0;  // 目標の位置
+
   /** サムネイル（素材 → 高さ → 並べる画像）。メインのビデオと重ねるトラックで高さが違うので、高さごとに持つ */
   std::map<QString, std::map<int, std::vector<QPixmap>>> thumbCache_;
 
@@ -305,6 +377,25 @@ class TimelineView : public QAbstractScrollArea {
   std::vector<Companion> companions_;
   /** 一緒に選んでいたものを押した（動かさずに離したら、押したものだけを選ぶ） */
   bool pressInSet_ = false;
+  // テキスト・オーディオのドラッグ（左右は時間だけ。はっきり上下に動かしたら段を変える。段の境目なら新しい段を差し込む）
+  TextTrackTarget laneTarget_;                 // 今の行き先（Stay なら段を変えない）
+  std::optional<TextTrackTarget> laneIntent_;  // 最後にカーソルの縦の位置から決めた行き先（段の外へ出たときは、これを使い続ける）
+  bool laneEngaged_ = false;                   // はっきり上下に動かした（ここから段を変えられる。ビデオと重ねるトラックの間の移動も）
+  int laneOrigLane_ = 0;                       // ドラッグを始めたときの段
+  double laneGhostStart_ = 0;                  // 行き先での始まり
+  double moveShift_ = 0;                       // 今のずらし量（押したものの、始めたときからの時間の差）
+  // メインのビデオと重ねるトラックの間の移動（はっきり上下に動かして、もう一方の段に入れたとき。離すまで編集データは変えない）
+  enum class Cross {
+    None,
+    ToOverlay,   // ビデオのクリップを、重ねるトラックへ
+    ToMain,      // 重ねるトラックの映像を、ビデオへ
+    MainBlocked  // 重ねるトラックの映像をビデオの段に入れたが、一緒に動かすものがあるので移せない
+  };
+  Cross cross_ = Cross::None;
+  int crossLane_ = 0;        // 重ねるトラックへ移す段（段の数なら、一番上に新しい段）
+  int crossIndex_ = 0;       // ビデオへ移すときの、差し込む位置（クリップの番号）
+  double crossStart_ = 0;    // 行き先のバーの始まり（重ねるトラックへ移すときは、置く時間）
+  double clipOrigStart_ = 0;  // 押したビデオのクリップの、ドラッグを始めたときの始まり
   /** 素材一覧から動画・写真を、重ねるトラックの段へドラッグしてきている（その時間に縦線を出す） */
   std::optional<double> overlayDropT_;
   std::vector<double> dragSnap_;

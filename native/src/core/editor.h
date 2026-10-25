@@ -213,9 +213,17 @@ class Editor : public QObject {
   int textTrackFor(double start, double duration) const;
   /**
    * テキストを上（負）・下（正）の段へ移す。横に動かす・長さを変えるだけでは段は変わらず、
-   * 段を変えるのはこの操作と、タイムラインで上下にドラッグしたときだけ。ほかのテキストの段は変えない
+   * 段を変えるのはこの操作と、タイムラインで上下にドラッグしたときだけ。移った先の段のその時間に
+   * ほかのテキストがあるときは、重ならないよう、そのテキストのすぐ上（上へ移すとき）・すぐ下（下へ移すとき）に新しい段を作って入れる
    */
   void moveTextTrack(const QString& id, int delta);
+  /** テキストの段を target へ移す（段の境目に新しい段を差し込むこともできる。moveTextToTrack を参照）。変わったら true */
+  bool placeTextTrack(const QString& id, const TextTrackTarget& target, const QString& merge = QString());
+  /**
+   * テキスト（kind = Text）かオーディオ（kind = Audio）の段 a と b を入れ替える（タイムラインの見出しの列のドラッグ）。
+   * 段の中のものはまとめて動き、時間・長さは変わらない。元に戻す 1 回分。入れ替えたら true
+   */
+  bool swapTracks(Selection::Type kind, int a, int b);
   void updateText(const QString& id, const std::function<void(TextItem&)>& fn, const QString& merge = QString());
   void updateAudio(const QString& id, const std::function<void(AudioItem&)>& fn, const QString& merge = QString());
   // ---- 重ねるトラック ----
@@ -227,6 +235,21 @@ class Editor : public QObject {
   void updateOverlay(const QString& id, const std::function<void(OverlayItem&)>& fn, const QString& merge = QString());
   /** 重ねるトラックの段を、上（正 = 前）・下（負 = 後ろ）へ移す。一番上の段のさらに上へ 1 段だけ増やせる */
   void moveOverlayTrack(const QString& id, int delta);
+  // ---- メインのビデオと重ねるトラックの間の移動（タイムラインで上下にドラッグしたとき） ----
+  // ID と映像の設定（切り出し・速度・音量・フェード・色・切り抜き・クロマキー・アニメーションなど）は、そのまま持っていく。
+  /**
+   * メインのビデオのクリップ id を、重ねるトラックの段 track の start 秒へ移して選ぶ。後ろのクリップは前へ詰まる。
+   * track は 0 がメインのすぐ上で、一番上の段のさらに上へ 1 段だけ増やせる。表示方法は重ねるトラックのいつもの「全体表示」。
+   * 位置・大きさを変えていないクリップは、重ねるトラックに追加したときと同じ大きさ（画面の半分）にする（重なっているのが分かるように）。
+   * 元に戻す 1 回分。移したら true
+   */
+  bool moveClipToOverlay(const QString& id, double start, int track);
+  /**
+   * 重ねるトラックの映像 id を、メインのビデオの index 番目へ移して選ぶ。重ねるトラックに追加したときの大きさ（画面の半分・中央）のままなら、
+   * 画面いっぱいに戻す。表示方法は、メインのビデオに追加したときと同じにする（画面と縦横比が違う素材は「ぼかし背景」）。
+   * merge が前の変更と同じなら、1 回の操作にまとめる（ドラッグの途中の動きと一緒に、元に戻す 1 回で戻る）。移したら true
+   */
+  bool moveOverlayToMain(const QString& id, int index, const QString& merge = QString());
   // ---- オーディオの音量キーフレーム（時間は、オーディオの先頭からの秒数） ----
   /** その時間にキーフレームを追加する（今の音量で作るので、音は変わらない）。近くに既にあるときは増やさない。その番号を返す */
   int addVolumePoint(const QString& audioId, double local);
@@ -291,6 +314,11 @@ class Editor : public QObject {
   // プリセット: 必要なキーフレームを作る。作ったあとも、キーフレームは自由に編集できる
   static const std::vector<AnimPreset>& animPresets();
   bool applyAnimPreset(const QString& presetId);
+  /**
+   * マイテンプレート（保存したテキストのアニメーション）を、選んでいるテキストに当てはめる。キーフレームと登場のアニメーションを
+   * 置き換える（文字・見た目は変えない。当てはめたあとも、キーフレームは自由に編集できる）。元に戻す 1 回分。当てはめたら true
+   */
+  bool applyAnimTemplate(const QString& templateId);
   // 音量キーフレームは、オーディオにも映像(音声つき)にも使える。ID でどちらかを探す
   void deleteSelection();
   void duplicateSelection();

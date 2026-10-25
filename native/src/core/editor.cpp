@@ -7,6 +7,7 @@
 #include <cmath>
 #include <set>
 
+#include "core/animtemplates.h"
 #include "core/filters.h"
 #include "core/textstyles.h"
 
@@ -19,6 +20,8 @@ ProjectData emptyProject() {
   p.name = QStringLiteral("無題のプロジェクト");
   p.settings.aspect = Aspect::R16_9;
   p.settings.fps = 30;
+  syncTextTrackIds(p);  // テキストの段（はじめは 1 段）の ID
+  syncAudioTrackNos(p);
   return p;
 }
 
@@ -60,14 +63,26 @@ static VideoClip makeClip(const Asset& a, Aspect aspect) {
   return c;
 }
 
+/** 重ねるトラックに置いたときの、はじめの大きさ（画面の半分） */
+static constexpr double kOverlayScale = 0.5;
+
 /** 重ねるトラックに置く映像・画像。はじめは画面の半分の大きさで、中央に置く（重なっているのが分かるように） */
 static OverlayItem makeOverlay(const Asset& a, double start) {
   OverlayItem o;
   static_cast<VideoClip&>(o) = makeClip(a, Aspect::R16_9);
   o.fit = FitMode::Contain;
-  o.scale = 0.5;
+  o.scale = kOverlayScale;
   o.start = std::max(0.0, start);
   return o;
+}
+
+/** 位置・大きさ・回転を変えていない（それらのキーフレームも無い）か。大きさは scale のまま */
+static bool layoutUntouched(const VideoClip& c, double scale) {
+  for (const AnimProp prop : {AnimProp::X, AnimProp::Y, AnimProp::Scale, AnimProp::Rotation}) {
+    if (!c.anim.keys(prop).empty()) return false;
+  }
+  return std::abs(c.x - 0.5) < 1e-9 && std::abs(c.y - 0.5) < 1e-9 && std::abs(c.scale - scale) < 1e-9 && std::abs(c.rotation) < 1e-9 &&
+         !hasStretch(c);
 }
 
 static AudioItem makeAudioItem(const Asset& a, double start) {
@@ -243,6 +258,12 @@ void Editor::commit(const std::function<bool(ProjectData&)>& fn, const QString& 
   ProjectData next = ws().project;
   if (!fn(next)) return;
   clampVolumes(next);
+  // テキストは、同じ段の中で時間が重ならないようにする（時間・段を変えたテキストが重なったら、空いている近くの段へ。
+  // ほかのテキストは動かさない）。段の ID は、段の数にそろえる
+  resolveTextOverlaps(next, ws().project);
+  resolveAudioOverlaps(next, ws().project);  // オーディオも同じ決まり（同じ段の中で重ねない）
+  syncTextTrackIds(next);
+  syncAudioTrackNos(next);  // オーディオの段の番号（見出しの数字）も、段の数にそろえる
   // 文字を書き換えたテキストは、一部だけ別のフォントにした範囲を、書き換えた所に合わせて付け直す
   // （どこから書き換えても同じ。範囲そのものを変えた操作は、そのまま）
   for (auto& t : next.texts) {
@@ -720,6 +741,8 @@ void Editor::addToTimeline(const std::vector<QString>& assetIds, std::optional<i
       QString firstAudio;
       for (const auto& a : audio) {
         AudioItem item = makeAudioItem(a, pos);
+        // 新しいオーディオの段は、ここで一度だけ決める（その時間が空いている一番上の段）。ほかのオーディオの段は変えない
+        item.track = freeAudioTrack(p.audios, item.start, audioDuration(item));
         pos += audioDuration(item);
         if (firstAudio.isEmpty()) firstAudio = item.id;
         p.audios.push_back(item);
@@ -762,18 +785,47 @@ int Editor::textTrackFor(double start, double duration) const {
 
 void Editor::moveTextTrack(const QString& id, int delta) {
   commit([&](ProjectData& p) {
-    TextItem* t = findById(p.texts, id);
+    const TextItem* t = findById(p.texts, id);
     if (!t || delta == 0) return false;
-    // 一番下の段のさらに下へ 1 段だけ増やせる（自分だけの段をどんどん下へ送ることはできない）
+    const int from = t->track;
     int lastOther = -1;
     for (const auto& x : p.texts) {
       if (x.id != id) lastOther = std::max(lastOther, x.track);
     }
-    const int next = std::clamp(t->track + delta, 0, lastOther + 1);
-    if (next == t->track) return false;
-    t->track = next;
-    return true;
+    using K = TextTrackTarget::Kind;
+    TextTrackTarget target;
+    if (delta < 0) {
+      if (from <= 0) return false;
+      // 1 つ上の段。その時間にほかのテキストがあるときは、重ならないよう、そのテキストの上に新しい段を作って入れる（手前に出る）
+      const int k = from - 1;
+      target = textTrackFree(p.texts, k, t->start, t->duration, id) ? TextTrackTarget{K::Lane, k} : TextTrackTarget{K::Insert, k};
+    } else {
+      // 一番下の段のさらに下へ 1 段だけ増やせる（自分だけの段をどんどん下へ送ることはできない）
+      if (from > lastOther) return false;
+      const int k = from + 1;
+      // 1 つ下の段。その時間にほかのテキストがあるときは、そのテキストの下に新しい段を作って入れる（後ろに回る）
+      target = k > lastOther || textTrackFree(p.texts, k, t->start, t->duration, id) ? TextTrackTarget{K::Lane, k} : TextTrackTarget{K::Insert, k + 1};
+    }
+    return moveTextToTrack(p, id, target);
   });
+}
+
+bool Editor::swapTracks(Selection::Type kind, int a, int b) {
+  bool done = false;
+  commit([&](ProjectData& p) {
+    done = kind == Selection::Text ? swapTextTracks(p, a, b) : kind == Selection::Audio ? swapAudioTracks(p, a, b) : false;
+    return done;
+  });
+  return done;
+}
+
+bool Editor::placeTextTrack(const QString& id, const TextTrackTarget& target, const QString& merge) {
+  bool moved = false;
+  commit([&](ProjectData& p) {
+    moved = moveTextToTrack(p, id, target);
+    return moved;
+  }, merge);
+  return moved;
 }
 
 double Editor::newTextDuration(double start, double wanted) const {
@@ -857,6 +909,49 @@ void Editor::moveOverlayTrack(const QString& id, int delta) {
     o->track = next;
     return true;
   });
+}
+
+bool Editor::moveClipToOverlay(const QString& id, double start, int track) {
+  bool moved = false;
+  commit([&](ProjectData& p) {
+    auto it = std::find_if(p.clips.begin(), p.clips.end(), [&](const VideoClip& c) { return c.id == id; });
+    if (it == p.clips.end()) return false;
+    OverlayItem o;
+    static_cast<VideoClip&>(o) = *it;  // ID も映像の設定も、そのまま
+    o.start = std::max(0.0, start);
+    // 一番上の段のさらに上へ 1 段だけ増やせる
+    int last = -1;
+    for (const auto& x : p.overlays) last = std::max(last, x.track);
+    o.track = std::clamp(track, 0, last + 1);
+    o.fit = FitMode::Contain;  // 重ねるトラックは、いつも全体表示（余白は透明）
+    // 画面いっぱいのままのクリップは、重ねるトラックに追加したときと同じ大きさにする（下の映像が隠れてしまわないように）
+    if (layoutUntouched(o, 1.0)) o.scale = kOverlayScale;
+    p.clips.erase(it);
+    p.overlays.push_back(o);
+    moved = true;
+    return true;
+  });
+  if (moved) select({Selection::Overlay, id});
+  return moved;
+}
+
+bool Editor::moveOverlayToMain(const QString& id, int index, const QString& merge) {
+  bool moved = false;
+  commit([&](ProjectData& p) {
+    auto it = std::find_if(p.overlays.begin(), p.overlays.end(), [&](const OverlayItem& o) { return o.id == id; });
+    if (it == p.overlays.end()) return false;
+    VideoClip c = *it;  // ID も映像の設定も、そのまま（重ねるトラックの開始・段・グループは持っていかない）
+    // 重ねるトラックに追加したときの大きさのままなら、メインのビデオのいつもの大きさ（画面いっぱい）に戻す
+    if (layoutUntouched(c, kOverlayScale)) c.scale = 1;
+    // 表示方法は、メインのビデオに追加したときと同じ（画面と縦横比が違う素材は「ぼかし背景」）
+    if (const Asset* a = asset(c.assetId)) c.fit = defaultFit(*a, p.settings.aspect);
+    p.overlays.erase(it);
+    p.clips.insert(p.clips.begin() + std::clamp(index, 0, int(p.clips.size())), c);
+    moved = true;
+    return true;
+  }, merge);
+  if (moved) select({Selection::Clip, id});
+  return moved;
 }
 
 void Editor::updateText(const QString& id, const std::function<void(TextItem&)>& fn, const QString& merge) {
@@ -1083,6 +1178,7 @@ void Editor::duplicateSelection() {
           copy.id = nid;
           copy.start = a->start + shift;
           copy.group = mapGroup(a->group);
+          if (!audioTrackFree(p.audios, copy.track, copy.start, audioDuration(copy))) copy.track = freeAudioTrack(p.audios, copy.start, audioDuration(copy));
           p.audios.push_back(copy);
         } else if (s.type == Selection::Overlay) {
           const OverlayItem* o = findById(p.overlays, s.id);
@@ -1145,6 +1241,8 @@ void Editor::duplicateSelection() {
       copy.id = newIdValue;
       copy.start = a->start + audioDuration(*a);
       copy.group.clear();
+      // 元と同じ段が空いていればそこへ。ふさがっていれば、重ならない段へ（元のオーディオの段は変えない）
+      if (!audioTrackFree(p.audios, copy.track, copy.start, audioDuration(copy))) copy.track = freeAudioTrack(p.audios, copy.start, audioDuration(copy));
       p.audios.push_back(copy);
     }
     done = true;
@@ -1717,6 +1815,33 @@ int Editor::pasteKeys(double local) {
     return changed;
   });
   return count;
+}
+
+bool Editor::applyAnimTemplate(const QString& templateId) {
+  const Selection sel = ws().selection;
+  const AnimTemplate* found = animTemplates().find(templateId);
+  if (!found || sel.type != Selection::Text) return false;
+  const AnimTemplate tpl = *found;
+  bool done = false;
+  commit([&](ProjectData& p) {
+    TextItem* item = findById(p.texts, sel.id);
+    if (!item) return false;
+    const TextItem before = *item;
+    AnimTemplates::applyTo(tpl, *item);
+    done = true;
+    // 同じものを当てはめ直しただけなら、元に戻す履歴には残さない
+    bool same = before.animation == item->animation;
+    for (int i = 0; same && i < kAnimPropCount; ++i) {
+      const auto& a = before.anim.tracks[size_t(i)];
+      const auto& b = item->anim.tracks[size_t(i)];
+      same = a.size() == b.size();
+      for (size_t k = 0; same && k < a.size(); ++k) {
+        same = std::abs(a[k].t - b[k].t) < 1e-9 && std::abs(a[k].value - b[k].value) < 1e-9 && a[k].easing == b[k].easing;
+      }
+    }
+    return !same;
+  });
+  return done;
 }
 
 const std::vector<Editor::AnimPreset>& Editor::animPresets() {

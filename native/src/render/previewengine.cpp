@@ -434,7 +434,10 @@ void PreviewEngine::compose(double t, bool playing) {
   const QString editingId = !playing && ed.selection().type == Selection::Text ? ed.selection().id : QString();
   QPainter p(&canvas);
   std::set<QString> live;
-  for (const auto& item : ed.project().texts) {
+  // 下の段の文字から描く（タイムラインの上の段の文字ほど手前に重なる。書き出しと同じ順。選んでいるかどうかでは変えない）
+  const auto& texts = ed.project().texts;
+  for (const size_t index : textPaintOrder(texts)) {
+    const TextItem& item = texts[index];
     // 編集中の文字は、確定前の内容（変換中の文字を含む）で描く
     const QString& shownText = item.id == textOverrideId_ ? textOverride_ : item.text;
     if (!isTextVisible(item, t) || shownText.isEmpty()) continue;

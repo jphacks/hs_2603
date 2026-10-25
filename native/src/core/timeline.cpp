@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <set>
 
 namespace kv {
 
@@ -495,6 +497,354 @@ int textTrackCount(const std::vector<TextItem>& texts) {
   int count = 1;
   for (const auto& t : texts) count = std::max(count, t.track + 1);
   return count;
+}
+
+std::vector<size_t> textPaintOrder(const std::vector<TextItem>& texts) {
+  std::vector<size_t> order(texts.size());
+  for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+  // 番号の大きい段（下の段）から先に描く。選んでいるかどうかでは変えない
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return texts[a].track > texts[b].track; });
+  return order;
+}
+
+void syncTextTrackIds(ProjectData& p) {
+  auto& ids = p.textTrackIds;
+  const size_t count = size_t(textTrackCount(p.texts));
+  std::set<QString> seen;
+  for (auto& id : ids) {
+    if (id.isEmpty() || seen.count(id)) id = newId();
+    seen.insert(id);
+  }
+  while (ids.size() < count) ids.push_back(newId());
+  if (ids.size() > count) ids.resize(count);
+  syncTrackNos(p.textTrackNos, count);
+}
+
+void syncTrackNos(std::vector<int>& nos, size_t count) {
+  if (count <= 1) {
+    nos.assign(count, 1);  // 段が 1 つだけなら、番号は付け直す（見出しは「テキスト」「オーディオ」だけ）
+    return;
+  }
+  if (nos.size() > count) nos.resize(count);
+  std::set<int> used;
+  std::vector<size_t> fix;
+  for (size_t i = 0; i < nos.size(); ++i) {
+    if (nos[i] < 1 || used.count(nos[i])) fix.push_back(i);
+    else used.insert(nos[i]);
+  }
+  auto next = [&used] {
+    int n = 1;
+    while (used.count(n)) ++n;
+    used.insert(n);
+    return n;
+  };
+  for (size_t i : fix) nos[i] = next();
+  while (nos.size() < count) nos.push_back(next());
+}
+
+bool moveTextToTrack(ProjectData& p, const QString& id, const TextTrackTarget& target) {
+  syncTextTrackIds(p);
+  auto it = std::find_if(p.texts.begin(), p.texts.end(), [&](const TextItem& t) { return t.id == id; });
+  if (it == p.texts.end() || target.kind == TextTrackTarget::Kind::Stay) return false;
+  std::vector<int> before;
+  for (const auto& t : p.texts) before.push_back(t.track);
+  const std::vector<QString> idsBefore = p.textTrackIds;
+  const std::vector<int> nosBefore = p.textTrackNos;
+  const int from = it->track;
+  if (target.kind == TextTrackTarget::Kind::Lane) {
+    if (target.index < 0 || target.index == from) return false;
+    it->track = target.index;
+  } else {
+    auto& ids = p.textTrackIds;
+    auto& nos = p.textTrackNos;  // syncTextTrackIds で ids と同じ数にそろっている
+    int at = std::clamp(target.index, 0, int(ids.size()));
+    bool alone = true;
+    for (const auto& t : p.texts) {
+      if (t.id != id && t.track == from) alone = false;
+    }
+    // 元の段に自分だけなら、その段を詰めて、段（の ID・番号）ごと差し込む位置へ動かす。空の段は残さない
+    QString laneId;
+    int laneNo = 0;  // 0 は「新しい段」（番号は syncTextTrackIds で、空いている一番小さい番号を付ける）
+    if (alone && from < int(ids.size())) {
+      laneId = ids[size_t(from)];
+      ids.erase(ids.begin() + from);
+      if (from < int(nos.size())) {
+        laneNo = nos[size_t(from)];
+        nos.erase(nos.begin() + from);
+      }
+      for (auto& t : p.texts) {
+        if (t.id != id && t.track > from) --t.track;
+      }
+      if (at > from) --at;
+    }
+    // at 以上の段のテキストを 1 段ずつ下へ（ID・番号も一緒にずらす）
+    for (auto& t : p.texts) {
+      if (t.id != id && t.track >= at) ++t.track;
+    }
+    ids.insert(ids.begin() + std::clamp(at, 0, int(ids.size())), laneId.isEmpty() ? newId() : laneId);
+    nos.insert(nos.begin() + std::clamp(at, 0, int(nos.size())), laneNo);
+    it->track = at;
+  }
+  syncTextTrackIds(p);
+  bool changed = false;
+  for (size_t i = 0; i < p.texts.size(); ++i) changed = changed || p.texts[i].track != before[i];
+  if (!changed) {
+    // 並びが同じなら、段の ID・番号も元のまま
+    p.textTrackIds = idsBefore;
+    p.textTrackNos = nosBefore;
+  }
+  return changed;
+}
+
+double freeTextShift(const std::vector<TextItem>& texts, const std::vector<TextShiftItem>& movers, const std::vector<QString>& exclude, double want,
+                     double minDelta, double prefer) {
+  constexpr double kEps = 1e-6;
+  const double inf = std::numeric_limits<double>::infinity();
+  // 置けない delta の範囲（両端ちょうどは、端が接するだけなので置ける）
+  std::vector<std::pair<double, double>> bad;
+  for (const TextShiftItem& m : movers) {
+    for (const auto& o : texts) {
+      if (o.track != m.track || std::find(exclude.begin(), exclude.end(), o.id) != exclude.end()) continue;
+      const double lo = o.start - (m.start + m.duration);
+      const double hi = o.start + o.duration - m.start;
+      if (hi - lo > 2 * kEps) bad.push_back({lo, hi});
+    }
+  }
+  std::sort(bad.begin(), bad.end());
+  // 置ける範囲（minDelta から先で、置けない範囲を除いたところ）
+  std::vector<std::pair<double, double>> ok;
+  double cur = minDelta;
+  for (const auto& [lo, hi] : bad) {
+    if (hi <= cur + kEps) continue;
+    if (lo >= cur - kEps) ok.push_back({cur, std::max(cur, lo)});
+    cur = std::max(cur, hi);
+  }
+  ok.push_back({cur, inf});
+  double best = cur;
+  double bestD = inf;
+  for (const auto& [a, b] : ok) {
+    const double c = std::clamp(want, a, b);
+    const double d = std::abs(c - want);
+    if (d < bestD - 1e-9 || (std::abs(d - bestD) <= 1e-9 && std::abs(c - prefer) < std::abs(best - prefer))) {
+      best = c;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
+void resolveTextOverlaps(ProjectData& next, const ProjectData& before) {
+  for (auto& t : next.texts) {
+    const auto b = std::find_if(before.texts.begin(), before.texts.end(), [&](const TextItem& x) { return x.id == t.id; });
+    const bool changed = b == before.texts.end() || std::abs(b->start - t.start) > 1e-9 || std::abs(b->duration - t.duration) > 1e-9 ||
+                         b->track != t.track;
+    if (!changed || textTrackFree(next.texts, t.track, t.start, t.duration, t.id)) continue;
+    // 同じ段のほかのテキストに重なった: 重ならない近くの段へ（下の段から先に探す。一番下の段のさらに下は、いつも空いている）
+    int lastOther = -1;
+    for (const auto& x : next.texts) {
+      if (x.id != t.id) lastOther = std::max(lastOther, x.track);
+    }
+    const int from = std::max(0, t.track);
+    int to = lastOther + 1;
+    for (int d = 1; d <= lastOther + 1; ++d) {
+      if (from + d <= lastOther + 1 && textTrackFree(next.texts, from + d, t.start, t.duration, t.id)) {
+        to = from + d;
+        break;
+      }
+      if (from - d >= 0 && textTrackFree(next.texts, from - d, t.start, t.duration, t.id)) {
+        to = from - d;
+        break;
+      }
+    }
+    t.track = to;
+  }
+}
+
+bool audioTrackFree(const std::vector<AudioItem>& items, int track, double start, double duration, const QString& excludeId) {
+  for (const auto& a : items) {
+    if (a.track != track || (!excludeId.isEmpty() && a.id == excludeId)) continue;
+    if (a.start < start + duration - 1e-6 && start < a.start + audioDuration(a) - 1e-6) return false;
+  }
+  return true;
+}
+
+int freeAudioTrack(const std::vector<AudioItem>& items, double start, double duration, const QString& excludeId) {
+  int maxTrack = -1;
+  for (const auto& a : items) {
+    if (!excludeId.isEmpty() && a.id == excludeId) continue;
+    maxTrack = std::max(maxTrack, a.track);
+  }
+  for (int track = 0; track <= maxTrack; ++track) {
+    if (audioTrackFree(items, track, start, duration, excludeId)) return track;
+  }
+  return maxTrack + 1;
+}
+
+void autoAssignAudioTracks(std::vector<AudioItem>& items) {
+  std::vector<size_t> order(items.size());
+  for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return items[a].start < items[b].start; });
+  std::vector<double> ends;  // 各段の、いちばん最後のオーディオの終わり
+  for (size_t idx : order) {
+    AudioItem& a = items[idx];
+    size_t k = 0;
+    while (k < ends.size() && ends[k] > a.start + 1e-6) ++k;
+    if (k == ends.size()) ends.push_back(0);
+    ends[k] = a.start + audioDuration(a);
+    a.track = int(k);
+  }
+}
+
+int audioTrackCount(const std::vector<AudioItem>& items) {
+  int count = 1;
+  for (const auto& a : items) count = std::max(count, a.track + 1);
+  return count;
+}
+
+void resolveAudioOverlaps(ProjectData& next, const ProjectData& before) {
+  for (auto& a : next.audios) {
+    a.track = std::max(0, a.track);
+    const auto b = std::find_if(before.audios.begin(), before.audios.end(), [&](const AudioItem& x) { return x.id == a.id; });
+    const bool changed = b == before.audios.end() || std::abs(b->start - a.start) > 1e-9 || std::abs(audioDuration(*b) - audioDuration(a)) > 1e-9 ||
+                         b->track != a.track;
+    const double dur = audioDuration(a);
+    if (!changed || audioTrackFree(next.audios, a.track, a.start, dur, a.id)) continue;
+    // 同じ段のほかのオーディオに重なった: 重ならない近くの段へ（下の段から先に探す。一番下の段のさらに下は、いつも空いている）
+    int lastOther = -1;
+    for (const auto& x : next.audios) {
+      if (x.id != a.id) lastOther = std::max(lastOther, x.track);
+    }
+    const int from = a.track;
+    int to = lastOther + 1;
+    for (int d = 1; d <= lastOther + 1; ++d) {
+      if (from + d <= lastOther + 1 && audioTrackFree(next.audios, from + d, a.start, dur, a.id)) {
+        to = from + d;
+        break;
+      }
+      if (from - d >= 0 && audioTrackFree(next.audios, from - d, a.start, dur, a.id)) {
+        to = from - d;
+        break;
+      }
+    }
+    a.track = to;
+  }
+}
+
+bool swapTextTracks(ProjectData& p, int a, int b) {
+  syncTextTrackIds(p);
+  const int count = textTrackCount(p.texts);
+  if (a == b || a < 0 || b < 0 || a >= count || b >= count) return false;
+  bool any = false;
+  for (auto& t : p.texts) {
+    if (t.track == a) {
+      t.track = b;
+      any = true;
+    } else if (t.track == b) {
+      t.track = a;
+      any = true;
+    }
+  }
+  if (!any) return false;  // どちらの段も空
+  // 段の ID・番号も、中身と一緒に動く
+  std::swap(p.textTrackIds[size_t(a)], p.textTrackIds[size_t(b)]);
+  std::swap(p.textTrackNos[size_t(a)], p.textTrackNos[size_t(b)]);
+  syncTextTrackIds(p);  // 一番下の段が空になったときは、その段を除く
+  return true;
+}
+
+void syncAudioTrackNos(ProjectData& p) {
+  syncTrackNos(p.audioTrackNos, size_t(audioTrackCount(p.audios)));
+}
+
+bool moveAudioToTrack(ProjectData& p, const QString& id, const TextTrackTarget& target) {
+  syncAudioTrackNos(p);
+  auto it = std::find_if(p.audios.begin(), p.audios.end(), [&](const AudioItem& a) { return a.id == id; });
+  if (it == p.audios.end() || target.kind == TextTrackTarget::Kind::Stay) return false;
+  std::vector<int> before;
+  for (const auto& a : p.audios) before.push_back(a.track);
+  const std::vector<int> nosBefore = p.audioTrackNos;
+  const int from = it->track;
+  if (target.kind == TextTrackTarget::Kind::Lane) {
+    if (target.index < 0 || target.index == from) return false;
+    it->track = target.index;
+  } else {
+    auto& nos = p.audioTrackNos;  // syncAudioTrackNos で段の数にそろっている
+    int at = std::clamp(target.index, 0, int(nos.size()));
+    bool alone = true;
+    for (const auto& a : p.audios) {
+      if (a.id != id && a.track == from) alone = false;
+    }
+    // 元の段に自分だけなら、その段を詰めて、段（の番号）ごと差し込む位置へ動かす。空の段は残さない
+    int laneNo = 0;  // 0 は「新しい段」（番号は syncAudioTrackNos で、空いている一番小さい番号を付ける）
+    if (alone && from < int(nos.size())) {
+      laneNo = nos[size_t(from)];
+      nos.erase(nos.begin() + from);
+      for (auto& a : p.audios) {
+        if (a.id != id && a.track > from) --a.track;
+      }
+      if (at > from) --at;
+    }
+    // at 以上の段のオーディオを 1 段ずつ下へ（番号も一緒にずらす）
+    for (auto& a : p.audios) {
+      if (a.id != id && a.track >= at) ++a.track;
+    }
+    nos.insert(nos.begin() + std::clamp(at, 0, int(nos.size())), laneNo);
+    it->track = at;
+  }
+  syncAudioTrackNos(p);
+  bool changed = false;
+  for (size_t i = 0; i < p.audios.size(); ++i) changed = changed || p.audios[i].track != before[i];
+  if (!changed) p.audioTrackNos = nosBefore;  // 並びが同じなら、段の番号も元のまま
+  return changed;
+}
+
+bool swapAudioTracks(ProjectData& p, int a, int b) {
+  syncAudioTrackNos(p);
+  const int count = audioTrackCount(p.audios);
+  if (a == b || a < 0 || b < 0 || a >= count || b >= count) return false;
+  bool any = false;
+  for (auto& x : p.audios) {
+    if (x.track == a) {
+      x.track = b;
+      any = true;
+    } else if (x.track == b) {
+      x.track = a;
+      any = true;
+    }
+  }
+  if (!any) return false;
+  std::swap(p.audioTrackNos[size_t(a)], p.audioTrackNos[size_t(b)]);  // 段の番号も、中身と一緒に動く
+  syncAudioTrackNos(p);  // 一番下の段が空になったときは、その段を除く
+  return true;
+}
+
+double freeItemShift(const ProjectData& p, const std::vector<ShiftItem>& movers, const std::vector<QString>& exclude, double want, double minDelta,
+                     double prefer) {
+  // テキストとオーディオを、同じ並べ方の材料（段・始まり・長さ）にそろえて、freeTextShift で調べる。
+  // オーディオの段は、テキストの段と混ざらないよう、番号をずらしておく
+  constexpr int kAudioOffset = 1 << 20;
+  std::vector<TextItem> obstacles;
+  obstacles.reserve(p.texts.size() + p.audios.size());
+  for (const auto& t : p.texts) {
+    TextItem o;
+    o.id = t.id;
+    o.track = t.track;
+    o.start = t.start;
+    o.duration = t.duration;
+    obstacles.push_back(o);
+  }
+  for (const auto& a : p.audios) {
+    TextItem o;
+    o.id = a.id;
+    o.track = kAudioOffset + a.track;
+    o.start = a.start;
+    o.duration = audioDuration(a);
+    obstacles.push_back(o);
+  }
+  std::vector<TextShiftItem> ms;
+  ms.reserve(movers.size());
+  for (const ShiftItem& m : movers) ms.push_back({m.audio ? kAudioOffset + m.track : m.track, m.start, m.duration});
+  return freeTextShift(obstacles, ms, exclude, want, minDelta, prefer);
 }
 
 double overlayDuration(const OverlayItem& o, int fps) {

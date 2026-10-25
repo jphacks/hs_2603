@@ -5,6 +5,7 @@
 #include <QMenu>
 #include <cmath>
 
+#include "core/animtemplates.h"
 #include "core/timeline.h"
 #include "ui/keymap.h"
 #include "ui/widgets.h"
@@ -173,6 +174,18 @@ void execObjectMenu(QWidget* parent, const Selection& sel, const QPoint& globalP
     for (const Editor::AnimPreset& p : Editor::animPresets()) {
       QAction* a = anim->addAction(p.label, parent, [id = p.id] { editor().applyAnimPreset(id); });
       a->setToolTip(p.hint);
+    }
+    // 文字: 自分で保存したアニメーション（マイテンプレート）と、今の動きの保存
+    if (sel.type == Selection::Text) {
+      anim->addSeparator();
+      QMenu* mine = anim->addMenu(QStringLiteral("マイテンプレート"));
+      for (const AnimTemplate& t : animTemplates().list()) {
+        mine->addAction(t.name, parent, [tid = t.id] { applyAnimTemplateWithToast(tid); });
+      }
+      if (animTemplates().list().empty()) mine->addAction(QStringLiteral("（まだありません）"))->setEnabled(false);
+      const TextItem* t = ed.text(id);
+      QAction* save = anim->addAction(QStringLiteral("今の動きをマイテンプレートに保存…"), parent, [parent, id] { saveAnimTemplate(parent, id); });
+      save->setEnabled(t && AnimTemplates::hasAnimation(*t));
     }
     anim->setToolTipsVisible(true);
   }

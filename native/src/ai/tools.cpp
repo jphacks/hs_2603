@@ -930,6 +930,7 @@ ToolResult addMedia(const QJsonObject& in, const QString& merge) {
       item.in = 0;
       item.out = asset.duration;
       item.volume = kMaxVolume;
+      item.track = freeAudioTrack(p.audios, item.start, audioDuration(item));  // その時間が空いている一番上の段
       p.audios.push_back(item);
       added = audioJson(item);
       log = QStringLiteral("オーディオを追加: %1（%2 から）").arg(quote(asset.name), formatTime(item.start));
@@ -1204,6 +1205,7 @@ ToolResult addWorkshopAudio(const QJsonObject& in, const QString& merge) {
       item.out = std::min(asset.duration, total - item.start);
       item.fadeOut = 2;
     }
+    item.track = freeAudioTrack(p.audios, item.start, audioDuration(item));  // その時間が空いている一番上の段
     p.audios.push_back(item);
     added = audioJson(item);
     log = QStringLiteral("オーディオを追加: %1（%2 から）").arg(quote(asset.name), formatTime(item.start));

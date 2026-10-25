@@ -42,7 +42,7 @@ static void volumePointsFromJson(const QJsonArray& arr, std::vector<VolumePoint>
 }
 
 /** キーフレームアニメーション。キーフレームのある項目だけを書く（無ければ "anim" 自体を書かない） */
-static void animToJson(QJsonObject& o, const Animation& a) {
+void animToJson(QJsonObject& o, const Animation& a) {
   if (a.empty()) return;
   QJsonObject anim;
   for (int i = 0; i < kAnimPropCount; ++i) {
@@ -58,7 +58,7 @@ static void animToJson(QJsonObject& o, const Animation& a) {
 }
 
 /** 古いプロジェクトには無い。その場合はアニメーション無し（従来どおり） */
-static Animation animFromJson(const QJsonObject& o) {
+Animation animFromJson(const QJsonObject& o) {
   Animation a;
   const QJsonObject anim = o.value(QStringLiteral("anim")).toObject();
   for (int i = 0; i < kAnimPropCount; ++i) {
@@ -185,6 +185,7 @@ QJsonObject projectToJson(const ProjectData& p) {
         {QStringLiteral("start"), a.start},
         {QStringLiteral("in"), a.in},
         {QStringLiteral("out"), a.out},
+        {QStringLiteral("track"), a.track},
         {QStringLiteral("volume"), a.volume},
         {QStringLiteral("volumePoints"), volumePointsToJson(a.volumePoints)},
         {QStringLiteral("fadeIn"), a.fadeIn},
@@ -197,7 +198,21 @@ QJsonObject projectToJson(const ProjectData& p) {
   // 重ねるトラックは、使っているときだけ書く（以前の版で開いても、ほかの内容はそのまま読める）
   if (!overlays.isEmpty()) proj[QStringLiteral("overlays")] = overlays;
   proj[QStringLiteral("texts")] = texts;
+  // テキストの段の ID（上の段から順。テキストの "track" が、この並びの何番目の段か）。以前の版は読み飛ばし、"track" だけで並べる
+  if (!p.textTrackIds.empty()) {
+    QJsonArray tracks;
+    for (const auto& id : p.textTrackIds) tracks.append(id);
+    proj[QStringLiteral("textTracks")] = tracks;
+  }
+  // 段の番号（見出しの「テキスト 1」「オーディオ 2」の数字。上の段から順）。段を入れ替えたときの見出しを、そのまま残す
+  auto nosToJson = [](const std::vector<int>& nos) {
+    QJsonArray a;
+    for (int n : nos) a.append(n);
+    return a;
+  };
+  if (p.textTrackNos.size() > 1) proj[QStringLiteral("textTrackNos")] = nosToJson(p.textTrackNos);
   proj[QStringLiteral("audios")] = audios;
+  if (p.audioTrackNos.size() > 1) proj[QStringLiteral("audioTrackNos")] = nosToJson(p.audioTrackNos);
   return proj;
 }
 
@@ -386,6 +401,16 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
   }
   // 段を保存していない古いプロジェクトは、以前の自動配置と同じ並びで段を決める（これが最後の自動配置で、以降は保存した段のまま）
   if (!hasAllTracks) autoAssignTextTracks(file.project.texts);
+  // テキストの段の ID（以前のプロジェクトには無い。その場合は、ここで新しく付ける）。段の数に合わせる
+  file.project.textTrackIds.clear();
+  file.project.textTrackNos.clear();
+  if (hasAllTracks) {
+    for (const auto& v : p.value(QStringLiteral("textTracks")).toArray()) file.project.textTrackIds.push_back(v.toString());
+    // 段の番号（以前のプロジェクトには無い。その場合は、上の段から 1, 2, 3 …）
+    for (const auto& v : p.value(QStringLiteral("textTrackNos")).toArray()) file.project.textTrackNos.push_back(v.toInt(0));
+  }
+  syncTextTrackIds(file.project);
+  bool audioTracked = true;
   for (const auto& v : p.value(QStringLiteral("audios")).toArray()) {
     const QJsonObject o = v.toObject();
     AudioItem a;
@@ -394,6 +419,9 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
     a.start = std::max(0.0, numOr(o, "start", 0));
     a.in = std::max(0.0, numOr(o, "in", 0));
     a.out = std::max(a.in, numOr(o, "out", a.in));
+    // オーディオの段（以前のプロジェクトには無い。その場合は、以前と同じ自動の並べ方で決める）
+    if (o.value(QStringLiteral("track")).isDouble()) a.track = std::max(0, o.value(QStringLiteral("track")).toInt());
+    else audioTracked = false;
     a.volume = std::clamp(numOr(o, "volume", kMaxVolume), 0.0, kMaxVolume);
     // 音量キーフレーム（以前のプロジェクトには無い。その場合はクリップ全体の音量のまま）
     volumePointsFromJson(o.value(QStringLiteral("volumePoints")).toArray(), a.volumePoints);
@@ -402,6 +430,12 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
     a.group = o.value(QStringLiteral("group")).toString();
     file.project.audios.push_back(a);
   }
+  if (!audioTracked) autoAssignAudioTracks(file.project.audios);
+  file.project.audioTrackNos.clear();
+  if (audioTracked) {
+    for (const auto& v : p.value(QStringLiteral("audioTrackNos")).toArray()) file.project.audioTrackNos.push_back(v.toInt(0));
+  }
+  syncAudioTrackNos(file.project);
   for (const auto& v : assetList) {
     const QJsonObject o = v.toObject();
     Asset a;

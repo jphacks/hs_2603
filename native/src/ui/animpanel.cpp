@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "core/animtemplates.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -548,6 +549,39 @@ AnimPanel::AnimPanel(QWidget* parent) : QWidget(parent) {
     ++i;
   }
   b->addLayout(grid);
+
+  // マイテンプレート: 文字のアニメーションを名前を付けて保存し、ほかの文字に使う（文字を選んでいるときだけ出す）
+  myBox_ = new QWidget(body_);
+  auto* my = new QVBoxLayout(myBox_);
+  my->setContentsMargins(0, 4, 0, 0);
+  my->setSpacing(6);
+  auto* myHead = new QHBoxLayout();
+  myHead->setSpacing(4);
+  auto* myTitle = makeLabel(QStringLiteral("マイテンプレート"), "muted", myBox_);
+  myTitle->setToolTip(QStringLiteral("自分で保存した文字のアニメーション。ほかの文字を選んで押すと、同じ動きを付けられます"));
+  myHead->addWidget(myTitle);
+  myHead->addStretch(1);
+  mySave_ = new QPushButton(theme::icon(QStringLiteral("plus")), QStringLiteral("今の動きを保存"), myBox_);
+  mySave_->setStyleSheet(QStringLiteral("QPushButton{padding:3px 8px;font-size:8.5pt}"));
+  mySave_->setAccessibleName(QStringLiteral("今のアニメーションをマイテンプレートに保存"));
+  myHead->addWidget(mySave_);
+  my->addLayout(myHead);
+  myEmpty_ = makeLabel(QStringLiteral("キーフレームを付けた文字を選んで「今の動きを保存」を押すと、ここに並びます"), "dim", myBox_);
+  myEmpty_->setWordWrap(true);
+  my->addWidget(myEmpty_);
+  myList_ = new QWidget(myBox_);
+  auto* list = new QVBoxLayout(myList_);
+  list->setContentsMargins(0, 0, 0, 0);
+  list->setSpacing(4);
+  my->addWidget(myList_);
+  b->addWidget(myBox_);
+  connect(mySave_, &QPushButton::clicked, this, [this] {
+    const Selection sel = editor().selection();
+    if (sel.type == Selection::Text) saveAnimTemplate(this, sel.id);
+  });
+  connect(&animTemplates(), &AnimTemplates::changed, this, &AnimPanel::rebuildMyTemplates);
+  rebuildMyTemplates();
+  myBox_->setVisible(false);  // 文字を選んだときに出す（refresh）
   v->addWidget(body_);
 
   connect(toggle_, &QToolButton::clicked, this, [this] { setOpen(!open_); });
@@ -584,6 +618,48 @@ AnimPanel::AnimPanel(QWidget* parent) : QWidget(parent) {
   connect(&ed, &Editor::projectChanged, this, refreshIfVisible);
 
   setOpen(s_panelOpen);
+}
+
+void AnimPanel::rebuildMyTemplates() {
+  // 前の一覧を消す（押したボタンの処理の途中で消さないよう、あとで消す）
+  QLayout* list = myList_->layout();
+  while (QLayoutItem* it = list->takeAt(0)) {
+    if (QWidget* w = it->widget()) {
+      w->hide();
+      w->deleteLater();
+    }
+    delete it;
+  }
+  const auto& templates = animTemplates().list();
+  myEmpty_->setVisible(templates.empty());
+  for (const AnimTemplate& t : templates) {
+    auto* row = new QWidget(myList_);
+    auto* h = new QHBoxLayout(row);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(2);
+    auto* apply = new QPushButton(t.name, row);
+    apply->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    apply->setStyleSheet(QStringLiteral("QPushButton{padding:5px 6px;font-size:8.5pt;text-align:left}"));
+    apply->setToolTip(QStringLiteral("「%1」を、選んでいる文字に適用します（文字はそのまま。適用したあとも、キーフレームは自由に編集できます）\n"
+                                     "右クリックで、名前の変更・削除")
+                          .arg(t.name));
+    apply->setAccessibleName(QStringLiteral("マイテンプレート「%1」を適用").arg(t.name));
+    apply->setContextMenuPolicy(Qt::CustomContextMenu);
+    auto* more = new QToolButton(row);
+    more->setText(QStringLiteral("…"));
+    more->setToolTip(QStringLiteral("名前の変更・削除"));
+    more->setAccessibleName(QStringLiteral("マイテンプレート「%1」のメニュー").arg(t.name));
+    more->setFixedWidth(28);
+    h->addWidget(apply, 1);
+    h->addWidget(more);
+    const QString id = t.id;
+    connect(apply, &QPushButton::clicked, this, [id] { applyAnimTemplateWithToast(id); });
+    connect(apply, &QWidget::customContextMenuRequested, this, [this, apply, id](const QPoint& pos) {
+      execAnimTemplateMenu(this, id, apply->mapToGlobal(pos));
+    });
+    connect(more, &QToolButton::clicked, this, [this, more, id] { execAnimTemplateMenu(this, id, more->mapToGlobal(QPoint(0, more->height()))); });
+    list->addWidget(row);
+  }
 }
 
 void AnimPanel::setOpen(bool open) {
@@ -665,6 +741,11 @@ void AnimPanel::refresh() {
   copy_->setEnabled(!keysAtPlayhead().empty());
   paste_->setEnabled(ed.hasKeyClipboard());
   clear_->setEnabled(anyKeys);
+  // マイテンプレートは文字だけ（キーフレームがあれば、今の動きを保存できる）
+  myBox_->setVisible(ed.selection().type == Selection::Text);
+  mySave_->setEnabled(anyKeys);
+  mySave_->setToolTip(anyKeys ? QStringLiteral("この文字のアニメーション（キーフレームと補間方式、登場のアニメーション）を、名前を付けて保存します")
+                              : QStringLiteral("キーフレームを付けると、保存できます"));
   const double dur = ed.objectDuration();
 
   // 再生位置にキーフレームがあるときだけ、その時間・値・補間方式の入力欄を出す

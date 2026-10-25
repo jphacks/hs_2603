@@ -1,7 +1,10 @@
 #pragma once
 
+#include <QIcon>
 #include <QListWidget>
+#include <QTimer>
 #include <QWidget>
+#include <map>
 
 namespace kv {
 
@@ -17,7 +20,10 @@ class AssetList : public QListWidget {
   /** Media: 動画と写真（サムネイルのカード）  /  Audio: 音声（1 行ずつのカード。試聴ボタン付き） */
   enum class Kind { Media, Audio };
   explicit AssetList(Kind kind = Kind::Media, QWidget* parent = nullptr);
+  /** 一覧を作り直す（すぐに） */
   void rebuild();
+  /** 少しあとにまとめて作り直す（フォルダから続けて登録している間も、作り直すのは 1 秒に十数回まで） */
+  void scheduleRebuild();
   Kind kind() const { return kind_; }
 
  protected:
@@ -31,6 +37,16 @@ class AssetList : public QListWidget {
   /** 一覧から外す。タイムラインで使っている素材は外さず、理由を知らせる */
   void removeFromList(const QString& id);
   Kind kind_;
+  QTimer* rebuildTimer_ = nullptr;
+  /** メディアのカードの絵（変わっていないカードは、作り直すときに描き直さない） */
+  struct Card {
+    int status = 0;
+    double duration = 0;
+    qint64 thumb = 0;
+    qreal dpr = 1;
+    QIcon icon;
+  };
+  std::map<QString, Card> cards_;
 };
 
 /**
@@ -51,6 +67,11 @@ class LibraryPanel {
    * false なら一覧に登録するだけ
    */
   static void pickAndImport(QWidget* parent, bool audioOnly = false, bool addToTimeline = true);
+  /**
+   * フォルダを選ぶダイアログを開いて、中のファイルをまとめて一覧に登録する（タイムラインには置かない）。サブフォルダがあるときは、
+   * その中も含めるかを聞く。audioOnly ならオーディオだけ、そうでなければ動画・写真（メディアの一覧へ）とオーディオ（オーディオの一覧へ）
+   */
+  static void pickFolderAndImport(QWidget* parent, bool audioOnly = false);
 };
 
 }  // namespace kv

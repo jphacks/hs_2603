@@ -199,6 +199,104 @@ void autoAssignTextTracks(std::vector<TextItem>& texts);
 /** 使っている段の数（空の段は数えないが、間が空いていれば間の段も含む）。1 以上 */
 int textTrackCount(const std::vector<TextItem>& texts);
 
+/**
+ * 文字を描く順（texts の添字）。下の段から描き、上の段ほどあとに描く（上の段の文字が手前に重なる）。
+ * 同じ段の中は texts の並びのまま。プレビュー・書き出し・プレビューのクリックの当たり判定（逆順）で同じ順を使う
+ */
+std::vector<size_t> textPaintOrder(const std::vector<TextItem>& texts);
+
+/**
+ * 段の ID（ProjectData::textTrackIds）を段の数にそろえる（足りない分は新しい ID を足し、余った後ろの分は消す。空・重複の ID は作り直す）。
+ * 段の番号（textTrackNos）も一緒にそろえる
+ */
+void syncTextTrackIds(ProjectData& p);
+/**
+ * 段の番号（見出しの数字）を段の数 count にそろえる。余った後ろの分は消し、足りない分・重複・1 未満の番号は、
+ * まだ使っていない一番小さい番号にする。段が 1 つだけ（か無い）なら 1 に戻す
+ */
+void syncTrackNos(std::vector<int>& nos, size_t count);
+
+/** テキストの段の行き先（オーディオの段にも同じ形を使う。moveAudioToTrack） */
+struct TextTrackTarget {
+  enum class Kind { Stay, Lane, Insert };
+  /** Stay: 段を変えない / Lane: 今ある段 index へ / Insert: index の位置（その段の上。段の数なら一番下）に新しい段を差し込んで、そこへ */
+  Kind kind = Kind::Stay;
+  int index = 0;
+  bool operator==(const TextTrackTarget&) const = default;
+};
+
+/**
+ * テキスト id の段を target へ移す（時間は変えない）。Insert のときは、index 以上の段のテキストを 1 段ずつ下へずらして、
+ * 空いた段に入れる（段の ID もずれて、ほかのテキストの段の ID は変わらない）。動かすテキストが元の段に 1 つだけだったときは、
+ * 空になる元の段を詰めて、その段（ID）ごと差し込む位置へ動かす（段の並べ替えになる）。
+ * 段の並びが何も変わらなければ false（何も変えない）
+ */
+bool moveTextToTrack(ProjectData& p, const QString& id, const TextTrackTarget& target);
+
+/** 時間をずらして動かすテキストの、動かす前の段・始まり・長さ */
+struct TextShiftItem {
+  int track = 0;
+  double start = 0;
+  double duration = 0;
+};
+/**
+ * movers をそろって delta だけ時間をずらすとき、同じ段のほかのテキスト（exclude に入っていないもの）と重ならない delta のうち、
+ * want に一番近いもの（端が接するだけなら重ならない）。minDelta より小さくはしない。近さが同じなら prefer に近いほう
+ */
+double freeTextShift(const std::vector<TextItem>& texts, const std::vector<TextShiftItem>& movers, const std::vector<QString>& exclude, double want,
+                     double minDelta, double prefer);
+
+/**
+ * before から時間か段が変わったテキスト（新しく加わったものも）が、同じ段のほかのテキストと重なっていたら、
+ * 重ならない近くの段へ移す（下の段を先に探す。どこも重なるなら、一番下に新しい段）。ほかのテキストの時間・段は変えない
+ */
+void resolveTextOverlaps(ProjectData& next, const ProjectData& before);
+
+// ---- オーディオの段（トラック） -------------------------------------------------------------
+// 段は AudioItem::track に持つ（0 が一番上）。テキストの段と同じ決まり: 追加するときに空いている段へ入れ、
+// 時間を変えても段は変わらない。同じ段の中では時間が重ならない。
+
+bool audioTrackFree(const std::vector<AudioItem>& items, int track, double start, double duration, const QString& excludeId = QString());
+/** 追加するオーディオを入れる段: 重ならない一番上の段。どの段も重なるなら、一番下にひとつ増やした段 */
+int freeAudioTrack(const std::vector<AudioItem>& items, double start, double duration, const QString& excludeId = QString());
+/** 段を持たない古いプロジェクトを読んだときだけ使う。開始時間の順に、重ならない一番上の段へ入れる（以前の自動の並べ方と同じ） */
+void autoAssignAudioTracks(std::vector<AudioItem>& items);
+/** 使っている段の数（間が空いていれば間の段も含む）。1 以上 */
+int audioTrackCount(const std::vector<AudioItem>& items);
+/** resolveTextOverlaps のオーディオ版 */
+void resolveAudioOverlaps(ProjectData& next, const ProjectData& before);
+/** オーディオの段の番号（ProjectData::audioTrackNos）を段の数にそろえる */
+void syncAudioTrackNos(ProjectData& p);
+/**
+ * オーディオ id の段を target へ移す（時間は変えない。タイムラインで上下にドラッグしたとき）。決まりはテキストの moveTextToTrack と同じ:
+ * Insert のときは、index 以上の段のオーディオを 1 段ずつ下へずらして、空いた段に入れる（段の番号もずれて、ほかの段の番号は変わらない）。
+ * 動かすオーディオが元の段に 1 つだけだったときは、空になる元の段を詰めて、その段（の番号）ごと差し込む位置へ動かす。
+ * 段の並びが何も変わらなければ false（何も変えない）
+ */
+bool moveAudioToTrack(ProjectData& p, const QString& id, const TextTrackTarget& target);
+
+// ---- 段の入れ替え（タイムラインの見出しの列をドラッグ） ----
+/**
+ * テキストの段 a と b を入れ替える。段の中のテキストはまとめて動き、時間・長さは変わらない（段の ID・番号も一緒に入れ替える）。
+ * 上下が入れ替わるので、プレビュー・書き出しの重なり順も入れ替わる。何も変わらなければ false
+ */
+bool swapTextTracks(ProjectData& p, int a, int b);
+/** オーディオの段 a と b を入れ替える（段の中のオーディオはまとめて動き、時間・長さは変わらない。段の番号も一緒に入れ替える）。何も変わらなければ false */
+bool swapAudioTracks(ProjectData& p, int a, int b);
+
+/** 時間をずらして動かすもの（テキストかオーディオ）の、動かす前の段・始まり・長さ */
+struct ShiftItem {
+  bool audio = false;
+  int track = 0;
+  double start = 0;
+  double duration = 0;
+};
+/**
+ * freeTextShift のテキスト・オーディオ両方版。movers をそろって delta だけずらすとき、同じ種類・同じ段のほかのもの
+ * （exclude に入っていないもの）と重ならない delta のうち、want に一番近いもの
+ */
+double freeItemShift(const ProjectData& p, const std::vector<ShiftItem>& movers, const std::vector<QString>& exclude, double want, double minDelta, double prefer);
+
 // ---- 重ねるトラック ------------------------------------------------------------------------
 // 段は OverlayItem::track に持つ（0 がメインの映像のすぐ上。数字が大きいほど前）。テキストの段と同じく、
 // 追加するときに一度だけ決め、段を移す操作と上下のドラッグのときだけ変える。
