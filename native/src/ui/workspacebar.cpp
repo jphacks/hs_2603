@@ -1,17 +1,24 @@
 #include "ui/workspacebar.h"
 
 #include <QAction>
+#include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMimeData>
 #include <QSignalBlocker>
 #include <QTabBar>
 #include <QToolButton>
 #include <algorithm>
 
 #include "core/editor.h"
+#include "core/textstyles.h"
+#include "ui/objectmenu.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -91,7 +98,85 @@ WorkspaceBar::WorkspaceBar(QWidget* parent) : QWidget(parent) {
   connect(tabs_, &QWidget::customContextMenuRequested, this, &WorkspaceBar::showTabMenu);
   connect(renameEdit_, &QLineEdit::editingFinished, this, &WorkspaceBar::finishRename);
   connect(&editor(), &Editor::workspacesChanged, this, &WorkspaceBar::sync);
+  // ドラッグしたままタブの上で少し止めると、そのタブに切り替える（通りかかっただけでは切り替えない）
+  setAcceptDrops(true);
+  hoverTimer_.setSingleShot(true);
+  hoverTimer_.setInterval(450);
+  connect(&hoverTimer_, &QTimer::timeout, this, [this] {
+    const int index = hoverIndex_;
+    hoverIndex_ = -1;
+    if (index >= 0 && index < editor().workspaceCount() && index != editor().workspaceIndex()) editor().switchWorkspace(index);
+  });
   sync();
+}
+
+int WorkspaceBar::tabAtGlobal(const QPoint& global) const {
+  if (!isVisible()) return -1;
+  return tabs_->tabAt(tabs_->mapFromGlobal(global));
+}
+
+/**
+ * タブへ持っていけるドラッグか（タイムラインで選んだもの・テキストのスタイル）。
+ * 素材の一覧のものは、その一覧のタブのメディアなので、ほかのタブへは持っていかない
+ */
+static bool tabDrag(const QMimeData* m) {
+  return m && (m->hasFormat(QString::fromLatin1(kTimelineItemsMime)) || m->hasFormat(QString::fromLatin1(kTextPresetMime)));
+}
+
+void WorkspaceBar::hoverTab(const QPoint& pos) {
+  const int index = tabs_->tabAt(tabs_->mapFrom(this, pos));
+  if (index < 0 || index == editor().workspaceIndex()) {
+    hoverIndex_ = -1;
+    hoverTimer_.stop();
+    return;
+  }
+  if (index == hoverIndex_) return;  // 同じタブの上で待っている
+  hoverIndex_ = index;
+  hoverTimer_.start();
+}
+
+void WorkspaceBar::dragEnterEvent(QDragEnterEvent* e) {
+  if (!tabDrag(e->mimeData())) {
+    e->ignore();
+    return;
+  }
+  e->acceptProposedAction();
+  hoverTab(e->position().toPoint());
+}
+
+void WorkspaceBar::dragMoveEvent(QDragMoveEvent* e) {
+  if (!tabDrag(e->mimeData())) {
+    e->ignore();
+    return;
+  }
+  hoverTab(e->position().toPoint());
+  // タイムラインのものは、タブの上で離しても貼り付けられる（そのタブの再生位置に）。素材などは、切り替えるだけ
+  const bool items = e->mimeData()->hasFormat(QString::fromLatin1(kTimelineItemsMime));
+  if (items && tabs_->tabAt(tabs_->mapFrom(this, e->position().toPoint())) >= 0) e->acceptProposedAction();
+  else e->accept(QRect());  // 動かし続けられるように受け付けるが、ここで離しても何もしない
+}
+
+void WorkspaceBar::dragLeaveEvent(QDragLeaveEvent*) {
+  hoverIndex_ = -1;
+  hoverTimer_.stop();
+}
+
+void WorkspaceBar::dropEvent(QDropEvent* e) {
+  hoverIndex_ = -1;
+  hoverTimer_.stop();
+  if (!e->mimeData()->hasFormat(QString::fromLatin1(kTimelineItemsMime))) {
+    e->ignore();
+    return;
+  }
+  const int index = tabs_->tabAt(tabs_->mapFrom(this, e->position().toPoint()));
+  if (index < 0) {
+    e->ignore();
+    return;
+  }
+  // タブの上で離した: そのタブに切り替えて、そのタブの再生位置に貼り付ける
+  if (index != editor().workspaceIndex()) editor().switchWorkspace(index);
+  pasteItems();
+  e->acceptProposedAction();
 }
 
 void WorkspaceBar::sync() {

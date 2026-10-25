@@ -2,6 +2,7 @@
 
 #include <QPoint>
 #include <functional>
+#include <optional>
 
 #include "core/editor.h"
 
@@ -25,5 +26,10 @@ void copyItems();
 void pasteItems();
 /** 選んでいるものを、ほかのタブ（index）にコピーする: そのタブに切り替えて、そのタブの再生位置に貼り付ける */
 void copyItemsToTab(int index);
+/** コピーしたものを、今のタブの時間 t に貼り付ける（ドラッグで落としたとき。ビデオのクリップは clipIndex の位置） */
+void pasteItemsAt(double t, std::optional<int> clipIndex);
+
+/** タイムラインで選んだものを、ほかのタブへドラッグで持っていくときの MIME 形式（中身は写し元のタブの ID。物はアプリのクリップボード） */
+inline constexpr const char* kTimelineItemsMime = "application/x-kantan-timeline-items";
 
 }  // namespace kv

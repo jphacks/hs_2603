@@ -982,3 +982,121 @@ describe('ワークショップの写真', () => {
     assert.equal((await s.db.query('select count(*)::int as n from workshop_files')).rows[0].n, 0);
   });
 });
+
+describe('ワークショップの動画', () => {
+  const as = (token: string) => ({ authorization: `Bearer ${token}` });
+  /** MP4 の箱 */
+  const box = (type: string, ...parts: Buffer[]) => {
+    const body = Buffer.concat(parts);
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(8 + body.length, 0);
+    head.write(type, 4, 'latin1');
+    return Buffer.concat([head, body]);
+  };
+  /** 長さ（mvhd）と映像の大きさ（tkhd）だけを持つ MP4 のふり（サーバーは箱の形と、長さ・大きさだけを読む） */
+  const mp4 = (seconds: number, w: number, h: number, pad = 4096) => {
+    const mvhd = Buffer.alloc(100);
+    mvhd.writeUInt32BE(1000, 12);
+    mvhd.writeUInt32BE(Math.round(seconds * 1000), 16);
+    const tkhd = Buffer.alloc(84);
+    tkhd.writeUInt32BE(w * 65536, 76);
+    tkhd.writeUInt32BE(h * 65536, 80);
+    return Buffer.concat([
+      box('ftyp', Buffer.from('isom\0\0\x02\0isomiso2avc1mp41', 'latin1')),
+      box('moov', box('mvhd', mvhd), box('trak', box('tkhd', tkhd))),
+      box('mdat', Buffer.alloc(pad, 1)),
+    ]);
+  };
+  /** 見本の JPEG のふり（SOF0 に大きさ） */
+  const jpeg = (w: number, h: number) =>
+    Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]),
+      Buffer.alloc(14, 0),
+      Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, h >> 8, h & 0xff, w >> 8, w & 0xff, 0x03]),
+      Buffer.alloc(200, 1),
+    ]);
+  const publish = (token: string, video: Buffer, thumb: Buffer | null = jpeg(480, 270), name = '夏の波') =>
+    req('POST', '/api/workshop/video', {
+      body: { name, description: '自分で撮った動画', video: video.toString('base64'), ...(thumb ? { thumb: thumb.toString('base64') } : {}) },
+      headers: as(token),
+    });
+  let token = '';
+  let other = '';
+  let owner = 0;
+  let videoId = '';
+
+  test('15 秒・フル HD までの MP4 を公開すると、長さと大きさを中身から読んで、見本と一緒に保存する', async () => {
+    const role = (await s.db.query("select id from roles where name = '一般'")).rows[0].id;
+    owner = (
+      await s.db.query('insert into users (email, display_name, password_hash, role_id) values ($1, $2, $3, $4) returning id', [
+        'filmmaker@example.com',
+        '動画の人',
+        await hashPassword('blue-sky-movie-2026'),
+        role,
+      ])
+    ).rows[0].id;
+    token = (await appLogin('filmmaker@example.com', 'blue-sky-movie-2026')).json.token;
+    other = (await appLogin('hanako@example.com', 'blue-river-2026')).json.token;
+    const res = await publish(token, mp4(5, 1920, 1080));
+    assert.equal(res.status, 201, JSON.stringify(res.json));
+    const t = res.json.template;
+    videoId = t.id;
+    assert.equal(t.kind, 'video');
+    assert.deepEqual(t.file, { type: 'mp4', size: mp4(5, 1920, 1080).length, duration: 5, width: 1920, height: 1080 });
+    assert.equal(t.thumb, jpeg(480, 270).toString('base64'));
+    assert.equal('style' in t, false);
+    // 縦長で、15 秒を少しはみ出したもの（書き出しの丸め）も受け付ける
+    const tall = await publish(token, mp4(15.3, 1080, 1920), jpeg(270, 480), '縦の動画');
+    assert.equal(tall.status, 201, JSON.stringify(tall.json));
+    assert.equal(tall.json.template.file.duration, 15.3);
+    assert.equal((await req('DELETE', `/api/workshop/templates/${tall.json.template.id}`, { headers: as(token) })).status, 200);
+  });
+
+  test('長すぎる・大きすぎる動画、MP4 ではないもの、見本の無いものは受け付けない', async () => {
+    assert.equal((await publish(token, mp4(16, 1280, 720))).status, 400, '16 秒');
+    assert.equal((await publish(token, mp4(0, 1280, 720))).status, 400, '長さ 0');
+    assert.equal((await publish(token, mp4(5, 2560, 1440))).status, 400, 'フル HD より大きい');
+    assert.equal((await publish(token, mp4(5, 0, 0))).status, 400, '映像が無い');
+    assert.equal((await publish(token, Buffer.alloc(4096, 0x41))).status, 400, 'MP4 ではない');
+    assert.equal((await publish(token, mp4(5, 1280, 720), null)).status, 400, '見本が無い');
+    assert.equal((await publish(token, mp4(5, 1280, 720), jpeg(960, 540))).status, 400, '見本が大きすぎる');
+    const big = await publish(token, mp4(5, 1280, 720, 30 * 1024 * 1024));
+    assert.equal(big.status, 413);
+  });
+
+  test('ほかの人は動画の一覧で見つけて、中身を読み込める（ほかの種類の一覧には出ない）', async () => {
+    const list = await req('GET', '/api/workshop/templates?kind=video', { headers: as(other) });
+    assert.equal(list.status, 200);
+    assert.equal(list.json.kind, 'video');
+    assert.equal(list.json.total, 1);
+    assert.equal(list.json.templates[0].file.duration, 5);
+    assert.equal(list.json.templates[0].thumb, jpeg(480, 270).toString('base64'));
+    const photos = await req('GET', '/api/workshop/templates?kind=image', { headers: as(other) });
+    assert.equal(photos.json.templates.some((t: { id: string }) => t.id === videoId), false);
+    const file = await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${videoId}/file`, headers: as(other) });
+    assert.equal(file.statusCode, 200);
+    assert.equal(file.headers['content-type'], 'video/mp4');
+    assert.equal(file.headers['x-kantan-file-type'], 'mp4');
+    assert.ok(file.rawPayload.equals(mp4(5, 1920, 1080)));
+    // 管理画面: 種類で絞り込め、管理者も中身を見られる
+    adminCookie = cookieOf((await req('POST', '/api/auth/login', { body: { email: ADMIN, password: 'new-admin-password-1', client: 'admin' } })).res);
+    const admin = await req('GET', '/api/admin/workshop?kind=video', { headers: adminHeaders(adminCookie, false) });
+    assert.equal(admin.json.templates.length, 1);
+    assert.equal(admin.json.templates[0].file.duration, 5);
+    const adminFile = await s.app.inject({ method: 'GET', url: `/api/admin/workshop/${videoId}/file`, headers: adminHeaders(adminCookie, false) });
+    assert.equal(adminFile.headers['content-type'], 'video/mp4');
+  });
+
+  test('1 人が公開できる動画の大きさには上限があり、公開をやめると中身も消える', async () => {
+    await s.db.query(
+      `insert into workshop_templates (user_id, kind, name, style, file_type, file_size, duration, width, height) values ($1, 'video', '大きい動画', '{}', 'mp4', $2, 10, 1920, 1080)`,
+      [owner, 300 * 1024 * 1024],
+    );
+    const over = await publish(token, mp4(3, 640, 360));
+    assert.equal(over.status, 409);
+    assert.equal(over.json.code, 'too_much_videos');
+    await s.db.query("delete from workshop_templates where name = '大きい動画'");
+    assert.equal((await req('DELETE', `/api/workshop/templates/${videoId}`, { headers: as(token) })).status, 200);
+    assert.equal((await s.db.query('select count(*)::int as n from workshop_files')).rows[0].n, 0);
+  });
+});

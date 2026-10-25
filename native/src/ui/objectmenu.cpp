@@ -2,10 +2,15 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QColorDialog>
 #include <QMenu>
+#include <algorithm>
 #include <cmath>
 
 #include "core/animtemplates.h"
+#include "core/filters.h"
+#include "core/textstyles.h"
+#include "core/texttemplates.h"
 #include "core/timeline.h"
 #include "media/mediamanager.h"
 #include "ui/keymap.h"
@@ -24,7 +29,8 @@ void copyItems() {
                                    : QStringLiteral("%1 個コピーしました").arg(n));
 }
 
-void pasteItems() {
+/** 貼り付けて、足したメディアの準備と知らせをする（at を渡せばその時間、無ければ再生位置） */
+static void pasteWith(std::optional<double> at, std::optional<int> clipIndex) {
   Editor& ed = editor();
   if (!ed.hasItemClipboard()) {
     ed.toast(QStringLiteral("貼り付けるものがありません。タイムラインで選んで「コピー」してください"));
@@ -32,7 +38,7 @@ void pasteItems() {
   }
   ed.pause();
   std::vector<Asset> added;
-  const int n = ed.pasteClipboard(&added);
+  const int n = ed.pasteClipboard(&added, at, clipIndex);
   // 一覧に足したメディアは、サムネイル・波形・写真の表示用の画像を作る（タブを開いたときと同じ）
   for (const Asset& a : added) {
     if (a.status != AssetStatus::Missing) media().prepare(a);
@@ -43,6 +49,16 @@ void pasteItems() {
   }
   ed.toast(added.empty() ? QStringLiteral("%1 個貼り付けました").arg(n)
                          : QStringLiteral("%1 個貼り付けました（使っているメディア %2 個を、このタブの一覧に入れました）").arg(n).arg(added.size()));
+}
+
+void pasteItems() {
+  pasteWith(std::nullopt, std::nullopt);
+}
+
+void pasteItemsAt(double t, std::optional<int> clipIndex) {
+  pasteWith(std::max(0.0, t), clipIndex);
+  // 落とした所を見せる
+  editor().seek(std::max(0.0, t));
 }
 
 void copyItemsToTab(int index) {
@@ -105,6 +121,139 @@ void addFadeMenu(QMenu* menu, const QString& title, double current, const std::f
     QAction* now = sub->addAction(QStringLiteral("今: %1秒").arg(current, 0, 'f', 2));
     now->setEnabled(false);
   }
+}
+
+/** 印を付けて選べる項目（同じまとまりの中で 1 つだけ） */
+QAction* addChoice(QMenu* menu, QActionGroup* group, const QString& label, bool checked, QObject* context, const std::function<void()>& apply) {
+  QAction* a = menu->addAction(label);
+  a->setCheckable(true);
+  a->setChecked(checked);
+  if (group) group->addAction(a);
+  QObject::connect(a, &QAction::triggered, context, [apply] { apply(); });
+  return a;
+}
+
+/** 映像・写真: 背景を透過（クロマキー）と、プリセット（フィルター・表示方法） */
+void addVisualMenus(QMenu* menu, QWidget* parent, const VideoClip& c, bool overlay) {
+  const QString id = c.id;
+  menu->addSeparator();
+  QMenu* bg = menu->addMenu(QStringLiteral("背景を透過（クロマキー）"));
+  QAction* on = bg->addAction(QStringLiteral("背景の色を透明にする"));
+  on->setCheckable(true);
+  on->setChecked(c.chroma.enabled);
+  QObject::connect(on, &QAction::toggled, parent, [id](bool v) { editor().updateClip(id, [&](VideoClip& x) { x.chroma.enabled = v; }); });
+  bg->addSeparator();
+  auto setKey = [id](const QColor& col) {
+    editor().updateClip(id, [&](VideoClip& x) {
+      x.chroma.color = col;
+      x.chroma.enabled = true;
+    });
+  };
+  bg->addAction(QStringLiteral("緑の背景（グリーンバック）を透明に"), parent, [setKey] { setKey(QColor(0, 255, 0)); });
+  bg->addAction(QStringLiteral("青の背景（ブルーバック）を透明に"), parent, [setKey] { setKey(QColor(0, 0, 255)); });
+  bg->addAction(QStringLiteral("色を選んで透明に…"), parent, [parent, id, setKey] {
+    const VideoClip* cur = editor().clip(id);
+    const QColor col = QColorDialog::getColor(cur ? cur->chroma.color : QColor(0, 255, 0), parent, QStringLiteral("透明にする色"));
+    if (col.isValid()) setKey(col);
+  });
+  bg->addAction(QStringLiteral("スポイトでプレビューから選ぶ"), parent, [id] {
+    // 右の設定欄の「スポイトでプレビューから選ぶ」と同じ（今の再生位置にその映像が出ていなければ、始まりへ動かす）
+    Editor& e = editor();
+    double start = 0, dur = 0;
+    if (e.clipSpan(id, &start, &dur)) {
+      const double t = e.currentTime();
+      if (t < start - 1e-9 || t >= start + dur - 1e-9) e.seek(start);
+    }
+    e.setChromaPick(id);
+    e.toast(QStringLiteral("プレビューの映像で、透明にしたい色の所をクリックしてください（Esc でやめる）"));
+  });
+  if (!overlay) {
+    // メインのビデオでは、透明にした所は黒になる。後ろの映像を見せるには、重ねるトラックへ移す
+    bg->addSeparator();
+    bg->addAction(QStringLiteral("メインのビデオでは、透明にした所は黒になります"))->setEnabled(false);
+    bg->addAction(QStringLiteral("重ねるトラックへ移す（後ろの映像が見えるように）"), parent, [id] {
+      Editor& e = editor();
+      double start = 0, dur = 0;
+      if (!e.clipSpan(id, &start, &dur)) return;
+      e.moveClipToOverlay(id, start, freeOverlayTrack(e.project().overlays, start, dur, e.project().settings.fps));
+    });
+  }
+
+  QMenu* pre = menu->addMenu(QStringLiteral("プリセット"));
+  QMenu* filters = pre->addMenu(QStringLiteral("フィルター"));
+  auto* fg = new QActionGroup(filters);
+  for (const auto& p : filterPresets()) {
+    const FilterPreset pid = p.id;
+    addChoice(filters, fg, p.label, p.id == c.color.preset, parent,
+              [id, pid] { editor().updateClip(id, [&](VideoClip& x) { x.color = colorFromPreset(pid); }); });
+  }
+  if (!overlay) {
+    // 重ねるトラックは、いつも全体表示（余白は透明）
+    QMenu* fit = pre->addMenu(QStringLiteral("表示方法"));
+    auto* gg = new QActionGroup(fit);
+    const std::pair<FitMode, QString> fits[] = {{FitMode::Contain, QStringLiteral("全体表示")},
+                                                {FitMode::Cover, QStringLiteral("拡大（画面いっぱい）")},
+                                                {FitMode::Blur, QStringLiteral("ぼかし背景")}};
+    for (const auto& [mode, label] : fits) {
+      const FitMode m = mode;
+      addChoice(fit, gg, label, c.fit == m, parent, [id, m] { editor().updateClip(id, [&](VideoClip& x) { x.fit = m; }); });
+    }
+  }
+}
+
+/** 文字: 背景（帯）の有り無しと色、プリセット（スタイル・マイテンプレート） */
+void addTextMenus(QMenu* menu, QWidget* parent, const TextItem& t) {
+  const QString id = t.id;
+  menu->addSeparator();
+  QMenu* bg = menu->addMenu(QStringLiteral("背景"));
+  auto* group = new QActionGroup(bg);
+  const bool none = t.boxOpacity <= 0.001;
+  addChoice(bg, group, QStringLiteral("背景なし（透明）"), none, parent, [id] { editor().updateText(id, [](TextItem& x) { x.boxOpacity = 0; }); });
+  bg->addSeparator();
+  struct Box {
+    QString label;
+    QColor color;
+    double opacity;
+  };
+  const Box boxes[] = {{QStringLiteral("黒い帯（半透明）"), QColor(0, 0, 0), 0.62},
+                       {QStringLiteral("白い帯"), QColor(0xff, 0xff, 0xff), 0.92},
+                       {QStringLiteral("クリーム色の帯"), QColor(0xff, 0xf6, 0xd5), 0.95},
+                       {QStringLiteral("黄色の帯"), QColor(0xff, 0xe1, 0x4d), 0.95}};
+  for (const Box& b : boxes) {
+    const bool on = !none && t.boxColor == b.color && std::abs(t.boxOpacity - b.opacity) < 0.01;
+    const QColor col = b.color;
+    const double op = b.opacity;
+    addChoice(bg, group, b.label, on, parent, [id, col, op] {
+      editor().updateText(id, [&](TextItem& x) {
+        x.boxColor = col;
+        x.boxOpacity = op;
+      });
+    });
+  }
+  bg->addAction(QStringLiteral("背景の色を選ぶ…"), parent, [parent, id] {
+    const TextItem* cur = editor().text(id);
+    const QColor col = QColorDialog::getColor(cur ? cur->boxColor : QColor(0, 0, 0), parent, QStringLiteral("背景の色"));
+    if (!col.isValid()) return;
+    editor().updateText(id, [&](TextItem& x) {
+      x.boxColor = col;
+      if (x.boxOpacity <= 0.001) x.boxOpacity = 0.6;
+    });
+  });
+
+  // プリセット: 文字・時間・位置はそのままで、見た目だけを変える（右の設定欄の「スタイル」と同じ）
+  QMenu* pre = menu->addMenu(QStringLiteral("プリセット（スタイル）"));
+  auto apply = [id](const QString& presetId) { editor().updateText(id, [&](TextItem& x) { x = applyTextPreset(x, presetId); }); };
+  for (const auto& p : textPresets()) {
+    const QString pid = p.id;
+    pre->addAction(p.label, parent, [apply, pid] { apply(pid); });
+  }
+  pre->addSeparator();
+  QMenu* mine = pre->addMenu(QStringLiteral("マイテンプレート"));
+  for (const auto& p : textTemplates().list()) {
+    const QString pid = p.id;
+    mine->addAction(p.label, parent, [apply, pid] { apply(pid); });
+  }
+  if (textTemplates().list().empty()) mine->addAction(QStringLiteral("（まだありません）"))->setEnabled(false);
 }
 
 }  // namespace
@@ -220,6 +369,13 @@ void execObjectMenu(QWidget* parent, const Selection& sel, const QPoint& globalP
         menu.addAction(QStringLiteral("音量キーフレームをすべて削除"), parent, [id] { editor().clearVolumePoints(id); });
       }
     }
+  }
+
+  // ---- 背景を透過・プリセット（映像・写真と文字。右の設定欄と同じ変更） ----
+  if (sel.type == Selection::Clip || sel.type == Selection::Overlay) {
+    if (const VideoClip* c = ed.clip(id)) addVisualMenus(&menu, parent, *c, ed.overlay(id) != nullptr);
+  } else if (sel.type == Selection::Text) {
+    if (const TextItem* t = ed.text(id)) addTextMenus(&menu, parent, *t);
   }
 
   // ---- アニメーション（映像と文字。作ったあとも、キーフレームは自由に編集できる） ----

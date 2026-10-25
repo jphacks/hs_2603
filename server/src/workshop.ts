@@ -34,7 +34,85 @@ export const WORKSHOP_LIMITS = {
   /** 一覧に出す見本（JPEG）の長い辺（ピクセル）と大きさ（バイト）の上限 */
   thumbLong: 480,
   thumbBytes: 200 * 1024,
+  /** 動画 1 つの大きさの上限（バイト） */
+  videoBytes: 30 * 1024 * 1024,
+  /** 動画の長さの上限（秒）。書き出しの丸めで少しはみ出すことがあるので、videoSlack 秒までは受け付ける */
+  videoSeconds: 15,
+  videoSlack: 0.5,
+  /** 1 人が公開できる動画の大きさの合計（バイト） */
+  videoBytesPerUser: 300 * 1024 * 1024,
 } as const;
+
+/** 受け付ける動画の形式と、返すときの Content-Type（アプリが MP4（H.264・AAC）にしてから送る） */
+export const VIDEO_TYPES = {
+  mp4: 'video/mp4',
+} as const;
+export type VideoType = keyof typeof VIDEO_TYPES;
+
+/** MP4 の箱（大きさ・種類・中身の範囲）を、start〜end の中で順に読む。壊れていれば、そこまで */
+function mp4Boxes(buf: Buffer, start: number, end: number): { type: string; start: number; end: number }[] {
+  const out: { type: string; start: number; end: number }[] = [];
+  let i = start;
+  while (i + 8 <= end && out.length < 4096) {
+    let size = buf.readUInt32BE(i);
+    const type = buf.toString('latin1', i + 4, i + 8);
+    let header = 8;
+    if (size === 1) {
+      if (i + 16 > end) break;
+      const big = buf.readBigUInt64BE(i + 8);
+      if (big > BigInt(end - i)) break;
+      size = Number(big);
+      header = 16;
+    } else if (size === 0) {
+      size = end - i;
+    }
+    if (size < header || i + size > end) break;
+    out.push({ type, start: i + header, end: i + size });
+    i += size;
+  }
+  return out;
+}
+
+/**
+ * MP4 の長さ（秒）と映像の大きさ（ピクセル）を、ファイルの中身から読む（拡張子・アプリの知らせは信じない）。
+ * 長さは moov の mvhd、大きさは映像のトラックの tkhd から。MP4 でない・読めなければ null
+ */
+export function readMp4(buf: Buffer): { type: VideoType; duration: number; width: number; height: number } | null {
+  if (!startsWith(buf, [0x66, 0x74, 0x79, 0x70], 4)) return null; // ....ftyp
+  const moov = mp4Boxes(buf, 0, buf.length).find((b) => b.type === 'moov');
+  if (!moov) return null;
+  const inner = mp4Boxes(buf, moov.start, moov.end);
+  const mvhd = inner.find((b) => b.type === 'mvhd');
+  if (!mvhd) return null;
+  const v = buf[mvhd.start];
+  let timescale = 0;
+  let duration = 0;
+  if (v === 1 && mvhd.end - mvhd.start >= 32) {
+    timescale = buf.readUInt32BE(mvhd.start + 20);
+    duration = Number(buf.readBigUInt64BE(mvhd.start + 24));
+  } else if (v === 0 && mvhd.end - mvhd.start >= 20) {
+    timescale = buf.readUInt32BE(mvhd.start + 12);
+    duration = buf.readUInt32BE(mvhd.start + 16);
+  }
+  if (!timescale) return null;
+  // 映像のトラックの大きさ（tkhd の幅・高さ。16.16 の固定小数点。音だけのトラックは 0）
+  let width = 0;
+  let height = 0;
+  for (const trak of inner.filter((b) => b.type === 'trak')) {
+    const tkhd = mp4Boxes(buf, trak.start, trak.end).find((b) => b.type === 'tkhd');
+    if (!tkhd) continue;
+    const at = tkhd.start + (buf[tkhd.start] === 1 ? 88 : 76);
+    if (at + 8 > tkhd.end) continue;
+    const w = Math.round(buf.readUInt32BE(at) / 65536);
+    const h = Math.round(buf.readUInt32BE(at + 4) / 65536);
+    if (w > 0 && h > 0) {
+      width = w;
+      height = h;
+      break;
+    }
+  }
+  return { type: 'mp4', duration: duration / timescale, width, height };
+}
 
 /** 受け付ける写真の形式と、返すときの Content-Type */
 export const IMAGE_TYPES = {

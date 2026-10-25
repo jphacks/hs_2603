@@ -1295,7 +1295,7 @@ int Editor::copySelection() {
   return itemClip_.count();
 }
 
-int Editor::pasteClipboard(std::vector<Asset>* added) {
+int Editor::pasteClipboard(std::vector<Asset>* added, std::optional<double> atTime, std::optional<int> clipIndex) {
   if (itemClip_.empty()) return 0;
   const ItemClipboard c = itemClip_;  // 貼り付けの途中で写し直されても困らないように
   // メディア: 同じファイル（同じ種類）が今の一覧にあればそれを使い、無ければ写しを足す（ID は新しくする）
@@ -1338,20 +1338,24 @@ int Editor::pasteClipboard(std::vector<Asset>* added) {
     if (it == groups.end()) it = groups.insert({g, newId()}).first;
     return it->second;
   };
-  const double at = ws().currentTime;
+  const double at = std::max(0.0, atTime.value_or(ws().currentTime));
   std::vector<Selection> pasted;
   commit([&](ProjectData& p) {
     const int fps = p.settings.fps;
     const double shift = at - c.origin;
     if (!c.clips.empty()) {
-      // メインのビデオクリップ: 再生位置にあるクリップのうしろ（クリップの頭なら、その前）に入れる
+      // メインのビデオクリップ: 決めた位置か、その時間にあるクリップのうしろ（クリップの頭なら、その前）に入れる
       const TimelineLayout layout = layoutClips(p.clips, fps);
       int index = int(p.clips.size());
-      for (size_t i = 0; i < layout.items.size(); ++i) {
-        const auto& l = layout.items[i];
-        if (at < l.end - 1e-6) {
-          index = at <= l.start + 1e-6 ? int(i) : int(i) + 1;
-          break;
+      if (clipIndex) {
+        index = std::clamp(*clipIndex, 0, int(p.clips.size()));
+      } else {
+        for (size_t i = 0; i < layout.items.size(); ++i) {
+          const auto& l = layout.items[i];
+          if (at < l.end - 1e-6) {
+            index = at <= l.start + 1e-6 ? int(i) : int(i) + 1;
+            break;
+          }
         }
       }
       for (const VideoClip& v : c.clips) {

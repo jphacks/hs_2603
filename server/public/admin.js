@@ -776,7 +776,8 @@ async function setTemplate(t, body, done) {
 }
 
 async function deleteTemplate(t) {
-  const what = t.kind === 'audio' ? ['オーディオ', 'ファイル'] : t.kind === 'image' ? ['写真', '写真'] : ['テンプレート', 'テンプレート'];
+  const what =
+    t.kind === 'audio' ? ['オーディオ', 'ファイル'] : t.kind === 'image' ? ['写真', '写真'] : t.kind === 'video' ? ['動画', '動画'] : ['テンプレート', 'テンプレート'];
   if (!confirm(`${what[0]}「${t.name}」を削除しますか？ 元には戻せません（すでに使っている人の手元の${what[1]}は、そのまま残ります）。`)) return;
   try {
     await api('DELETE', `/api/admin/workshop/${t.id}`);
@@ -809,6 +810,24 @@ function imageSample(t) {
     {},
     h('a', { href, target: '_blank', rel: 'noopener', title: '元の大きさで見る' }, h('img', { class: 'thumb', src: `data:image/jpeg;base64,${t.thumb ?? ''}`, alt: `${t.name} の見本` })),
     h('div', { class: 'sub' }, `${String(f.type ?? '').toUpperCase()}・${num(f.width)}×${num(f.height)}・${num(Math.round(Number(f.size ?? 0) / 1024))} KB`),
+  );
+}
+
+/** 動画の見本（一覧用の小さな JPEG を表紙にして、その場で再生できる。押すまで読み込まない） */
+function videoSample(t) {
+  const f = t.file ?? {};
+  return h(
+    'td',
+    {},
+    h('video', {
+      class: 'thumb',
+      controls: true,
+      preload: 'none',
+      poster: `data:image/jpeg;base64,${t.thumb ?? ''}`,
+      src: `/api/admin/workshop/${encodeURIComponent(t.id)}/file`,
+      'aria-label': `${t.name} を再生`,
+    }),
+    h('div', { class: 'sub' }, `${String(f.type ?? '').toUpperCase()}・${num(f.width)}×${num(f.height)}・${Number(f.duration ?? 0).toFixed(1)} 秒・${num(Math.round(Number(f.size ?? 0) / 1024))} KB`),
   );
 }
 
@@ -882,6 +901,7 @@ async function viewWorkshop(root) {
       ['text', 'テキストのテンプレート'],
       ['audio', 'オーディオ'],
       ['image', '写真'],
+      ['video', '動画'],
     ].map(([v, label]) => h('option', { value: v, selected: v === kind }, label)),
   );
   const actions = (t) => {
@@ -899,15 +919,22 @@ async function viewWorkshop(root) {
     h(
       'p',
       { class: 'hint' },
-      'アプリで作ったテキストのテンプレート（フォント・色・大きさ・登場のアニメーションなどの見た目。文字そのものは公開されません）と、オーディオ（BGM・効果音など）、写真（フル HD まで）を公開して、ほかの人が使えるようにします。オーディオと写真は、公開する人が「自分で作った・公開してよいもの」だと確かめてから公開します。写真は見本を押すと、元の大きさで見られます。',
+      'アプリで作ったテキストのテンプレート（フォント・色・大きさ・登場のアニメーションなどの見た目。文字そのものは公開されません）と、オーディオ（BGM・効果音など）、写真（フル HD まで）、動画（15 秒・フル HD まで。GIF も動画にして公開）を公開して、ほかの人が使えるようにします。オーディオ・写真・動画は、公開する人が「自分で作った・公開してよいもの」だと確かめてから公開します。写真は見本を押すと元の大きさで見られ、動画はその場で再生できます。',
     ),
     h('div', { class: 'box narrow' }, h('h2', {}, 'ワークショップの使い方'), form),
     h('div', { class: 'toolbar' }, h('h2', { class: 'grow' }, `公開されたもの（${num(data.templates.length)} 個${data.templates.length >= 200 ? '、新しい 200 個まで' : ''}）`), kindSelect, select),
     table(
       ['名前', '見本', '作った人', '状態', ['使った人', 'num'], ['報告', 'num'], '公開した日時', ''],
       data.templates.map((t) => [
-        h('td', { class: 'wrap' }, h('span', { class: 'tag' }, t.kind === 'audio' ? 'オーディオ' : t.kind === 'image' ? '写真' : 'テキスト'), ' ', t.name, t.description ? h('div', { class: 'sub' }, t.description) : null),
-        t.kind === 'audio' ? audioSample(t) : t.kind === 'image' ? imageSample(t) : templateSample(t.style),
+        h(
+          'td',
+          { class: 'wrap' },
+          h('span', { class: 'tag' }, t.kind === 'audio' ? 'オーディオ' : t.kind === 'image' ? '写真' : t.kind === 'video' ? '動画' : 'テキスト'),
+          ' ',
+          t.name,
+          t.description ? h('div', { class: 'sub' }, t.description) : null,
+        ),
+        t.kind === 'audio' ? audioSample(t) : t.kind === 'image' ? imageSample(t) : t.kind === 'video' ? videoSample(t) : templateSample(t.style),
         cellUser(t.author, t.email),
         h('td', {}, h('span', { class: `tag ${TEMPLATE_STATUS[t.status]?.[1] ?? ''}` }, TEMPLATE_STATUS[t.status]?.[0] ?? t.status)),
         [num(t.uses), 'num'],

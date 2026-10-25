@@ -592,8 +592,8 @@ export function adminRoutes(app: FastifyInstance, ctx: AppContext): void {
     } else if (q.status === 'reported') {
       where.push('exists (select 1 from workshop_reports r where r.template_id = t.id)');
     }
-    // テキストのテンプレートか、オーディオか、写真か（送らなければすべて）
-    if (q.kind === 'text' || q.kind === 'audio' || q.kind === 'image') {
+    // テキストのテンプレートか、オーディオか、写真か、動画か（送らなければすべて）
+    if (q.kind === 'text' || q.kind === 'audio' || q.kind === 'image' || q.kind === 'video') {
       params.push(q.kind);
       where.push(`t.kind = $${params.length}`);
     }

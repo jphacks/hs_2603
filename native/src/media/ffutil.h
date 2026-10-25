@@ -34,6 +34,8 @@ struct ProbeInfo {
 
 QString ffError(int code);
 bool isImagePath(const QString& path);
+/** 動く GIF（コマが 2 つ以上）か。動く GIF は、写真ではなく動画として読み込む（動かないものは、これまでどおり写真） */
+bool isAnimatedGif(const QString& path);
 
 /** 色の規格が書かれていない動画を BT.709 とみなすか（HD 以上なら BT.709、SD なら BT.601） */
 bool assumeBt709(int width, int height);

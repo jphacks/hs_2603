@@ -20,8 +20,8 @@
 
 namespace kv::ai {
 
-/** ワークショップに公開できるものの種類 */
-enum class WorkshopKind { Text, Audio, Image };
+/** ワークショップに公開できるものの種類（Video は短い動画。GIF も MP4 にして公開する） */
+enum class WorkshopKind { Text, Audio, Image, Video };
 
 /** ワークショップに公開されたもの 1 つ（テキストのテンプレートか、オーディオ） */
 struct WorkshopTemplate {
@@ -42,7 +42,7 @@ struct WorkshopTemplate {
   QDateTime createdAt;
   /** テキストのテンプレートの見た目（値の範囲は確かめてある。文字は空） */
   TextItem style;
-  /** オーディオ・写真のファイルの形式（mp3・jpg など。サーバーが中身から決めたもの）・大きさ（バイト）・オーディオの長さ（秒） */
+  /** オーディオ・写真・動画のファイルの形式（mp3・jpg・mp4 など。サーバーが中身から決めたもの）・大きさ（バイト）・オーディオと動画の長さ（秒） */
   QString fileType;
   qint64 fileSize = 0;
   double duration = 0;
@@ -75,6 +75,17 @@ QString workshopImageDir();
 QString workshopImageFile(const QString& id);
 /** path が、ワークショップから追加した写真か（ほかの人が撮ったものなので、公開し直せない） */
 bool isWorkshopImage(const QString& path);
+
+/** 公開できる動画 1 つの大きさの上限（バイト。サーバーと同じ）と、長さの上限（秒。書き出しの丸めで少しはみ出すぶんは受け付ける） */
+constexpr qint64 kWorkshopVideoMaxBytes = 30LL * 1024 * 1024;
+constexpr double kWorkshopVideoMaxSeconds = 15;
+constexpr double kWorkshopVideoSlack = 0.5;
+/** ワークショップから追加した動画を置くフォルダー（%LOCALAPPDATA%\JPHACKS\kantan-video-editor\workshop\video） */
+QString workshopVideoDir();
+/** ワークショップの動画 id を、もう手元に置いてあれば、そのファイル（無ければ空） */
+QString workshopVideoFile(const QString& id);
+/** path が、ワークショップから追加した動画か（ほかの人が撮ったものなので、公開し直せない） */
+bool isWorkshopVideo(const QString& path);
 
 /** 一覧の 1 ページ分 */
 struct WorkshopPage {
@@ -116,6 +127,16 @@ class Workshop : public QObject {
    */
   void publishImage(const QString& name, const QString& description, const QImage& image, QObject* ctx,
                     std::function<void(const QString& error, const WorkshopTemplate& published, const QString& message)> done);
+  /**
+   * 動画（GIF も）path を公開する。同梱の ffmpeg で、15 秒まで・フル HD に収まる MP4（H.264・AAC）に作り直し
+   * （撮った場所などの情報は入れない。GIF の透明な所は黒にする）、一覧の見本と一緒に送る。
+   * size はその映像の大きさ、duration は長さ（秒。GIF の最後のコマを、最後まで出すのに使う）、withAudio が false なら音を入れない。
+   * stage は今していること（作り直している・送っている）
+   */
+  void publishVideo(const QString& name, const QString& description, const QString& path, const QSize& size, double duration, bool withAudio,
+                    QObject* ctx,
+                    std::function<void(const QString& error, const WorkshopTemplate& published, const QString& message)> done,
+                    std::function<void(const QString& stage)> stage = {});
   /**
    * オーディオ・写真を手元に置く（もう置いてあれば、読み込まずにそのファイルを返す）。
    * file は workshopAudioDir()・workshopImageDir() の中のファイル

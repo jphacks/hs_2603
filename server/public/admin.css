@@ -143,3 +143,5 @@ dialog .actions .left { margin-right: auto; display: flex; gap: 8px; flex-wrap: 
 td audio { display: block; width: 210px; height: 36px; }
 /* 写真の見本（一覧用の小さな画像） */
 td img.thumb { display: block; max-width: 160px; max-height: 90px; border-radius: 4px; background: #5c636e; }
+/* 動画の見本（表紙は一覧用の小さな画像。押すと、その場で再生する） */
+td video.thumb { display: block; width: 210px; max-height: 120px; border-radius: 4px; background: #000; }

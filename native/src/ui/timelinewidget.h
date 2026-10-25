@@ -305,6 +305,13 @@ class TimelineView : public QAbstractScrollArea {
   double scrollRemainder_ = 0;  // スクロールバーは整数なので、端数は次に持ち越す
   /** 素材一覧から動画・写真・オーディオなどをドラッグしてきている最中 */
   bool libDrag_ = false;
+  /** ほかのタブ（またはこのタブ）で選んだものを、ドラッグで持ってきている最中と、落とす時間（縦線を出す） */
+  bool itemsDrag_ = false;
+  std::optional<double> itemsDropT_;
+  /** 動かしているものを、ほかのタブへ持っていくドラッグに切り替える（タイムラインの中の移動はやめて、元に戻す） */
+  void startTabDrag();
+  /** 持ってきているものを落とす時間・差し込む位置を、マウスの位置に合わせる */
+  void refreshItemsDrop(QPointF pos);
   /** ドラッグ・ドロップ中の物の終わりの時間。ここまでスクロールできるよう、スクロール範囲を広げる（0 は広げない） */
   double dragReach_ = 0;
   /** ドラッグを終えたときの表示位置を保つための、内容の終わりの時間（0 は保たない）。表示を左へ戻すと縮める */

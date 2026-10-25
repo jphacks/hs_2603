@@ -409,6 +409,7 @@ void MainWindow::buildMenus() {
   workshop->addAction(QStringLiteral("テキストのテンプレートを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Text); });
   workshop->addAction(QStringLiteral("オーディオを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Audio); });
   workshop->addAction(QStringLiteral("写真を探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Image); });
+  workshop->addAction(QStringLiteral("動画・GIF を探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Video); });
   auto syncWorkshop = [workshop] { workshop->menuAction()->setVisible(ai::workshopVisible()); };
   syncWorkshop();
   connect(&ai::account(), &ai::Account::changed, workshop, syncWorkshop);

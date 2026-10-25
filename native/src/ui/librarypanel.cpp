@@ -387,13 +387,17 @@ void AssetList::contextMenuEvent(QContextMenuEvent* e) {
     overlay->setEnabled(usable);
   }
   QAction* remove = menu.addAction(QStringLiteral("一覧から削除"));
-  // オーディオと写真は、ワークショップに公開できる（AI サーバーで使えるときだけ。ワークショップから追加したものは、作った人のものなので出さない）
+  // オーディオ・写真・動画（動く GIF も）は、ワークショップに公開できる（AI サーバーで使えるときだけ。ワークショップから追加したものは、作った人のものなので出さない）
   QAction* publish = nullptr;
   const bool image = a && a->kind == AssetKind::Image;
-  if ((kind_ == Kind::Audio || image) && ai::workshopVisible()) {
+  const bool video = kind_ == Kind::Media && a && a->kind == AssetKind::Video;
+  if ((kind_ == Kind::Audio || image || video) && ai::workshopVisible()) {
     menu.addSeparator();
-    if (a && (image ? ai::isWorkshopImage(a->path) : ai::isWorkshopAudio(a->path))) {
-      menu.addAction(image ? QStringLiteral("ワークショップから追加した写真") : QStringLiteral("ワークショップから追加したオーディオ"))->setEnabled(false);
+    if (a && (image ? ai::isWorkshopImage(a->path) : video ? ai::isWorkshopVideo(a->path) : ai::isWorkshopAudio(a->path))) {
+      menu.addAction(image   ? QStringLiteral("ワークショップから追加した写真")
+                     : video ? QStringLiteral("ワークショップから追加した動画")
+                             : QStringLiteral("ワークショップから追加したオーディオ"))
+          ->setEnabled(false);
     } else {
       publish = menu.addAction(theme::icon(QStringLiteral("upload")), QStringLiteral("ワークショップに公開…"));
       publish->setEnabled(usable);
@@ -407,6 +411,7 @@ void AssetList::contextMenuEvent(QContextMenuEvent* e) {
   else if (chosen == remove) removeFromList(id);
   else if (publish && chosen == publish) {
     if (image) publishImageAsset(this, id);
+    else if (video) publishVideoAsset(this, id);
     else publishAudioAsset(this, id);
   }
 }
@@ -577,8 +582,8 @@ QWidget* LibraryPanel::createMediaView(QWidget* parent) {
                            QStringLiteral("フォルダの中の動画・写真・音声を、まとめて一覧に登録します（動画・写真はメディア、音声はオーディオの一覧へ）"),
                            [mediaPage] { pickAndImport(mediaPage); }, [mediaPage] { pickFolderAndImport(mediaPage, false); }));
   mv->addWidget(makeWorkshopRow(mediaPage, ai::WorkshopKind::Image, QStringLiteral("MediaWorkshopButton"),
-                                QStringLiteral("みんなが公開した写真を探して、メディアの一覧に追加します\n"
-                                               "自分の写真は、一覧で右クリックして「ワークショップに公開」で公開できます")));
+                                QStringLiteral("みんなが公開した写真・短い動画（GIF も）を探して、メディアの一覧に追加します\n"
+                                               "自分の写真・動画は、一覧で右クリックして「ワークショップに公開」で公開できます")));
   mv->addWidget(makeImportProgress(mediaPage));
   mv->addWidget(new AssetList(AssetList::Kind::Media, mediaPage), 1);
   return mediaPage;

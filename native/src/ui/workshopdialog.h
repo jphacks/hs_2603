@@ -20,5 +20,7 @@ void unpublishTemplate(QWidget* parent, const QString& templateId);
 void publishAudioAsset(QWidget* parent, const QString& assetId);
 /** メディアの一覧の写真 assetId を、ワークショップに公開する画面を出す（フル HD より大きければ縮めて公開する） */
 void publishImageAsset(QWidget* parent, const QString& assetId);
+/** メディアの一覧の動画（動く GIF も）assetId を、ワークショップに公開する画面を出す（15 秒まで。フル HD に収まる MP4 にして公開する） */
+void publishVideoAsset(QWidget* parent, const QString& assetId);
 
 }  // namespace kv

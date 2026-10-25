@@ -327,11 +327,14 @@ class Editor : public QObject {
   int copySelection();
   bool hasItemClipboard() const { return !itemClip_.empty(); }
   /**
-   * 写したものを、今の編集場所の再生位置に貼り付ける（並びと間隔はそのまま。1 回の「元に戻す」で消える）。
+   * 写したものを、今の編集場所の再生位置（at を渡せばその時間）に貼り付ける（並びと間隔はそのまま。1 回の「元に戻す」で消える）。
+   * ビデオのクリップは clipIndex の位置（渡さなければ、その時間にあるクリップのうしろ。クリップの頭なら前）に入れる。
    * 使っているメディアがこの編集場所の一覧に無ければ、写しを一覧に足す（同じファイルがあれば、それを使う）。
    * 貼り付けた数を返し、added に足したメディアを入れる（呼ぶ側で、サムネイルなどを作る）
    */
-  int pasteClipboard(std::vector<Asset>* added = nullptr);
+  int pasteClipboard(std::vector<Asset>* added = nullptr, std::optional<double> at = std::nullopt, std::optional<int> clipIndex = std::nullopt);
+  /** 写したものにビデオのクリップが入っているか（ドラッグで貼り付けるとき、差し込む位置を見せる） */
+  bool clipboardHasClips() const { return !itemClip_.clips.empty(); }
   void splitAtPlayhead();
   void setAspect(Aspect a);
   void setFps(int fps);

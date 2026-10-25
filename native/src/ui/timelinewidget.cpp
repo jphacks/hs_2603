@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QCursor>
+#include <QDrag>
 #include <QDragEnterEvent>
 #include <QContextMenuEvent>
 #include <QGuiApplication>
@@ -31,6 +32,7 @@
 #include "ui/objectmenu.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
+#include "ui/workspacebar.h"
 
 namespace kv {
 
@@ -110,6 +112,8 @@ TimelineView::TimelineView(QWidget* parent) : QAbstractScrollArea(parent) {
     drag_ = Drag::None;
     dragSession_ = false;
     libDrag_ = false;
+    itemsDrag_ = false;
+    itemsDropT_.reset();
     dragReach_ = 0;
     keepEnd_ = 0;
     laneHover_.reset();
@@ -276,7 +280,7 @@ void TimelineView::rememberView() {
 }
 
 bool TimelineView::dragActive() const {
-  return drag_ != Drag::None || drop_.has_value() || libDrag_;
+  return drag_ != Drag::None || drop_.has_value() || libDrag_ || itemsDrag_;
 }
 
 void TimelineView::fitAll() {
@@ -1357,6 +1361,14 @@ void TimelineView::paintEvent(QPaintEvent*) {
       p.drawLine(QPointF(x, oy), QPointF(x, vy));
     }
   }
+  // ほかのタブから持ってきているものを置く時間（テキスト・オーディオ・重ねるものは、ここから始まる）
+  if (itemsDropT_) {
+    const double x = xOf(*itemsDropT_);
+    if (x >= kHeadW) {
+      p.setPen(QPen(theme::accent, 1.5, Qt::DashLine));
+      p.drawLine(QPointF(x, kRulerH), QPointF(x, area.height()));
+    }
+  }
   paintKeyMarkers(p);
   paintFadeLabel(p);
 
@@ -1651,6 +1663,17 @@ void TimelineView::mouseMoveEvent(QMouseEvent* e) {
   if (!(e->buttons() & Qt::LeftButton)) {
     finishDrag(dragPos_);
     return;
+  }
+  // 動かしているものを、ほかのタブ（編集1 など）の上まで持っていった: タブへ持っていくドラッグに切り替える
+  // （タブの上で少し止めるとそのタブになり、そのまま下へ動かして置く所を決める）
+  if ((drag_ == Drag::ClipMove || drag_ == Drag::ItemMove) && dragMoved_ && editor().workspaceCount() > 1) {
+    if (auto* bar = window()->findChild<WorkspaceBar*>()) {
+      const int tab = bar->tabAtGlobal(e->globalPosition().toPoint());
+      if (tab >= 0 && tab != editor().workspaceIndex()) {
+        startTabDrag();
+        return;
+      }
+    }
   }
   // 見出しの列の上や、タイムラインの外（ウィンドウの外も）へ出ても、ボタンを押している間は、このビューにマウスの動きが届く
   // （押したときに Qt が自動でマウスをつかみ、離すまで放さない）。位置はこのビューの座標で、外なら負や幅より大きい値になる
@@ -2540,7 +2563,7 @@ bool TimelineView::autoScrollSource(QPointF* pos, bool* dragging) const {
     if (dragging) *dragging = true;
     return true;
   }
-  if (drop_ || libDrag_) {
+  if (drop_ || libDrag_ || itemsDrag_) {
     *pos = dropPos_;
     return true;
   }
@@ -2617,6 +2640,7 @@ void TimelineView::autoScrollTick() {
   // スクロールで、同じマウス位置の時間が変わった: ドラッグしているものを、カーソルに追従させ直す
   if (dragging) dragStep();
   else if (drop_) updateDrop(dropPos_);
+  else if (itemsDrag_) refreshItemsDrop(dropPos_);
   else refreshLibraryDrop(dropPos_);
 }
 
@@ -3103,9 +3127,62 @@ void TimelineView::beginDrop(Selection::Type type, const std::vector<QString>& a
   drop_ = g;
 }
 
+void TimelineView::startTabDrag() {
+  // タイムラインの中で動かしていた分は、元の位置に戻してから、選んでいるものを写す（写し元は変えない）
+  cancelDrag();
+  Editor& ed = editor();
+  const int n = ed.copySelection();
+  if (n <= 0) return;
+  auto* mime = new QMimeData();
+  mime->setData(QString::fromLatin1(kTimelineItemsMime), QByteArray::number(ed.workspaceUid(ed.workspaceIndex())));
+  auto* drag = new QDrag(this);
+  drag->setMimeData(mime);
+  // カーソルの横に、持っていく数を出す
+  QFont f = font();
+  f.setPointSizeF(9);
+  const QString label = QStringLiteral("%1 個をコピー").arg(n);
+  const QFontMetrics fm(f);
+  const qreal dpr = devicePixelRatioF();
+  QPixmap pm(QSize(fm.horizontalAdvance(label) + 20, fm.height() + 10) * dpr);
+  pm.setDevicePixelRatio(dpr);
+  pm.fill(Qt::transparent);
+  {
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setFont(f);
+    p.setPen(Qt::NoPen);
+    p.setBrush(theme::accent);
+    const QRectF r(0, 0, pm.width() / dpr, pm.height() / dpr);
+    p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 5, 5);
+    p.setPen(Qt::white);
+    p.drawText(r, Qt::AlignCenter, label);
+  }
+  drag->setPixmap(pm);
+  drag->setHotSpot(QPoint(-14, -14));
+  ed.toast(QStringLiteral("タブの上で少し止めると、そのタブに切り替わります。置きたい所で離してください（Esc でやめる）"));
+  drag->exec(Qt::CopyAction);
+}
+
+void TimelineView::refreshItemsDrop(QPointF pos) {
+  dropPos_ = pos;
+  updateArming(pos.x());
+  const double x = dragX(pos.x());  // 見出しの列の上では、見えている左端の位置
+  itemsDropT_ = frameRound(std::max(0.0, tOf(x)), editor().project().settings.fps);
+  // ビデオのクリップを持ってきているときは、差し込む位置も出す
+  if (editor().clipboardHasClips()) dropX_ = indicatorX(insertionIndex(x, QString()), QString());
+  else dropX_.reset();
+  viewport()->update();
+}
+
 void TimelineView::dragEnterEvent(QDragEnterEvent* e) {
   // 入ってきた位置が端の近く（見出しの列の上など）でも、通りかかっただけではスクロールしない
   armAutoScroll(e->position().x());
+  if (e->mimeData()->hasFormat(QString::fromLatin1(kTimelineItemsMime)) && editor().hasItemClipboard()) {
+    itemsDrag_ = true;
+    refreshItemsDrop(e->position());
+    e->acceptProposedAction();
+    return;
+  }
   if (isTextPresetDrag(e->mimeData())) {
     beginDrop(Selection::Text, {});
     drop_->presetId = QString::fromUtf8(e->mimeData()->data(QString::fromLatin1(kTextPresetMime)));
@@ -3131,6 +3208,12 @@ void TimelineView::dragEnterEvent(QDragEnterEvent* e) {
 }
 
 void TimelineView::dragMoveEvent(QDragMoveEvent* e) {
+  if (itemsDrag_ && e->mimeData()->hasFormat(QString::fromLatin1(kTimelineItemsMime))) {
+    refreshItemsDrop(e->position());
+    e->acceptProposedAction();
+    if (autoScrollTarget(e->position().x()) != 0) startAutoScroll();
+    return;
+  }
   if (drop_ && (isTextPresetDrag(e->mimeData()) || !audioAssetsOf(e->mimeData()).empty())) {
     updateDrop(e->position());
     // 置けない位置では「置けない」カーソルにする
@@ -3152,6 +3235,8 @@ void TimelineView::dragMoveEvent(QDragMoveEvent* e) {
 void TimelineView::dragLeaveEvent(QDragLeaveEvent*) {
   // タイムラインの外へ出た・Esc で中止した: 追加予定の表示を消すだけで、何も追加しない
   libDrag_ = false;
+  itemsDrag_ = false;
+  itemsDropT_.reset();
   endDrop();
   dropX_.reset();
   overlayDropT_.reset();
@@ -3162,6 +3247,19 @@ void TimelineView::dragLeaveEvent(QDragLeaveEvent*) {
 void TimelineView::dropEvent(QDropEvent* e) {
   libDrag_ = false;
   stopAutoScroll();  // 落としたら、自動スクロールは止める
+  if (e->mimeData()->hasFormat(QString::fromLatin1(kTimelineItemsMime))) {
+    // 選んで持ってきたもの: 落とした時間に貼り付ける（ビデオのクリップは、黄色い線の位置に差し込む）
+    itemsDrag_ = false;
+    const double x = dragX(e->position().x());
+    const double t = frameRound(std::max(0.0, tOf(x)), editor().project().settings.fps);
+    const std::optional<int> index = editor().clipboardHasClips() ? std::optional<int>(insertionIndex(x, QString())) : std::nullopt;
+    itemsDropT_.reset();
+    dropX_.reset();
+    viewport()->update();
+    e->acceptProposedAction();
+    pasteItemsAt(t, index);
+    return;
+  }
   if (isTextPresetDrag(e->mimeData())) {
     dropTextPreset(e);
     return;

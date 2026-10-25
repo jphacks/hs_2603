@@ -40,6 +40,12 @@ bool isImagePath(const QString& path) {
   return exts.contains(QFileInfo(path).suffix().toLower());
 }
 
+bool isAnimatedGif(const QString& path) {
+  if (QFileInfo(path).suffix().compare(QStringLiteral("gif"), Qt::CaseInsensitive) != 0) return false;
+  QImageReader reader(path);
+  return reader.supportsAnimation() && reader.imageCount() > 1;
+}
+
 bool assumeBt709(int width, int height) {
   // 一般的なプレーヤーと同じ判定
   return width >= 1280 || height > 576;
@@ -89,7 +95,8 @@ bool probeMedia(const QString& path, ProbeInfo& info, QString& error) {
     error = QStringLiteral("ファイルが見つかりません");
     return false;
   }
-  if (isImagePath(path)) {
+  // 動く GIF は、FFmpeg で動画として読む（長さは、コマを出す長さの合計）
+  if (isImagePath(path) && !isAnimatedGif(path)) {
     QImageReader reader(path);
     reader.setAutoTransform(true);
     QSize size = reader.size();
