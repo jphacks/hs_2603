@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QImage>
@@ -240,11 +241,11 @@ struct PickState {
 PickState pickState(const AiChoiceCard& card, int index, bool here, bool busy) {
   PickState s;
   s.chosen = card.applied == index;
-  s.text = s.chosen                  ? QStringLiteral("選択中")
-           : card.preparing == index ? QStringLiteral("読み込んでいます…")
-           : card.applied >= 0       ? QStringLiteral("こちらにする")
-           : card.set.audio          ? QStringLiteral("これを使う")
-                                     : QStringLiteral("これにする");
+  s.text = s.chosen                          ? QStringLiteral("選択中")
+           : card.preparing == index         ? QStringLiteral("読み込んでいます…")
+           : card.applied >= 0               ? QStringLiteral("こちらにする")
+           : card.set.audio || card.set.image ? QStringLiteral("これを使う")
+                                             : QStringLiteral("これにする");
   // オーディオの候補は、読み込んでいる間はほかの候補も選べない
   s.enabled = here && !busy && !s.chosen && card.preparing < 0;
   s.tip = !here   ? QStringLiteral("この案を作ったタブに切り替えると選べます")
@@ -852,6 +853,7 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
   box->setObjectName(QStringLiteral("AiChoices"));
   box->setProperty("choiceSetId", set.id);
   box->setProperty("audioChoices", set.audio);
+  box->setProperty("imageChoices", set.image);
   box->setStyleSheet(QStringLiteral("#AiChoices{background:#202020;border:1px solid #2e2e2e;border-radius:6px;}"
                                     "#AiChoice{background:#262626;border:1px solid #333333;border-radius:6px;}"
                                     "#AiChoice[chosen=\"true\"]{border:1px solid #2680eb;}"));
@@ -899,7 +901,7 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
       row->addWidget(pick);
       fv->addLayout(row);
       connect(play, &QPushButton::clicked, this, [this, card, i] { previewAudio(card, int(i)); });
-      connect(pick, &QPushButton::clicked, this, [this, card, i] { chooseAudio(card, int(i)); });
+      connect(pick, &QPushButton::clicked, this, [this, card, i] { chooseOption(card, int(i)); });
       card->buttons.push_back(pick);
       card->frames.push_back(f);
       card->playButtons.push_back(play);
@@ -920,7 +922,10 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
     refreshChoices();
     return;
   }
-  v->addWidget(wrapLabel(QStringLiteral("「これにする」を押した案だけが入ります。選んだあとでも、ほかの案に切り替えられます。"), "dim", box));
+  v->addWidget(wrapLabel(set.image ? QStringLiteral("AI が作った画像です。「これを使う」を押したものだけが入ります（メディア一覧にも入ります）。"
+                                                    "選んだあとでも、ほかの候補に切り替えられます。")
+                                   : QStringLiteral("「これにする」を押した案だけが入ります。選んだあとでも、ほかの案に切り替えられます。"),
+                         "dim", box));
   // 欄が広ければ案を横に並べ、狭ければ縦に重ねる
   auto* tiles = new QWidget(box);
   auto* grid = new TileLayout(190, tiles);
@@ -937,12 +942,14 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
     head->addWidget(choiceBadge(letter, f), 0, Qt::AlignTop);
     head->addWidget(wrapLabel(c.label, "title", f), 1);
     fv->addLayout(head);
-    for (size_t j = 0; j < c.previews.size() && j < set.times.size(); ++j) {
+    // 作った画像の候補は、その画像をそのまま出す（時間の画面ではないので、時間は書かない）
+    const size_t shown = set.image ? c.previews.size() : std::min(c.previews.size(), set.times.size());
+    for (size_t j = 0; j < shown; ++j) {
       const QImage img = QImage::fromData(c.previews[j], "JPG");
       if (img.isNull()) continue;
-      const QString time = formatTime(set.times[j]);
+      const QString time = set.image ? QString() : formatTime(set.times[j]);
       auto* thumb = new PreviewThumb(img, time, f);
-      thumb->setAccessibleName(QStringLiteral("案 %1 のプレビュー（%2）").arg(letter, time));
+      thumb->setAccessibleName(set.image ? QStringLiteral("候補 %1 の画像").arg(letter) : QStringLiteral("案 %1 のプレビュー（%2）").arg(letter, time));
       thumb->setOnClick([this, card] { showComparison(card); }, QStringLiteral("押すと、案を大きく並べて見比べられます"));
       fv->addWidget(thumb);
     }
@@ -973,7 +980,9 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
   v->addWidget(compare, 0, Qt::AlignRight);
   connect(compare, &QPushButton::clicked, this, [this, card] { showComparison(card); });
   choiceCards_.push_back(card);
-  if (QFrame* old = turnChoices_; old && items_->indexOf(old) >= 0) {
+  // 見た目の案と、作った画像の候補は、別々に置き換える
+  QPointer<QFrame>& slot = set.image ? turnImages_ : turnChoices_;
+  if (QFrame* old = slot; old && items_->indexOf(old) >= 0) {
     // 同じ回の出し直し（プレビューを見た AI が直した案）。前の案の欄と、その場で入れ替える
     const int at = items_->indexOf(old);
     items_->removeWidget(old);
@@ -983,7 +992,7 @@ void AiPanel::addChoices(const ai::ChoiceSet& set) {
   } else {
     addItem(box);
   }
-  turnChoices_ = box;
+  slot = box;
   refreshChoices();
 }
 
@@ -1034,13 +1043,14 @@ void AiPanel::showComparison(const std::shared_ptr<AiChoiceCard>& card) {
     name->setMaximumWidth(cellW - 28);
     head->addWidget(name, 1);
     col->addLayout(head);
-    for (size_t j = 0; j < c.previews.size() && j < set.times.size(); ++j) {
+    const size_t shown = set.image ? c.previews.size() : std::min(c.previews.size(), set.times.size());
+    for (size_t j = 0; j < shown; ++j) {
       const QImage img = QImage::fromData(c.previews[j], "JPG");
       if (img.isNull()) continue;
-      const QString time = formatTime(set.times[j]);
+      const QString time = set.image ? QString() : formatTime(set.times[j]);
       auto* view = new PreviewThumb(img, time, dlg);
       view->setFixedSize(cellW, cellH);
-      view->setAccessibleName(QStringLiteral("案 %1 のプレビュー（%2）").arg(letter, time));
+      view->setAccessibleName(set.image ? QStringLiteral("候補 %1 の画像").arg(letter) : QStringLiteral("案 %1 のプレビュー（%2）").arg(letter, time));
       col->addWidget(view);
     }
     const QString about = !c.description.isEmpty() ? c.description : c.log.join(QLatin1Char('\n'));
@@ -1050,7 +1060,7 @@ void AiPanel::showComparison(const std::shared_ptr<AiChoiceCard>& card) {
       col->addWidget(text);
     }
     col->addStretch(1);
-    auto* pick = new QPushButton(QStringLiteral("これにする"), dlg);
+    auto* pick = new QPushButton(set.image ? QStringLiteral("これを使う") : QStringLiteral("これにする"), dlg);
     pick->setAccessibleName(QStringLiteral("案 %1「%2」にする").arg(letter, c.label));
     col->addWidget(pick, 0, Qt::AlignRight);
     // 選んだら閉じる（選んだ案はプレビューに出る）
@@ -1074,13 +1084,30 @@ void AiPanel::showComparison(const std::shared_ptr<AiChoiceCard>& card) {
   dlg->show();
 }
 
+/** 候補のファイル（ワークショップのオーディオ・作った画像）を使う候補か */
+static bool needsAsset(const ai::Choice& c) {
+  return !c.audio.id.isEmpty() || !c.file.isEmpty();
+}
+
+/** 候補のファイルが、今の編集場所のメディア一覧に入っていれば、その素材の ID（無ければ空） */
+static QString preparedAsset(const ai::Choice& c) {
+  if (!c.audio.id.isEmpty()) return ai::workshopAudioAsset(c.audio.id);
+  if (!c.file.isEmpty()) return ai::assetForFile(c.file);
+  return {};
+}
+
 void AiPanel::chooseOption(const std::shared_ptr<AiChoiceCard>& card, int index) {
   Editor& ed = editor();
-  if (assistant_->busy() || index < 0 || index >= int(card->set.choices.size()) || card->applied == index) return;
+  if (assistant_->busy() || card->preparing >= 0 || index < 0 || index >= int(card->set.choices.size()) || card->applied == index) return;
   const ai::Choice& choice = card->set.choices[size_t(index)];
   const QString letter = ai::choiceLetter(index);
   if (ed.workspaceUid(ed.workspaceIndex()) != card->set.workspaceUid) {
     addError(QStringLiteral("この案は、案を作ったときのタブのものです。そのタブに切り替えてから選んでください。"));
+    return;
+  }
+  // ワークショップのオーディオ・作った画像は、先にメディア一覧へ入れてから当てはめる（入ると、もう一度ここに来る）
+  if (needsAsset(choice) && preparedAsset(choice).isEmpty()) {
+    prepareChoice(card, index);
     return;
   }
   ed.pause();
@@ -1113,15 +1140,20 @@ void AiPanel::chooseOption(const std::shared_ptr<AiChoiceCard>& card, int index)
     addAction(QStringLiteral("候補 %1「%2」を入れました").arg(letter, choice.label));
     // オーディオの名前は、ほかの人が付けたものなので、AI には ID で知らせる（名前が、アプリからの知らせの続きに見えないように）
     assistant_->noteChoice(card->set.id, QStringLiteral("%1（%2）").arg(letter, ai::workshopRef(choice.audio.id)));
+  } else if (card->set.image) {
+    addAction(QStringLiteral("候補 %1「%2」を入れました").arg(letter, choice.label));
+    assistant_->noteChoice(card->set.id, QStringLiteral("%1「%2」").arg(letter, choice.label));
   } else {
     addAction(QStringLiteral("案 %1「%2」にしました").arg(letter, choice.label));
     assistant_->noteChoice(card->set.id, QStringLiteral("%1「%2」").arg(letter, choice.label));
   }
-  // 変えたところを選び、プレビューと同じ時間（オーディオは入れた時間）を表示する
+  // 変えたところを選び、プレビューと同じ時間（オーディオ・重ねた画像は入れた時間）を表示する
   if (!res.focusText.isEmpty()) ed.select({Selection::Text, res.focusText});
   else if (!res.focusClip.isEmpty()) ed.select({Selection::Clip, res.focusClip});
+  else if (!res.focusOverlay.isEmpty()) ed.select({Selection::Overlay, res.focusOverlay});
   else if (!res.focusAudio.isEmpty()) ed.select({Selection::Audio, res.focusAudio});
   if (!card->set.times.empty()) ed.seek(card->set.times.front());
+  else if (const OverlayItem* o = res.focusOverlay.isEmpty() ? nullptr : ed.overlay(res.focusOverlay)) ed.seek(o->start);
   else if (const AudioItem* a = res.focusAudio.isEmpty() ? nullptr : ed.audio(res.focusAudio)) ed.seek(a->start);
   refreshChoices();
 }
@@ -1151,19 +1183,8 @@ void AiPanel::previewAudio(const std::shared_ptr<AiChoiceCard>& card, int index)
   });
 }
 
-void AiPanel::chooseAudio(const std::shared_ptr<AiChoiceCard>& card, int index) {
-  Editor& ed = editor();
-  if (assistant_->busy() || card->preparing >= 0 || index < 0 || index >= int(card->set.choices.size()) || card->applied == index) return;
-  if (ed.workspaceUid(ed.workspaceIndex()) != card->set.workspaceUid) {
-    addError(QStringLiteral("この候補は、候補を出したときのタブのものです。そのタブに切り替えてから選んでください。"));
-    return;
-  }
-  const ai::WorkshopTemplate t = card->set.choices[size_t(index)].audio;
-  // もうメディア一覧にあれば、そのまま入れる
-  if (!ai::workshopAudioAsset(t.id).isEmpty()) {
-    chooseOption(card, index);
-    return;
-  }
+void AiPanel::prepareChoice(const std::shared_ptr<AiChoiceCard>& card, int index) {
+  if (card->preparing >= 0 || index < 0 || index >= int(card->set.choices.size())) return;
   card->preparing = index;
   refreshChoices();
   auto stop = [this, card](const QString& error) {
@@ -1171,10 +1192,9 @@ void AiPanel::chooseAudio(const std::shared_ptr<AiChoiceCard>& card, int index) 
     refreshChoices();
     if (card->box && !error.isEmpty()) addError(error);
   };
-  // 手元に置いてから、候補を出したタブのメディア一覧に入れる（読み込みは別のスレッド）。入ったら当てはめる
-  ai::workshop().fetchAudio(t, this, [this, card, index, t, stop](const QString& error, const QString& file) {
+  // 候補を出したタブのメディア一覧に入れる（読み込みは別のスレッド）。入ったら当てはめる
+  auto import = [this, card, index, stop](const QString& file) {
     if (!card->box) return stop(QString());
-    if (!error.isEmpty()) return stop(error);
     const int uid = card->set.workspaceUid;
     if (editor().workspaceUid(editor().workspaceIndex()) != uid) {
       return stop(QStringLiteral("タブが切り替わったので、入れませんでした。候補を出したときのタブで、もう一度押してください。"));
@@ -1184,21 +1204,33 @@ void AiPanel::chooseAudio(const std::shared_ptr<AiChoiceCard>& card, int index) 
     auto waited = std::make_shared<QElapsedTimer>();
     waited->start();
     timer->setInterval(100);
-    connect(timer, &QTimer::timeout, this, [this, timer, waited, card, index, t, uid, stop] {
+    connect(timer, &QTimer::timeout, this, [this, timer, waited, card, index, uid, stop] {
       const bool here = editor().workspaceUid(editor().workspaceIndex()) == uid;
-      const bool ready = here && !ai::workshopAudioAsset(t.id).isEmpty();
+      const bool ready = here && !preparedAsset(card->set.choices[size_t(index)]).isEmpty();
       if (!ready && here && card->box && waited->elapsed() < 20000) return;
       timer->stop();
       timer->deleteLater();
       if (!card->box) return stop(QString());
       if (!here) return stop(QStringLiteral("タブが切り替わったので、入れませんでした。候補を出したときのタブで、もう一度押してください。"));
-      if (!ready) return stop(QStringLiteral("オーディオを読み込めませんでした。もう一度押してください。"));
+      if (!ready) return stop(QStringLiteral("ファイルを読み込めませんでした。もう一度押してください。"));
       card->preparing = -1;
       chooseOption(card, index);
       refreshChoices();
     });
     timer->start();
-  });
+  };
+  const ai::Choice& c = card->set.choices[size_t(index)];
+  if (!c.audio.id.isEmpty()) {
+    // ワークショップのオーディオは、手元に置いてから
+    ai::workshop().fetchAudio(c.audio, this, [card, import, stop](const QString& error, const QString& file) {
+      if (!card->box) return stop(QString());
+      if (!error.isEmpty()) return stop(error);
+      import(file);
+    });
+    return;
+  }
+  if (!QFileInfo::exists(c.file)) return stop(QStringLiteral("作った画像のファイルが見つかりません。もう一度頼んでください。"));
+  import(c.file);
 }
 
 void AiPanel::stopPanelPreview() {
@@ -1286,6 +1318,7 @@ void AiPanel::setBusy(bool busy) {
     // 新しい依頼では、前の回の案の欄は置き換えない
     turnChoices_ = nullptr;
     turnAudio_ = nullptr;
+    turnImages_ = nullptr;
     busyClock_.start();
     statusTimer_.start();
   } else {

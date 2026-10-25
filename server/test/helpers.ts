@@ -6,7 +6,7 @@ import path from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.ts';
-import type { ConverseFn } from '../src/bedrock.ts';
+import type { ConverseFn, InvokeFn } from '../src/bedrock.ts';
 import { readConfig } from '../src/config.ts';
 import type { Config } from '../src/config.ts';
 import type { Db } from '../src/db.ts';
@@ -59,8 +59,14 @@ export type TestServer = {
   calls: Calls;
   /** 次の Bedrock の呼び出しの代わりにする関数（無ければ、ふつうの返事） */
   next: { fn: ConverseFn | null };
+  /** 画像を作る呼び出し（InvokeModel）と、次の呼び出しの代わりにする関数（無ければ 1 画素の PNG） */
+  images: { body: Record<string, unknown>; model: string; region: string }[];
+  nextImage: { fn: InvokeFn | null };
   close: () => Promise<void>;
 };
+
+/** 1 画素の PNG（画像を作るモデルの代わりの返事） */
+export const TINY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
 /** Bedrock の代わり: 入力 100（うちキャッシュ 10）・出力 50 を使ったことにする */
 export const fakeResponse = {
@@ -91,7 +97,18 @@ export async function startServer(databaseUrl: string, env: Record<string, strin
     }
     return fakeResponse;
   };
-  const app = await buildApp({ config, db, converse }, { logger: false });
+  const images: TestServer['images'] = [];
+  const nextImage: TestServer['nextImage'] = { fn: null };
+  const invoke: InvokeFn = async (body, options) => {
+    images.push({ body, model: options.model, region: options.region });
+    if (nextImage.fn) {
+      const fn = nextImage.fn;
+      nextImage.fn = null;
+      return fn(body, options);
+    }
+    return { seeds: [1], finish_reasons: [null], images: [TINY_PNG] };
+  };
+  const app = await buildApp({ config, db, converse, invoke }, { logger: false });
   await app.ready();
   return {
     app,
@@ -99,6 +116,8 @@ export async function startServer(databaseUrl: string, env: Record<string, strin
     config,
     calls,
     next,
+    images,
+    nextImage,
     close: async () => {
       await app.close();
       await db.end();

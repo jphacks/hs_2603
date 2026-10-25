@@ -62,8 +62,11 @@ class AiPanel : public QWidget {
   void chooseOption(const std::shared_ptr<AiChoiceCard>& card, int index);
   /** ワークショップのオーディオの候補を試聴する（鳴らしていれば止める）。はじめはファイルを読み込んでから鳴らす */
   void previewAudio(const std::shared_ptr<AiChoiceCard>& card, int index);
-  /** ワークショップのオーディオの候補を選ぶ。ファイルを手元に置いてメディア一覧に入れてから、chooseOption で当てはめる */
-  void chooseAudio(const std::shared_ptr<AiChoiceCard>& card, int index);
+  /**
+   * ワークショップのオーディオ・作った画像の候補のファイルを、メディア一覧に入れる（オーディオは先に手元に置く）。
+   * 入ったら chooseOption で当てはめる
+   */
+  void prepareChoice(const std::shared_ptr<AiChoiceCard>& card, int index);
   /** この欄で鳴らした試聴を止める */
   void stopPanelPreview();
   /** 「これにする」ボタンの文字と押せるかを、今の状態に合わせる */
@@ -121,8 +124,9 @@ class AiPanel : public QWidget {
   std::vector<std::weak_ptr<AiChoiceCard>> choiceCards_;
   /** この回の依頼で出した案の欄。AI が同じ回で案を出し直したら、その場で置き換える */
   QPointer<QFrame> turnChoices_;
-  /** この回の依頼で出したオーディオの候補の欄（見た目の案とは別に置き換える） */
+  /** この回の依頼で出したオーディオ・作った画像の候補の欄（見た目の案とは別に置き換える） */
   QPointer<QFrame> turnAudio_;
+  QPointer<QFrame> turnImages_;
   /** この欄で鳴らしている試聴の印（ワークショップの窓で鳴らしたものと見分ける） */
   QString previewKey_;
   /** 案を当てはめている間（その変更では、選んだ案の見分けをしない） */

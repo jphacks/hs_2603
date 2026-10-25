@@ -11,6 +11,11 @@ export type Config = {
   bedrockKey: string;
   region: string;
   model: string;
+  /** 画像を作るモデルと、そのリージョン（Bedrock の Stability AI の画像モデルはオレゴン。チャットとは別のリージョンでよい） */
+  imageModel: string;
+  imageRegion: string;
+  /** 画像 1 枚を、月のトークンの何トークン分として数えるか */
+  imageTokens: number;
   /** トークンの上限を区切る月のタイムゾーン */
   timezone: string;
   tlsCert: string;
@@ -60,6 +65,13 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (!validRegion(region)) problems.push(`AWS_REGION（${region}）が正しくありません。東京なら ap-northeast-1`);
   const japan = region === 'ap-northeast-1' || region === 'ap-northeast-3';
   const model = str('BEDROCK_MODEL') || (japan ? 'jp.anthropic.claude-sonnet-4-6' : 'global.anthropic.claude-sonnet-4-6');
+  const imageRegion = str('IMAGE_REGION', 'us-west-2');
+  if (!validRegion(imageRegion)) problems.push(`IMAGE_REGION（${imageRegion}）が正しくありません。オレゴンなら us-west-2`);
+  // 標準は、Bedrock の画像モデルでいちばんきれいな Stable Image Ultra（速さと安さを取るなら stability.stable-image-core-v1:1）
+  const imageModel = str('IMAGE_MODEL', 'stability.stable-image-ultra-v1:1');
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(imageModel)) problems.push(`IMAGE_MODEL（${imageModel}）が正しくありません。例: stability.stable-image-ultra-v1:1`);
+  const imageTokens = Number(str('IMAGE_TOKENS', '25000'));
+  if (!Number.isSafeInteger(imageTokens) || imageTokens < 0) problems.push(`IMAGE_TOKENS（${str('IMAGE_TOKENS')}）は 0 以上の整数にしてください`);
   const timezone = str('TIMEZONE', 'Asia/Tokyo');
   if (!validTimezone(timezone)) problems.push(`TIMEZONE（${timezone}）が正しくありません。例: Asia/Tokyo`);
   const tlsCert = str('TLS_CERT');
@@ -76,6 +88,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
     bedrockKey: str('AWS_BEARER_TOKEN_BEDROCK'),
     region,
     model,
+    imageModel,
+    imageRegion,
+    imageTokens,
     timezone,
     tlsCert,
     tlsKey,

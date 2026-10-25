@@ -82,37 +82,53 @@ function describe(status: number, type: string, detail: string, model: string, w
 }
 
 export type ConverseFn = (body: Record<string, unknown>, options: { model: string; timeoutMs: number; withEffort: boolean }) => Promise<unknown>;
+/** InvokeModel（画像を作るモデルなど。返事はモデルごとの形） */
+export type InvokeFn = (body: Record<string, unknown>, options: { model: string; region: string; timeoutMs: number }) => Promise<unknown>;
+
+/** Bedrock に JSON を送って、JSON の返事を受け取る（失敗は、利用者向けの文の BedrockError にする） */
+async function post(apiKey: string, url: string, body: Record<string, unknown>, timeoutMs: number, model: string, withEffort: boolean) {
+  if (!apiKey) throw new BedrockError('サーバーに Bedrock の API キーが設定されていません。管理者に連絡してください。', 503);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const timedOut = (err as Error).name === 'TimeoutError';
+    throw new BedrockError(timedOut ? 'AI から返事がありませんでした。もう一度送ってください。' : 'サーバーから Bedrock に接続できませんでした。', 502);
+  }
+  const text = await res.text();
+  let json: Record<string, unknown> = {};
+  try {
+    json = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    // 下で、読めなかったことを知らせる
+  }
+  if (!res.ok) {
+    const detail = String(json.message ?? json.Message ?? '');
+    const type = (res.headers.get('x-amzn-ErrorType') ?? '').split(':')[0] ?? '';
+    throw new BedrockError(describe(res.status, type, detail, model, withEffort), res.status === 429 ? 429 : 502);
+  }
+  return json;
+}
 
 /** 本物の Bedrock を呼ぶ関数を作る（テストでは、ここを差し替える） */
 export function bedrockConverse(apiKey: string, region: string): ConverseFn {
   return async (body, { model, timeoutMs, withEffort }) => {
-    if (!apiKey) throw new BedrockError('サーバーに Bedrock の API キーが設定されていません。管理者に連絡してください。', 503);
     const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/converse`;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch (err) {
-      const timedOut = (err as Error).name === 'TimeoutError';
-      throw new BedrockError(timedOut ? 'AI から返事がありませんでした。もう一度送ってください。' : 'サーバーから Bedrock に接続できませんでした。', 502);
-    }
-    const text = await res.text();
-    let json: Record<string, unknown> = {};
-    try {
-      json = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-      // 下で、読めなかったことを知らせる
-    }
-    if (!res.ok) {
-      const detail = String(json.message ?? json.Message ?? '');
-      const type = (res.headers.get('x-amzn-ErrorType') ?? '').split(':')[0] ?? '';
-      throw new BedrockError(describe(res.status, type, detail, model, withEffort), res.status === 429 ? 429 : 502);
-    }
+    const json = await post(apiKey, url, body, timeoutMs, model, withEffort);
     if (!json.output) throw new BedrockError('AI の返事を読めませんでした。もう一度送ってください。', 502);
     return json;
+  };
+}
+
+/** 本物の Bedrock の InvokeModel を呼ぶ関数（リージョンは呼ぶたびに決める。テストでは差し替える） */
+export function bedrockInvoke(apiKey: string): InvokeFn {
+  return async (body, { model, region, timeoutMs }) => {
+    const url = `https://bedrock-runtime.${region}.amazonaws.com/model/${encodeURIComponent(model)}/invoke`;
+    return post(apiKey, url, body, timeoutMs, model, false);
   };
 }

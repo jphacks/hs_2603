@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { buildApp } from './app.ts';
-import { bedrockConverse } from './bedrock.ts';
+import { bedrockConverse, bedrockInvoke } from './bedrock.ts';
 import type { Config } from './config.ts';
 import { loadEnvFile, readConfig } from './config.ts';
 import { createPool, describeDbError, migrate } from './db.ts';
@@ -57,7 +57,10 @@ async function main(): Promise<void> {
   if (!config.bedrockKey) console.warn('AWS_BEARER_TOKEN_BEDROCK が空です。ログインや管理画面は使えますが、AI は動きません');
 
   const https = config.tlsCert ? { cert: readFileSync(config.tlsCert), key: readFileSync(config.tlsKey) } : undefined;
-  const app = await buildApp({ config, db, converse: bedrockConverse(config.bedrockKey, config.region) }, { https });
+  const app = await buildApp(
+    { config, db, converse: bedrockConverse(config.bedrockKey, config.region), invoke: bedrockInvoke(config.bedrockKey) },
+    { https },
+  );
   try {
     await app.listen({ host: config.host, port: config.port });
   } catch (err) {

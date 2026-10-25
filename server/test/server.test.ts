@@ -6,7 +6,7 @@ import { BedrockError, limitsFor, readUsage, reasoningFields, supportsEffort } f
 import { GUARD_PROMPT, GUARD_REMINDER, MAX_SYSTEM_BLOCKS, MAX_SYSTEM_CHARS, MAX_TOOLS, MAX_TOOLS_CHARS } from '../src/guard.ts';
 import { clampChoice, clampLevel } from '../src/policy.ts';
 import type { TestDb, TestServer } from './helpers.ts';
-import { adminHeaders, cookieOf, startPostgres, startServer } from './helpers.ts';
+import { adminHeaders, cookieOf, startPostgres, startServer, TINY_PNG } from './helpers.ts';
 
 let pg: TestDb;
 let s: TestServer;
@@ -801,5 +801,72 @@ describe('記録', () => {
     assert.match(String(page.res.headers['content-security-policy']), /script-src 'self'/);
     assert.equal(page.res.headers['x-frame-options'], 'DENY');
     assert.equal((await req('GET', '/../src/config.ts')).status, 404);
+  });
+});
+
+describe('画像を作る', () => {
+  const as = (token: string) => ({ authorization: `Bearer ${token}` });
+  const create = (token: string, body: Record<string, unknown>) => req('POST', '/api/ai/image', { body, headers: as(token) });
+  const lastEvent = async () =>
+    (
+      await s.db.query(
+        `select model, effort_choice, output_tokens::int as tokens, ok, error from usage_events where user_email = 'hanako@example.com' order by id desc limit 1`,
+      )
+    ).rows[0];
+  let token = '';
+
+  test('画像を作り、1 枚を月のトークン（IMAGE_TOKENS）として数える', async () => {
+    token = (await appLogin('hanako@example.com', 'blue-river-2026')).json.token;
+    const res = await create(token, { prompt: '  a small\n cute firework  ', aspect: '16:9' });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.image, TINY_PNG);
+    assert.equal(res.json.format, 'png');
+    assert.equal(res.json.tokens, 25000);
+    assert.equal(typeof res.json.usage.used, 'number');
+    // 送るのは、整えた説明・比率・形式だけ。モデルとリージョンはサーバーの設定（標準はオレゴンの Stable Image Ultra）
+    assert.deepEqual(s.images.at(-1), {
+      body: { prompt: 'a small cute firework', aspect_ratio: '16:9', output_format: 'png' },
+      model: 'stability.stable-image-ultra-v1:1',
+      region: 'us-west-2',
+    });
+    assert.deepEqual(await lastEvent(), { model: 'stability.stable-image-ultra-v1:1', effort_choice: 'image', tokens: 25000, ok: true, error: '' });
+    // 比率を書かなければ 1:1
+    assert.equal((await create(token, { prompt: 'a star' })).status, 200);
+    assert.equal(s.images.at(-1)!.body.aspect_ratio, '1:1');
+  });
+
+  test('止められた画像はトークンを数えず、形の違う依頼・AI を使えない人は断る', async () => {
+    s.nextImage.fn = async () => ({ seeds: [1], finish_reasons: ['Filter reason: prompt'], images: [] });
+    const filtered = await create(token, { prompt: 'something blocked' });
+    assert.equal(filtered.status, 422);
+    assert.equal(filtered.json.code, 'filtered');
+    const ev = await lastEvent();
+    assert.equal(ev.ok, false);
+    assert.equal(ev.tokens, 0);
+    const calls = s.images.length;
+    assert.equal((await create(token, { prompt: 'x', aspect: '7:3' })).status, 400);
+    assert.equal((await create(token, { prompt: '   ' })).status, 400);
+    assert.equal((await create(token, { prompt: 'x'.repeat(2001) })).status, 400);
+    assert.equal((await req('POST', '/api/ai/image', { body: { prompt: 'x' } })).status, 401);
+    assert.equal(s.images.length, calls, '断った依頼は Bedrock に送らない');
+    // Bedrock の失敗は、ai_failed で知らせて記録する
+    s.nextImage.fn = async () => {
+      throw new BedrockError('サーバーのモデル x が見つかりません。管理者に連絡してください。', 502);
+    };
+    const failed = await create(token, { prompt: 'a cat' });
+    assert.equal(failed.status, 502);
+    assert.equal(failed.json.code, 'ai_failed');
+    assert.equal((await lastEvent()).ok, false);
+  });
+
+  test('今月の残りが 1 枚分より少ないと断る', async () => {
+    await s.db.query(`update users set tokens_custom = true, monthly_tokens = 0 where email = 'hanako@example.com'`);
+    const calls = s.images.length;
+    const res = await create(token, { prompt: 'a dog' });
+    assert.equal(res.status, 429);
+    assert.equal(res.json.code, 'quota');
+    assert.equal(s.images.length, calls);
+    await s.db.query(`update users set tokens_custom = false, monthly_tokens = null where email = 'hanako@example.com'`);
+    assert.equal((await create(token, { prompt: 'a dog' })).status, 200);
   });
 });

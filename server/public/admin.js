@@ -1032,7 +1032,9 @@ async function viewUsage(root, state = { month: thisMonth(), userId: '', offset:
       data.rows.map((r) => [
         when(r.createdAt),
         r.email,
-        h('td', {}, r.effort ? EFFORT[r.effort] : 'モデルの標準', r.effortChoice && r.effortChoice !== r.effort ? h('div', { class: 'sub' }, `選んだもの: ${EFFORT[r.effortChoice] ?? r.effortChoice}`) : null),
+        r.effortChoice === 'image'
+          ? h('td', {}, '画像を作る')
+          : h('td', {}, r.effort ? EFFORT[r.effort] : 'モデルの標準', r.effortChoice && r.effortChoice !== r.effort ? h('div', { class: 'sub' }, `選んだもの: ${EFFORT[r.effortChoice] ?? r.effortChoice}`) : null),
         [num(r.input), 'num'],
         [num(r.output), 'num'],
         [`${(r.durationMs / 1000).toFixed(1)} 秒`, 'num'],

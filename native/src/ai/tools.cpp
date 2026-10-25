@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "ai/framegrab.h"
+#include "ai/imagegen.h"
 #include "ai/workshop.h"
 #include "core/editor.h"
 #include "core/filters.h"
@@ -163,6 +164,21 @@ static const char* kToolSpecs = R"json([
       "reason": {"type": "string", "description": "この音が合いそうな理由（1 文。例: 短く軽い音なので、ボタンを押す場面に合います）"}},
       "required": ["id"]}}},
     "required": ["start", "items"]}}}},
+{"toolSpec": {"name": "generate_images",
+  "description": "素材に無い画像（イラスト・背景・場面のカードなど）を AI で作り、1〜3 個の候補として画像つきでユーザーに見せる。この時点ではタイムラインは変えない（ユーザーが「これを使う」を押した候補だけが、place の場所に入る）。1 枚ごとに今月のトークンを多く使うので、候補はふつう 2 つまでにする。結果には、作った画像が付く。",
+  "inputSchema": {"json": {"type": "object", "properties": {
+    "question": {"type": "string", "description": "ユーザーへの短い問いかけ（例: どの絵にしますか？）"},
+    "items": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "properties": {
+      "prompt": {"type": "string", "description": "作る画像の説明。英語で具体的に書く（絵柄・色・背景・構図）。画像の中に文字を入れない（no text）"},
+      "label": {"type": "string", "description": "候補の短い名前（日本語で 10 文字くらい。例: 夜空の花火）"}},
+      "required": ["prompt", "label"]}},
+    "place": {"type": "string", "enum": ["overlay", "clip"], "description": "overlay=重ねるトラックに置く（動画の上に小さく出す。イラストなど。1:1 で作る）, clip=ビデオトラックに写真のクリップとして入れる（場面のカード・背景など。画面と同じ比率で作る）"},
+    "start": {"type": "number", "description": "overlay: 出し始める時間（秒）。省略すると再生位置"},
+    "duration": {"type": "number", "description": "出す長さ（秒）。省略すると overlay は 3 秒、clip は 4 秒"},
+    "index": {"type": "integer", "description": "clip: 入れる位置（0 が先頭）。省略すると最後"},
+    "position": {"type": "string", "enum": ["top_left", "top", "top_right", "left", "center", "right", "bottom_left", "bottom", "bottom_right"], "description": "overlay: 置く場所。省略すると top_right"},
+    "size": {"type": "number", "description": "overlay: 大きさ。画面に収まる大きさに対する %（10〜100）。省略すると 35"}},
+    "required": ["items", "place"]}}}},
 {"toolSpec": {"name": "seek",
   "description": "再生位置を動かす。変えた場所をユーザーに見せたいときに使う。",
   "inputSchema": {"json": {"type": "object", "properties": {
@@ -1217,6 +1233,204 @@ ToolResult addWorkshopAudio(const QJsonObject& in, const QString& merge) {
   return r;
 }
 
+// ---- 画像を作る（generate_images） ---------------------------------------------------------
+
+/** 画像を、長い辺が longSide までの JPEG にする */
+QByteArray jpegOf(const QImage& image, int longSide) {
+  QImage img = image;
+  if (std::max(img.width(), img.height()) > longSide) img = img.scaled(longSide, longSide, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+  QByteArray out;
+  QBuffer buf(&out);
+  buf.open(QIODevice::WriteOnly);
+  img.convertToFormat(QImage::Format_RGB32).save(&buf, "JPG", 85);
+  return out;
+}
+
+/** 画面の幅 ÷ 高さ */
+double frameRatio(Aspect a) {
+  switch (a) {
+    case Aspect::R9_16:
+      return 9.0 / 16;
+    case Aspect::R1_1:
+      return 1;
+    case Aspect::R4_5:
+      return 4.0 / 5;
+    default:
+      return 16.0 / 9;
+  }
+}
+
+const QStringList& imagePositions() {
+  static const QStringList p = {QStringLiteral("top_left"),  QStringLiteral("top"),         QStringLiteral("top_right"),
+                                QStringLiteral("left"),      QStringLiteral("center"),      QStringLiteral("right"),
+                                QStringLiteral("bottom_left"), QStringLiteral("bottom"), QStringLiteral("bottom_right")};
+  return p;
+}
+
+void generateImages(const QJsonObject& in, QObject* context, std::function<void(ToolResult)> done) {
+  const QString place = string(in, "place");
+  if (place != u"overlay" && place != u"clip") {
+    done(errorResult(QStringLiteral("place は overlay（重ねるトラックに置く）か clip（写真のクリップとして入れる）にしてください")));
+    return;
+  }
+  struct Item {
+    QString prompt;
+    QString label;
+  };
+  std::vector<Item> items;
+  for (const QJsonValue& v : in.value(QStringLiteral("items")).toArray()) {
+    const QJsonObject o = v.toObject();
+    const QString prompt = string(o, "prompt").simplified();
+    if (prompt.isEmpty()) continue;
+    QString label = string(o, "label").simplified().left(30);
+    if (label.isEmpty()) label = QStringLiteral("画像 %1").arg(items.size() + 1);
+    items.push_back({prompt.left(1500), label});
+    if (items.size() == 3) break;
+  }
+  if (items.empty()) {
+    done(errorResult(QStringLiteral("items に prompt（作る画像の説明）がありません")));
+    return;
+  }
+  const Editor& ed = editor();
+  // 写真のクリップは画面と同じ比率（画面いっぱいに出す）、重ねる画像は正方形で作る
+  const QString aspect = place == u"clip" ? aspectToString(ed.project().settings.aspect) : QStringLiteral("1:1");
+  // 選ばれたときに使う入れ方（候補を出した今の値で決めておく）
+  QJsonObject input{{QStringLiteral("place"), place}};
+  if (const auto d = number(in, "duration")) input.insert(QStringLiteral("duration"), *d);
+  if (place == u"overlay") {
+    input.insert(QStringLiteral("start"), std::max(0.0, number(in, "start").value_or(ed.currentTime())));
+    const QString pos = string(in, "position");
+    input.insert(QStringLiteral("position"), imagePositions().contains(pos) ? pos : QStringLiteral("top_right"));
+    if (const auto sz = number(in, "size")) input.insert(QStringLiteral("size"), *sz);
+  } else if (in.value(QStringLiteral("index")).isDouble()) {
+    input.insert(QStringLiteral("index"), in.value(QStringLiteral("index")).toInt());
+  }
+  struct State {
+    std::vector<QString> files;
+    std::vector<QString> errors;
+    int remaining = 0;
+  };
+  auto st = std::make_shared<State>();
+  st->files.resize(items.size());
+  st->errors.resize(items.size());
+  st->remaining = int(items.size());
+  const QString question = string(in, "question").trimmed();
+  auto finish = [st, items, input, question, done] {
+    ChoiceSet set;
+    set.id = newId();
+    set.image = true;
+    set.question = question;
+    QStringList failed;
+    ToolResult r;
+    for (size_t i = 0; i < items.size(); ++i) {
+      const QImage img(st->files[i]);
+      if (st->files[i].isEmpty() || img.isNull()) {
+        failed << QStringLiteral("「%1」: %2").arg(items[i].label, st->errors[i].isEmpty() ? QStringLiteral("画像を読めませんでした") : st->errors[i]);
+        continue;
+      }
+      Choice c;
+      c.label = items[i].label;
+      c.file = st->files[i];
+      c.previews.push_back(jpegOf(img, 768));
+      QJsonObject act = input;
+      act.insert(QStringLiteral("file"), st->files[i]);
+      c.actions = QJsonArray{QJsonObject{{QStringLiteral("tool"), QStringLiteral("add_generated_image")}, {QStringLiteral("input"), act}}};
+      // 作った画像は AI にも見せる（頼んだものになっているかを確かめてもらう）
+      const QString letter = choiceLetter(int(set.choices.size()));
+      r.attachments.append(QJsonObject{{QStringLiteral("text"), QStringLiteral("候補 %1「%2」の画像:").arg(letter, c.label)}});
+      r.attachments.append(QJsonObject{
+          {QStringLiteral("image"),
+           QJsonObject{{QStringLiteral("format"), QStringLiteral("jpeg")},
+                       {QStringLiteral("source"), QJsonObject{{QStringLiteral("bytes"), QString::fromLatin1(jpegOf(img, 512).toBase64())}}}}}});
+      set.choices.push_back(c);
+    }
+    if (set.choices.empty()) {
+      done(errorResult(QStringLiteral("画像を作れませんでした（%1）。説明を変えるか、少し待ってから、もう一度 generate_images を使ってください"
+                                      "（ユーザーには、まだ何も見せていません）。")
+                           .arg(failed.join(QStringLiteral("、")))));
+      return;
+    }
+    r.hasChoices = true;
+    r.choiceSet = set;
+    QJsonObject body{{QStringLiteral("ok"), true},
+                     {QStringLiteral("shown"), int(set.choices.size())},
+                     {QStringLiteral("note"), QStringLiteral("作った画像を、候補として「これを使う」のボタンつきで表示しました。ユーザーが選ぶまで、タイムラインは変わっていません。"
+                                                             "選ばれた候補は、次のメッセージで知らせます。各候補の画像を、このメッセージの最後に付けました。"
+                                                             "頼まれたものと違う・文字が入っているなどの問題があれば、説明を直して generate_images をもう一度使ってください"
+                                                             "（1 枚ごとにトークンを多く使うので、くり返しすぎない）。問題がなければ、どれにするかを 1 文で聞いて終えてください。")}};
+    if (!failed.isEmpty()) body.insert(QStringLiteral("failed"), failed.join(QStringLiteral("、")));
+    r.content.append(textBlock(body));
+    done(r);
+  };
+  for (size_t i = 0; i < items.size(); ++i) {
+    generateImage(items[i].prompt, aspect, context, [st, i, finish](const QString& error, const QString& file) {
+      st->files[i] = file;
+      st->errors[i] = error;
+      if (--st->remaining == 0) finish();
+    });
+  }
+}
+
+/** generate_images の候補を選んだときの編集: メディア一覧に読み込んだ、AI が作った画像を置く */
+ToolResult addGeneratedImage(const QJsonObject& in, const QString& merge) {
+  const QString file = string(in, "file");
+  const QString assetId = isGeneratedImage(file) ? assetForFile(file) : QString();
+  const Asset* found = assetId.isEmpty() ? nullptr : editor().asset(assetId);
+  if (!found || found->kind != AssetKind::Image) return errorResult(QStringLiteral("この画像は、まだメディア一覧に読み込まれていません"));
+  const Asset asset = *found;
+  const bool clip = string(in, "place") == u"clip";
+  QJsonObject added;
+  QString log;
+  editor().commit([&](ProjectData& p) {
+    const int fps = p.settings.fps;
+    if (clip) {
+      // メディア一覧から写真をタイムラインへ入れるときと同じクリップ
+      VideoClip c;
+      c.id = newId();
+      c.assetId = asset.id;
+      c.isImage = true;
+      c.in = 0;
+      c.out = std::clamp(number(in, "duration").value_or(kDefaultImageDuration), 0.5, 600.0);
+      c.fit = defaultFit(asset, p.settings.aspect);
+      const int index = std::clamp(in.value(QStringLiteral("index")).toInt(int(p.clips.size())), 0, int(p.clips.size()));
+      p.clips.insert(p.clips.begin() + index, c);
+      added = {{QStringLiteral("id"), c.id}, {QStringLiteral("index"), index}};
+      log = QStringLiteral("作った画像を写真のクリップとして追加: %1 番目（%2 秒）").arg(index + 1).arg(r2(c.out));
+      return true;
+    }
+    // 重ねるトラックに、全体表示のまま小さくして、言われた場所（画面の端から少し離す）に置く
+    OverlayItem o;
+    o.id = newId();
+    o.assetId = asset.id;
+    o.isImage = true;
+    o.in = 0;
+    o.out = std::clamp(number(in, "duration").value_or(3.0), 0.5, 600.0);
+    o.fit = FitMode::Contain;
+    o.start = frameRound(std::max(0.0, number(in, "start").value_or(0.0)), fps);
+    const double size = std::clamp(number(in, "size").value_or(35.0), 10.0, 100.0) / 100.0;
+    o.scale = size;
+    const double frame = frameRatio(p.settings.aspect);
+    const double ratio = asset.width > 0 && asset.height > 0 ? double(asset.width) / asset.height : 1.0;
+    // 画面の幅・高さに対する、画像の幅・高さ（全体表示は、画面に収まる大きさが 1）
+    const double w = ratio < frame ? size * ratio / frame : size;
+    const double h = ratio < frame ? size : size * frame / ratio;
+    const QString pos = string(in, "position");
+    constexpr double mx = 0.03;
+    constexpr double my = 0.05;
+    o.x = pos.endsWith(QLatin1String("left")) ? mx + w / 2 : pos.endsWith(QLatin1String("right")) ? 1 - mx - w / 2 : 0.5;
+    o.y = pos.startsWith(QLatin1String("top")) ? my + h / 2 : pos.startsWith(QLatin1String("bottom")) ? 1 - my - h / 2 : 0.5;
+    const double dur = overlayDuration(o, fps);
+    o.track = freeOverlayTrack(p.overlays, o.start, dur, fps);
+    p.overlays.push_back(o);
+    added = {{QStringLiteral("start"), r2(o.start)}, {QStringLiteral("end"), r2(o.start + dur)}};
+    log = QStringLiteral("作った画像を重ねる: %1").arg(span(o.start, o.start + dur));
+    return true;
+  }, merge);
+  ToolResult r = okResult({{QStringLiteral("added"), added}});
+  r.log << log;
+  return r;
+}
+
 // ---- 見比べて選ぶ案（propose_choices） --------------------------------------------------
 
 /** 編集する道具を使う（案の中で使えるのはこれだけ）。知らない名前なら nullopt */
@@ -1245,6 +1459,7 @@ struct Trial {
   /** この案で足したり変えたりしたテキスト・クリップ・オーディオの ID（並びは編集データの順） */
   QStringList texts;
   QStringList clips;
+  QStringList overlays;
   QStringList audios;
   /** この案で使うワークショップのもの（ID） */
   QStringList workshopUsed;
@@ -1277,9 +1492,10 @@ double contentEndOf(const ProjectData& p) {
 
 /**
  * 案の編集 actions を、写しで上から順に試す。start を渡すと、その状態から試す（別の案に切り替えるとき）。
+ * internal は、アプリが作った候補（propose_audio・generate_images）か（そのときだけ、アプリの中の編集も使える）。
  * 今の編集場所は何も変わらない
  */
-Trial tryActions(const QJsonArray& actions, const ProjectData* start = nullptr) {
+Trial tryActions(const QJsonArray& actions, const ProjectData* start = nullptr, bool internal = false) {
   Trial tr;
   const ProjectData base = start ? *start : editor().project();
   tr.project = editor().tryChanges([&] {
@@ -1297,8 +1513,11 @@ Trial tryActions(const QJsonArray& actions, const ProjectData* start = nullptr) 
       const QString tool = a.contains(QStringLiteral("tool")) ? string(a, "tool") : string(a, "name");
       QJsonObject input = a.value(QStringLiteral("input")).toObject();
       if (a.value(QStringLiteral("input")).isString()) input = QJsonDocument::fromJson(string(a, "input").toUtf8()).object();
-      // ワークショップのオーディオを置く編集は、propose_audio の候補だけが使う（AI に渡す道具の一覧には無い）
-      const std::optional<ToolResult> r = tool == u"add_workshop_audio" ? std::optional<ToolResult>(addWorkshopAudio(input, merge)) : runEdit(tool, input, merge);
+      // ワークショップのオーディオ・作った画像を置く編集は、アプリが作った候補だけが使う（AI に渡す道具の一覧には無い）
+      std::optional<ToolResult> r;
+      if (internal && tool == u"add_workshop_audio") r = addWorkshopAudio(input, merge);
+      else if (internal && tool == u"add_generated_image") r = addGeneratedImage(input, merge);
+      else r = runEdit(tool, input, merge);
       if (!r) {
         tr.error = QStringLiteral("%1 つ目の編集: 案の中では「%2」は使えません").arg(step).arg(tool);
         return;
@@ -1316,6 +1535,7 @@ Trial tryActions(const QJsonArray& actions, const ProjectData* start = nullptr) 
   const QJsonObject after = projectToJson(tr.project);
   tr.texts = changedIds(before.value(QStringLiteral("texts")).toArray(), after.value(QStringLiteral("texts")).toArray());
   tr.clips = changedIds(before.value(QStringLiteral("clips")).toArray(), after.value(QStringLiteral("clips")).toArray());
+  tr.overlays = changedIds(before.value(QStringLiteral("overlays")).toArray(), after.value(QStringLiteral("overlays")).toArray());
   tr.audios = changedIds(before.value(QStringLiteral("audios")).toArray(), after.value(QStringLiteral("audios")).toArray());
   tr.workshopUsed.removeDuplicates();
   tr.videoLength = layoutClips(tr.project.clips, tr.project.settings.fps).total;
@@ -1501,7 +1721,8 @@ QString choiceLetter(int index) {
 
 ChoiceApplied applyChoice(const Choice& choice, const QString& merge, const ProjectData* start) {
   ChoiceApplied out;
-  Trial tr = tryActions(choice.actions, start);
+  // アプリが作った候補（ワークショップのオーディオ・作った画像）だけが、アプリの中の編集を使える
+  Trial tr = tryActions(choice.actions, start, !choice.audio.id.isEmpty() || !choice.file.isEmpty());
   if (!tr.error.isEmpty()) {
     out.error = tr.error;
     return out;
@@ -1516,6 +1737,7 @@ ChoiceApplied applyChoice(const Choice& choice, const QString& merge, const Proj
   out.log = tr.log;
   if (!tr.texts.isEmpty()) out.focusText = tr.texts.front();
   if (!tr.clips.isEmpty()) out.focusClip = tr.clips.front();
+  if (!tr.overlays.isEmpty()) out.focusOverlay = tr.overlays.front();
   if (!tr.audios.isEmpty()) out.focusAudio = tr.audios.front();
   // ワークショップのものを使ったことを知らせる（使った人の数。同じ人は 1 回だけ数える）
   for (const QString& id : tr.workshopUsed) workshop().markUsed(id);
@@ -1526,18 +1748,23 @@ QString workshopRef(const QString& id) {
   return QStringLiteral("workshop:") + id;
 }
 
-QString workshopAudioAsset(const QString& id) {
-  const QString file = workshopAudioFile(id);
+QString assetForFile(const QString& file) {
   if (file.isEmpty()) return {};
   const QString path = QFileInfo(file).absoluteFilePath();
   const Editor& ed = editor();
   // 一覧に出ているものだけ（一覧から外して、元に戻す用に情報だけ残っているものは使わない）
   for (const QString& assetId : ed.assetOrder()) {
     const Asset* a = ed.asset(assetId);
-    if (!a || a->kind != AssetKind::Audio || a->status == AssetStatus::Error || a->status == AssetStatus::Missing) continue;
+    if (!a || a->status == AssetStatus::Error || a->status == AssetStatus::Missing) continue;
     if (QFileInfo(a->path).absoluteFilePath().compare(path, Qt::CaseInsensitive) == 0) return a->id;
   }
   return {};
+}
+
+QString workshopAudioAsset(const QString& id) {
+  const QString assetId = assetForFile(workshopAudioFile(id));
+  const Asset* a = assetId.isEmpty() ? nullptr : editor().asset(assetId);
+  return a && a->kind == AssetKind::Audio ? assetId : QString();
 }
 
 void runTool(const QString& name, const QJsonObject& input, const QString& merge, QObject* context, std::function<void(ToolResult)> done) {
@@ -1579,6 +1806,10 @@ void runTool(const QString& name, const QJsonObject& input, const QString& merge
   }
   if (name == u"search_workshop") {
     searchWorkshop(input, context, std::move(done));
+    return;
+  }
+  if (name == u"generate_images") {
+    generateImages(input, context, std::move(done));
     return;
   }
   ToolResult r;

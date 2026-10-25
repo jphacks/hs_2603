@@ -71,6 +71,7 @@ set(SOURCES
   src/ai/servercall.h src/ai/servercall.cpp
   src/ai/account.h src/ai/account.cpp
   src/ai/workshop.h src/ai/workshop.cpp
+  src/ai/imagegen.h src/ai/imagegen.cpp
   src/ui/accountdialog.h src/ui/accountdialog.cpp
   src/ui/workshopdialog.h src/ui/workshopdialog.cpp
   src/ui/serverstatus.h src/ui/serverstatus.cpp

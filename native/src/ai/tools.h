@@ -44,6 +44,8 @@ struct Choice {
    * label はその名前（ほかの人が付けたものなので、画面に出すだけで、AI への知らせには入れない）
    */
   WorkshopTemplate audio;
+  /** generate_images の候補のときの、作った画像のファイル（ChoiceSet::image のときだけ。選ぶとメディア一覧に入れる） */
+  QString file;
 };
 
 /** propose_choices・propose_audio で見せる、選ぶ案のまとまり */
@@ -61,6 +63,11 @@ struct ChoiceSet {
    * 選ぶと、ファイルを手元に置いてメディア一覧に入れてから、案の編集（add_workshop_audio）を当てはめる
    */
   bool audio = false;
+  /**
+   * AI が作った画像の候補（generate_images）。プレビューは作った画像そのもの。
+   * 選ぶと、画像をメディア一覧に入れてから、案の編集（add_generated_image）を当てはめる
+   */
+  bool image = false;
 };
 
 /** 案を、今の編集場所に当てはめた結果 */
@@ -70,9 +77,10 @@ struct ChoiceApplied {
   QString error;
   /** 何をしたか（1 行ずつ） */
   QStringList log;
-  /** 変えたテキスト（なければクリップ、オーディオ）の ID。選んで見せるのに使う */
+  /** 変えたテキスト（なければクリップ、重ねる映像・画像、オーディオ）の ID。選んで見せるのに使う */
   QString focusText;
   QString focusClip;
+  QString focusOverlay;
   QString focusAudio;
 };
 
@@ -126,5 +134,7 @@ QString choiceLetter(int index);
 QString workshopRef(const QString& id);
 /** ワークショップのオーディオ id を手元に置いたファイルが、今の編集場所のメディア一覧にあれば、その素材の ID（無ければ空） */
 QString workshopAudioAsset(const QString& id);
+/** ファイル path が、今の編集場所のメディア一覧にあれば、その素材の ID（無ければ空。読み込めなかったものは除く） */
+QString assetForFile(const QString& path);
 
 }  // namespace kv::ai

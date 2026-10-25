@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import Fastify from 'fastify';
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
-import type { ConverseFn } from './bedrock.ts';
+import type { ConverseFn, InvokeFn } from './bedrock.ts';
 import type { Config } from './config.ts';
 import { serverDir } from './config.ts';
 import type { Db } from './db.ts';
@@ -20,6 +20,8 @@ export type AppContext = {
   db: Db;
   /** Bedrock を呼ぶ関数（テストでは差し替える） */
   converse: ConverseFn;
+  /** Bedrock の InvokeModel を呼ぶ関数（画像を作る。無ければ本物を使う） */
+  invoke?: InvokeFn;
 };
 
 const publicDir = path.join(serverDir, 'public');
