@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
   QApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
   QApplication app(argc, argv);
   QApplication::setApplicationName(QStringLiteral("kantan-video-editor"));
-  QApplication::setApplicationDisplayName(QStringLiteral("かんたん動画エディタ"));
+  QApplication::setApplicationDisplayName(QStringLiteral("e-editor"));
   QApplication::setOrganizationName(QStringLiteral("JPHACKS"));
   QApplication::setApplicationVersion(QStringLiteral(KV_VERSION));
 

@@ -3,7 +3,7 @@
 # ライブラリを入れてサーバーを起動し、server フォルダーのファイルが変わったら、自動で取り込んで起動し直す。
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'node.ps1')
-try { $Host.UI.RawUI.WindowTitle = 'かんたん動画エディタ AI サーバー' } catch { }
+try { $Host.UI.RawUI.WindowTitle = 'e-editor AI サーバー' } catch { }
 
 # 古いコンソールでは、ウィンドウの中をクリックすると「簡易編集モード」で表示が止まり、サーバーも書き込めずに止まって、
 # AI の依頼に返事をしなくなる。このウィンドウだけ、簡易編集モードを切っておく（できなければ、そのまま）

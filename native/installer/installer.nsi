@@ -1,4 +1,4 @@
-﻿; かんたん動画エディタ（C++版）のインストーラー
+﻿; e-editor（C++版）のインストーラー
 ; build-installer.ps1 から makensis で作る（VERSION / OUTFILE / ICON / INSTALL_FILES / UNINSTALL_FILES を渡す）
 ; Program Files に入れて、この PC のすべてのユーザーが使えるようにする（入れるときに管理者の許可が要る）。
 ; 自動保存・設定・ログイン・テンプレートなどは、これまでどおりユーザーごとの %LOCALAPPDATA%\JPHACKS\kantan-video-editor に置く。
@@ -7,7 +7,9 @@ ManifestDPIAware true
 SetCompressor /SOLID lzma
 RequestExecutionLevel admin
 
-!define APPNAME "かんたん動画エディタ"
+!define APPNAME "e-editor"
+; 前の名前（上書きでインストールしたとき・アンインストールのとき、前の名前のショートカットも消す）
+!define OLDNAME "かんたん動画エディタ"
 !define APPID "kantan-video-editor-cpp"
 !define EXE "kantan-video-editor.exe"
 !define PROGID "KantanVideoProject.Cpp"
@@ -89,6 +91,8 @@ Section "Install"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
+  Delete "$SMPROGRAMS\${OLDNAME}.lnk"
+  Delete "$DESKTOP\${OLDNAME}.lnk"
   CreateShortcut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\${EXE}"
   CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${EXE}"
 
@@ -119,6 +123,8 @@ Section "Uninstall"
   SetShellVarContext all
   Delete "$SMPROGRAMS\${APPNAME}.lnk"
   Delete "$DESKTOP\${APPNAME}.lnk"
+  Delete "$SMPROGRAMS\${OLDNAME}.lnk"
+  Delete "$DESKTOP\${OLDNAME}.lnk"
 
   ; .kvproj がこのアプリを指しているときだけ外す
   ReadRegStr $0 HKLM "Software\Classes\.kvproj" ""

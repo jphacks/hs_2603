@@ -419,7 +419,7 @@ void MainWindow::buildMenus() {
   bindCommand(QStringLiteral("help.shortcuts"), help->addAction(QStringLiteral("キーボードショートカット"), this, &MainWindow::showShortcuts));
   help->addAction(QStringLiteral("バージョン情報"), this, [this] {
     QMessageBox::about(this, QStringLiteral("バージョン情報"),
-                       QStringLiteral("<b>かんたん動画エディタ</b><br>バージョン %1<br><br>Qt %2 / FFmpeg / miniaudio / Lucide")
+                       QStringLiteral("<b>e-editor</b><br>バージョン %1<br><br>Qt %2 / FFmpeg / miniaudio / Lucide")
                            .arg(QStringLiteral(KV_VERSION), QString::fromLatin1(qVersion())));
   });
 
@@ -663,7 +663,7 @@ void MainWindow::updateTitle() {
   const Editor& ed = editor();
   QString name = ed.workspaceName(ed.workspaceIndex());
   if (!ed.projectPath().isEmpty()) name = QFileInfo(ed.projectPath()).completeBaseName();
-  setWindowTitle(QStringLiteral("%1%2 - かんたん動画エディタ").arg(name, ed.dirty() ? QStringLiteral(" *") : QString()));
+  setWindowTitle(QStringLiteral("%1%2 - e-editor").arg(name, ed.dirty() ? QStringLiteral(" *") : QString()));
 }
 
 void MainWindow::showToast(const QString& message, int kind) {
@@ -697,7 +697,7 @@ bool MainWindow::confirmSaveWorkspace(int index) {
   // 同じタブを保存・閉じられるよう、番号ではなく変わらない ID で覚えておく
   const int uid = ed.workspaceUid(index);
   ed.switchWorkspace(index);
-  QMessageBox box(QMessageBox::Question, QStringLiteral("かんたん動画エディタ"),
+  QMessageBox box(QMessageBox::Question, QStringLiteral("e-editor"),
                   QStringLiteral("「%1」の変更を保存しますか？").arg(ed.workspaceName(index)), QMessageBox::NoButton, this);
   QPushButton* save = box.addButton(QStringLiteral("保存"), QMessageBox::AcceptRole);
   QPushButton* dont = box.addButton(QStringLiteral("保存しない"), QMessageBox::DestructiveRole);
@@ -802,7 +802,7 @@ void MainWindow::showShortcuts() {
 void MainWindow::offerRestore() {
   auto file = readAutosave();
   if (!file) return;
-  QMessageBox box(QMessageBox::Question, QStringLiteral("かんたん動画エディタ"), QStringLiteral("前回の編集内容が残っています。復元しますか？"),
+  QMessageBox box(QMessageBox::Question, QStringLiteral("e-editor"), QStringLiteral("前回の編集内容が残っています。復元しますか？"),
                   QMessageBox::NoButton, this);
   QPushButton* restore = box.addButton(QStringLiteral("復元"), QMessageBox::AcceptRole);
   box.addButton(QStringLiteral("破棄"), QMessageBox::DestructiveRole);
@@ -817,7 +817,7 @@ void MainWindow::offerRestore() {
 
 void MainWindow::closeEvent(QCloseEvent* e) {
   if (exportDialog_ && exportDialog_->isRunning()) {
-    const auto r = QMessageBox::question(this, QStringLiteral("かんたん動画エディタ"), QStringLiteral("書き出し中です。中止して終了しますか？"));
+    const auto r = QMessageBox::question(this, QStringLiteral("e-editor"), QStringLiteral("書き出し中です。中止して終了しますか？"));
     if (r != QMessageBox::Yes) {
       e->ignore();
       return;

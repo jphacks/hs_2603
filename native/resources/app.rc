@@ -14,11 +14,11 @@ BEGIN
     BLOCK "041104b0"
     BEGIN
       VALUE "CompanyName", "JPHACKS Team"
-      VALUE "FileDescription", "かんたん動画エディタ"
+      VALUE "FileDescription", "e-editor"
       VALUE "FileVersion", "0.1.0"
       VALUE "InternalName", "kantan-video-editor"
       VALUE "OriginalFilename", "kantan-video-editor.exe"
-      VALUE "ProductName", "かんたん動画エディタ"
+      VALUE "ProductName", "e-editor"
       VALUE "ProductVersion", "0.1.0"
     END
   END

@@ -1,4 +1,4 @@
-﻿# かんたん動画エディタ（C++ / Qt / MinGW）をビルドして、動かすのに必要なファイルを native\dist\kantan-video-editor に集める。
+﻿# e-editor（C++ / Qt / MinGW）をビルドして、動かすのに必要なファイルを native\dist\kantan-video-editor に集める。
 # 開発用ツールが無いときは、先に tools\setup.ps1 でダウンロードする（初回だけ）。
 #   powershell -ExecutionPolicy Bypass -File native\build.ps1             ビルド
 #   powershell -ExecutionPolicy Bypass -File native\build.ps1 -Run        ビルドして起動

@@ -77,7 +77,7 @@ async function main(): Promise<void> {
   const hosts = config.host === '0.0.0.0' || config.host === '::'
     ? ['localhost', ...Object.values(networkInterfaces()).flat().filter((n) => n && n.family === 'IPv4' && !n.internal).map((n) => n!.address)]
     : [config.host];
-  console.log(`\nかんたん動画エディタの AI サーバーを起動しました（モデル: ${config.model}）`);
+  console.log(`\ne-editor の AI サーバーを起動しました（モデル: ${config.model}）`);
   for (const h of hosts) console.log(`  管理画面: ${scheme}://${h}:${config.port}/`);
   if (!https && !config.trustProxy) {
     console.log('  ※ HTTP で動いています。家の外（インターネット）から使うときは、HTTPS にしてください（server/README.md を参照）');

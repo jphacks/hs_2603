@@ -58,7 +58,7 @@ bool AccountDialog::run(QWidget* parent, Page page, bool startup) {
 
 AccountDialog::AccountDialog(QWidget* parent, Page page, bool startup) : QDialog(parent), startup_(startup) {
   setObjectName(QStringLiteral("AccountDialog"));
-  setWindowTitle(QStringLiteral("ログイン - かんたん動画エディタ"));
+  setWindowTitle(QStringLiteral("ログイン - e-editor"));
   setModal(true);
   // 大きさは中身に合わせて自動で変える: 幅は中身の 392 + 余白 で 440、高さは出ているものがちょうど入るだけ
   // （ページを切り替えたり、失敗の文を出したりするたびに合わせ直す。隠したページの高さは数えない）

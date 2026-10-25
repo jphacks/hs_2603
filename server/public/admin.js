@@ -1,4 +1,4 @@
-// かんたん動画エディタの管理画面。画面に出す値は、すべて textContent で入れる（HTML としては扱わない）。
+// e-editor の管理画面。画面に出す値は、すべて textContent で入れる（HTML としては扱わない）。
 
 const EFFORT = { auto: '自動', low: '低', medium: '中', high: '高', max: '最大' };
 const LEVELS = ['low', 'medium', 'high', 'max'];
@@ -207,7 +207,7 @@ function showLogin(message = '') {
     error,
     h('button', { type: 'submit', class: 'primary' }, 'ログイン'),
   );
-  app.replaceChildren(h('main', { class: 'login' }, h('h1', {}, '管理画面'), h('p', { class: 'sub' }, 'かんたん動画エディタの AI サーバー'), form));
+  app.replaceChildren(h('main', { class: 'login' }, h('h1', {}, '管理画面'), h('p', { class: 'sub' }, 'e-editor の AI サーバー'), form));
   form.querySelector('input').focus();
 }
 
@@ -293,7 +293,7 @@ async function route() {
     h(
       'div',
       { class: 'shell' },
-      h('aside', { class: 'side' }, h('div', { class: 'brand' }, h('h1', {}, '管理画面'), h('small', {}, 'かんたん動画エディタ')), nav, h('div', { class: 'me' }, me.user.email, h('br'), logout)),
+      h('aside', { class: 'side' }, h('div', { class: 'brand' }, h('h1', {}, '管理画面'), h('small', {}, 'e-editor')), nav, h('div', { class: 'me' }, me.user.email, h('br'), logout)),
       content,
     ),
   );

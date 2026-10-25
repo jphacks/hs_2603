@@ -18,7 +18,7 @@ static const char* kProjectTag = "<project>";
 
 static QString systemPrompt() {
   return QStringLiteral(
-      "あなたは、Windows の動画編集アプリ「かんたん動画エディタ」の中で、編集を手伝うアシスタントです。"
+      "あなたは、Windows の動画編集アプリ「e-editor」の中で、編集を手伝うアシスタントです。"
       "使う人は動画編集に慣れていない人です。\n"
       "\n"
       "話し方:\n"

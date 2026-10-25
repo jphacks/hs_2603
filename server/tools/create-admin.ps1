@@ -8,7 +8,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'node.ps1')
-try { $Host.UI.RawUI.WindowTitle = 'かんたん動画エディタ AI サーバー - 管理者を作る' } catch { }
+try { $Host.UI.RawUI.WindowTitle = 'e-editor AI サーバー - 管理者を作る' } catch { }
 
 $code = 1
 try {
