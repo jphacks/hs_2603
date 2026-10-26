@@ -2,6 +2,9 @@
 
 [![IMAGE ALT TEXT HERE](https://jphacks.com/wp-content/uploads/2026/07/IMG_5316.png)](https://www.youtube.com/watch?v=piaNsc6ilBI)
 
+# ログインアカウント！ 
+email test@gmail.com
+password 1234567890
 Windows 向けの動画編集アプリです。動画や写真を並べて、テキストや BGM を入れ、MP4 に書き出せます。C++（Qt 6）と FFmpeg で作っていて、インターネットにつながなくても使えます（AI アシスタントを使うときだけ、AI サーバーに接続します）。AI サーバー（`server/`）を家の PC などで動かすと、アカウントごとに AI を使える量や考える深さを、ブラウザーの管理画面で決められます。アプリに API キーは要りません。
 
 ## 製品概要
