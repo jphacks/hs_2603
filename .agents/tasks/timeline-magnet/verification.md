@@ -11,7 +11,7 @@
 - 画像の目視も期待どおり（8 章）。吸着していないときの画面は、修正前と画素まで同じ（7 枚、違う画素 0）。
 - (j): Alt を押しながらドラッグし、マウスを離してから Alt を離しても、メニューバーは選ばれない（修正前も後も）。対策は入れていない。
 - 気づいたこと: 修正前のコードでは、テキストやオーディオを「移動」するとき、片方の端だけが吸着先に近くても吸着しなかった（右端だけでなく左端も。両端が同時に近いときだけ効いていた）。今回の修正で、どちらか片方の端だけが近いときも吸着するようになった（合意した「実際に吸着したほうの端を使う」のとおり）。くわしくは 5.2。
-- コミット・push・stash・配置はしていない。ユーザーのアプリ（PID 13748）は起動したまま。一時フォルダー `C:\kantan-dev\tmp\kv-magnet\` はレビューのために残してある（13 章）。
+- コミット・push・stash・配置はしていない。ユーザーのアプリ（PID 13748）は起動したまま。一時フォルダー `C:\e-editor-dev\tmp\kv-magnet\` はレビューのために残してある（13 章）。
 
 ## 1. 始める前の状態
 
@@ -28,8 +28,8 @@
   ```
   `git status --porcelain` は `?? .agents/tasks/timeline-magnet/` だけで、ほかの変更はなかった。HEAD は `eaac4b6 feat(timeline): make playhead visible over header column`。stash はなし。
 - `timelinewidget.cpp`: UTF-8（BOM なし）・CRLF 937 行（LF だけの行は 0）。`timelinewidget.h`: UTF-8（BOM なし）・CRLF 121 行（LF だけの行は 0）。
-- ユーザーのアプリ `native\dist\kantan-video-editor\kantan-video-editor.exe` が起動中だった（PID 13748、11:29:33 起動）。exe の時刻は `native\dist` も `native\build` も 2026-10-22 00:47:58。
-- `C:\kantan-dev\tmp\` は空で、`kv-magnet\` はなかった。リポジトリに書式の設定（.clang-format など）はない。
+- ユーザーのアプリ `native\dist\e-editor\e-editor.exe` が起動中だった（PID 13748、11:29:33 起動）。exe の時刻は `native\dist` も `native\build` も 2026-10-22 00:47:58。
+- `C:\e-editor-dev\tmp\` は空で、`kv-magnet\` はなかった。リポジトリに書式の設定（.clang-format など）はない。
 
 ## 2. 変更の内容
 
@@ -319,37 +319,37 @@ index a159ad8..f5de683 100644
 
 ```powershell
 param([int]$N = 1)
-$log = "C:\kantan-dev\tmp\kv-magnet\build-$N.log"
+$log = "C:\e-editor-dev\tmp\kv-magnet\build-$N.log"
 powershell -NoProfile -ExecutionPolicy Bypass -File 'c:\git\JPHACK\e-editor\native\build.ps1' -NoDeploy 2>&1 | Out-File -Encoding utf8 $log
 "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 $log
 ```
 
 `build-1.log`（手順 2 のあと。rulerStep の切り出しだけを入れた状態。全文）:
 ```
-[1/5] Automatic MOC for target kantan-video-editor
-[2/5] Building CXX object CMakeFiles/kantan-video-editor.dir/kantan-video-editor_autogen/mocs_compilation.cpp.obj
-[3/5] Building CXX object CMakeFiles/kantan-video-editor.dir/src/ui/timelinewidget.cpp.obj
-[4/5] Building CXX object CMakeFiles/kantan-video-editor.dir/src/ui/mainwindow.cpp.obj
-[5/5] Linking CXX executable kantan-video-editor.exe
+[1/5] Automatic MOC for target e-editor
+[2/5] Building CXX object CMakeFiles/e-editor.dir/e-editor_autogen/mocs_compilation.cpp.obj
+[3/5] Building CXX object CMakeFiles/e-editor.dir/src/ui/timelinewidget.cpp.obj
+[4/5] Building CXX object CMakeFiles/e-editor.dir/src/ui/mainwindow.cpp.obj
+[5/5] Linking CXX executable e-editor.exe
 BUILD-EXIT=0
 ```
 
 `build-2.log`（手順 3 のあと。最終のコード。全文）:
 ```
-[1/5] Automatic MOC for target kantan-video-editor
-[2/5] Building CXX object CMakeFiles/kantan-video-editor.dir/kantan-video-editor_autogen/mocs_compilation.cpp.obj
-[3/5] Building CXX object CMakeFiles/kantan-video-editor.dir/src/ui/timelinewidget.cpp.obj
-[4/5] Building CXX object CMakeFiles/kantan-video-editor.dir/src/ui/mainwindow.cpp.obj
-[5/5] Linking CXX executable kantan-video-editor.exe
+[1/5] Automatic MOC for target e-editor
+[2/5] Building CXX object CMakeFiles/e-editor.dir/e-editor_autogen/mocs_compilation.cpp.obj
+[3/5] Building CXX object CMakeFiles/e-editor.dir/src/ui/timelinewidget.cpp.obj
+[4/5] Building CXX object CMakeFiles/e-editor.dir/src/ui/mainwindow.cpp.obj
+[5/5] Linking CXX executable e-editor.exe
 BUILD-EXIT=0
 ```
 
 - どちらも終了コード 0、`warning:` も `error:` もない（`-Wall -Wno-unused-parameter`）。`std::optional` についての `-Wmaybe-uninitialized` も出ていないので、書き方は計画のまま。ヘッダーを変えたので mainwindow.cpp もコンパイルし直されたが、警告はない。
-- 新しくなったのは `native\build\kantan-video-editor.exe`（2026-10-22 14:43:29。git では無視されるフォルダー）だけ。配置していないので、`native\dist\kantan-video-editor\kantan-video-editor.exe` は 2026-10-22 00:47:58 のまま。
+- 新しくなったのは `native\build\e-editor.exe`（2026-10-22 14:43:29。git では無視されるフォルダー）だけ。配置していないので、`native\dist\e-editor\e-editor.exe` は 2026-10-22 00:47:58 のまま。
 
 ## 4. ハーネス
 
-- 場所: `C:\kantan-dev\tmp\kv-magnet\`（リポジトリの外。パスは ASCII だけ）。計画の付録 A の `CMakeLists.txt`・`magnetcheck.cpp`（UTF-8、BOM なし）・`run.ps1`（ASCII だけ）を、そのまま作った。リポジトリにはテストもビルドのターゲットも足していない。
+- 場所: `C:\e-editor-dev\tmp\kv-magnet\`（リポジトリの外。パスは ASCII だけ）。計画の付録 A の `CMakeLists.txt`・`magnetcheck.cpp`（UTF-8、BOM なし）・`run.ps1`（ASCII だけ）を、そのまま作った。リポジトリにはテストもビルドのターゲットも足していない。
 - 作り: main.cpp 以外のアプリのソース（.cpp 23 本と .h）をリポジトリから直接コンパイルし、Qt6::Test（Qt 6.8.3 / MinGW 13.1）を使う。MainWindow と MediaManager は使わない（ユーザーの自動保存に書き込まない）。素材は `Editor::addAsset` で Ready の情報だけを入れる。アプリと同じく、メニューバー（`&File`・`&View`）のある `QMainWindow` の中央に `TimelineWidget` を置いた（(j) で使う）。
 - マウスは QTest の QWindow 版（`mousePress`・`mouseRelease`・`mouseDClick`、修飾キー付きの移動は `QTest::mouseEvent(QTest::MouseMove, ...)`）で入れた。OS の入力と同じ `QWindowSystemInterface` の経路を通る。DPR は掛けていない。
 - DPR と座標: `note: device pixel ratio 1.25, viewport 900x278, window active 1`。ビューポートのイベントフィルターで、マウスの全イベントの位置と修飾キー（Alt）が渡したものと同じことを毎回確かめた。4 回の実行すべてで `note: mouse arrived at ...` は 0 回、`setup:` の最初と最後のチェックは OK。
@@ -357,8 +357,8 @@ BUILD-EXIT=0
 - 実行（計画 4 章のコマンドを `harness.ps1` に書いて実行。中身は次のとおり）:
   ```powershell
   param([string]$Phase = 'fixed')
-  $log = "C:\kantan-dev\tmp\kv-magnet\run-$Phase.log"
-  powershell -NoProfile -ExecutionPolicy Bypass -File 'C:\kantan-dev\tmp\kv-magnet\run.ps1' 2>&1 | Out-File -Encoding utf8 $log
+  $log = "C:\e-editor-dev\tmp\kv-magnet\run-$Phase.log"
+  powershell -NoProfile -ExecutionPolicy Bypass -File 'C:\e-editor-dev\tmp\kv-magnet\run.ps1' 2>&1 | Out-File -Encoding utf8 $log
   "RUN-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 $log
   ```
 - 実行した順番: `baseline`（修正前のコード）→ `step`（手順 2 のあと）→ `fixed`（手順 3 のあと）→ `fixed-values`（同じコードで、実測値を出すようにしたハーネス）。
@@ -374,12 +374,12 @@ BUILD-EXIT=0
 -- The CXX compiler identification is GNU 13.1.0
 -- Detecting C compiler ABI info
 -- Detecting C compiler ABI info - done
--- Check for working C compiler: C:/kantan-dev/Qt/Tools/mingw1310_64/bin/gcc.exe - skipped
+-- Check for working C compiler: C:/e-editor-dev/Qt/Tools/mingw1310_64/bin/gcc.exe - skipped
 -- Detecting C compile features
 -- Detecting C compile features - done
 -- Detecting CXX compiler ABI info
 -- Detecting CXX compiler ABI info - done
--- Check for working CXX compiler: C:/kantan-dev/Qt/Tools/mingw1310_64/bin/g++.exe - skipped
+-- Check for working CXX compiler: C:/e-editor-dev/Qt/Tools/mingw1310_64/bin/g++.exe - skipped
 -- Detecting CXX compile features
 -- Detecting CXX compile features - done
 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
@@ -391,7 +391,7 @@ BUILD-EXIT=0
 -- Could NOT find WrapVulkanHeaders (missing: Vulkan_INCLUDE_DIR) 
 -- Configuring done (17.4s)
 -- Generating done (0.7s)
--- Build files have been written to: C:/kantan-dev/tmp/kv-magnet/build
+-- Build files have been written to: C:/e-editor-dev/tmp/kv-magnet/build
 [0/2] Re-checking globbed directories...
 [1/34] Automatic MOC for target miniaudio
 [2/34] Building CXX object CMakeFiles/miniaudio.dir/miniaudio_autogen/mocs_compilation.cpp.obj
@@ -430,14 +430,14 @@ note: device pixel ratio 1.25, viewport 900x278, window active 1
 OK   setup: clips 0-3.5-10.5 s, text 6.5-8.8 s, audio 0-2.6 s at 60 px/s
 OK   setup: timeline can scroll to 300 and shows all rows
 OK   setup: mouse events (and the Alt modifier) land at the intended viewport position
-note: saved C:/kantan-dev/tmp/kv-magnet/baseline/ref-i-idle.png (the first run must be on the unmodified code)
-note: saved C:/kantan-dev/tmp/kv-magnet/baseline/ref-i-scrub-free.png (the first run must be on the unmodified code)
-note: saved C:/kantan-dev/tmp/kv-magnet/baseline/ref-i-scrub-alt.png (the first run must be on the unmodified code)
-note: saved C:/kantan-dev/tmp/kv-magnet/baseline/ref-i-move-free.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-magnet/baseline/ref-i-idle.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-magnet/baseline/ref-i-scrub-free.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-magnet/baseline/ref-i-scrub-alt.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-magnet/baseline/ref-i-move-free.png (the first run must be on the unmodified code)
 OK   i: (setup) one undo puts the text back
-note: saved C:/kantan-dev/tmp/kv-magnet/baseline/ref-i-idle-100.png (the first run must be on the unmodified code)
-note: saved C:/kantan-dev/tmp/kv-magnet/baseline/ref-i-idle-20.png (the first run must be on the unmodified code)
-note: saved C:/kantan-dev/tmp/kv-magnet/baseline/ref-i-idle-head.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-magnet/baseline/ref-i-idle-100.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-magnet/baseline/ref-i-idle-20.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-magnet/baseline/ref-i-idle-head.png (the first run must be on the unmodified code)
 OK   i: the red line and knob are still drawn over the header column
 OK   a: a ruler press away from snap points seeks to tOf(x)
 OK   a: 12 px before 0:02 does not snap (stays tOf(x))
@@ -545,7 +545,7 @@ RUN-EXIT=1
 
 - チェックは 102 件（ウィンドウが前面だったので Alt+V の 1 件を含む）。OK 65 件、FAIL 37 件。画素比較の 7 件は、1 回目では基準の画像を保存するだけなので数に入らない（`note: saved ...` が 7 つ）。
 - `setup:` の 4 行、(i) の 2 行、(h) の 12 行、(j) の 10 行（Alt+V を含む）はすべて OK。「吸着しない」「灰色のまま」「ガイド線が出ない」「元に戻すが 1 回で戻る」（g）も OK。
-- 修正前の画像は `C:\kantan-dev\tmp\kv-magnet\baseline\` に残した: 画素比較の基準 `ref-*.png` 7 枚と、この実行のすべての画像のコピー `shots-before\*.png` 22 枚。
+- 修正前の画像は `C:\e-editor-dev\tmp\kv-magnet\baseline\` に残した: 画素比較の基準 `ref-*.png` 7 枚と、この実行のすべての画像のコピー `shots-before\*.png` 22 枚。
 
 ### 5.2 計画 6.3 の予想（36 行）との違い
 
@@ -1049,9 +1049,9 @@ RUN-EXIT=0
   `git diff --name-only` は上の 2 つだけ（README.md・mainwindow.cpp・editor.cpp/.h・アイコン・app.qrc などは変わっていない）。ブランチは `feat/ikumu1`、HEAD は `eaac4b6` のまま。コミット・push・stash はしていない（stash の一覧は空）。
 - ユーザーのアプリは起動したまま（PID 13748、11:29:33 起動）。配置していないので `native\dist` の exe は 2026-10-22 00:47:58 のまま。
 - 取り込んでいない上流の変更（参考。頼まれていないので pull はしていない）: `origin/feat/ikumu1` は作業の始めは 3 コミット先だったが、作業中に 5 コミット先になった（追跡ブランチが更新された。私は fetch していない）。増えた `72c2e3f`（テキストのプリセットのドラッグ＆ドロップ）と `7136035`（音量キーフレーム。14:42:48）は、どちらも timelinewidget.cpp/.h を大きく変えている。今回の変更と同じ所（mousePressEvent の `Drag::Scrub` の分岐、オーディオの左端の長さ変更の `x.in = inPoint;` の直後など）にも手が入っているので、あとで pull やマージをすると timelinewidget.cpp で衝突する見込み。また上流ではオーディオの段の高さ（`kAudioLaneH` 42 → 52）が変わるので、このハーネスの行の位置は今の HEAD 用。
-- 一時フォルダー `C:\kantan-dev\tmp\kv-magnet\` は、レビューで直すことになったときに、ハーネスと修正前の基準をそのまま使えるように残してある。中身:
+- 一時フォルダー `C:\e-editor-dev\tmp\kv-magnet\` は、レビューで直すことになったときに、ハーネスと修正前の基準をそのまま使えるように残してある。中身:
   - ハーネス: `CMakeLists.txt`、`magnetcheck.cpp`（4 章の実測値の出力を足したもの）、`run.ps1`、ハーネスのビルド `build\`。
   - 基準と画像: `baseline\ref-*.png`（7 枚、修正前のコードで保存）、`baseline\shots-before\*.png`（修正前の 22 枚）、`shots\*.png`（最後の実行の 22 枚）。
   - ログ: `build-1.log`、`build-2.log`、`run-baseline.log`、`run-step.log`、`run-fixed.log`、`run-fixed-values.log`、`compare.log`、`final.log`、`diff.log`、`diff.patch`、`env.log`、`shape.log`、`keep-before.log`、`ls.log`、`ping.log`、`qtest-api.log`、`upstream.log`、`upstream-head.log`、`upstream-timeline.log`、`upstream-timeline.patch`、`diffout.log`。
   - 補助のスクリプト（ターミナルの出力が切れるので、コマンドをファイルにして実行した）: `appbuild.ps1`、`harness.ps1`、`compare.ps1`、`final.ps1`、`diffout.ps1`、`env.ps1`、`shape.ps1`、`keep-before.ps1`、`ls.ps1`、`ping.ps1`、`upstream.ps1`。どれも読み取りかログの書き出しだけで、リポジトリには書き込まない（`build.ps1 -NoDeploy` が `native\build\` に書くのを除く）。
-  - 消し方（レビューで承認されたあとの最後のステップで行う。このフォルダーだけを消し、`C:\kantan-dev\tmp` のほかのものには触らない）: `Remove-Item -Recurse -Force -LiteralPath 'C:\kantan-dev\tmp\kv-magnet'`
+  - 消し方（レビューで承認されたあとの最後のステップで行う。このフォルダーだけを消し、`C:\e-editor-dev\tmp` のほかのものには触らない）: `Remove-Item -Recurse -Force -LiteralPath 'C:\e-editor-dev\tmp\kv-magnet'`

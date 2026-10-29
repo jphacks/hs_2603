@@ -8,7 +8,7 @@
 
 namespace kv {
 
-inline constexpr const char* kAssetMime = "application/x-kantan-asset";
+inline constexpr const char* kAssetMime = "application/x-e-editor-asset";
 
 /**
  * 読み込んだ素材の一覧（タイムラインへドラッグできる）。メディア用とオーディオ用で、同じ仕組みを使う:

@@ -1,19 +1,20 @@
 ﻿; e-editor（C++版）のインストーラー
-; build-installer.ps1 から makensis で作る（VERSION / OUTFILE / ICON / INSTALL_FILES / UNINSTALL_FILES を渡す）
+; build-installer.ps1 から makensis で作る（VERSION / OUTFILE / ICON / INSTALL_FILES / UNINSTALL_FILES / VCREDIST_PS1 を渡す）
 ; Program Files に入れて、この PC のすべてのユーザーが使えるようにする（入れるときに管理者の許可が要る）。
-; 自動保存・設定・ログイン・テンプレートなどは、これまでどおりユーザーごとの %LOCALAPPDATA%\JPHACKS\kantan-video-editor に置く。
+; 自動保存・設定・ログイン・テンプレートなどは、これまでどおりユーザーごとの %LOCALAPPDATA%\JPHACKS\e-editor に置く。
 Unicode true
 ManifestDPIAware true
 SetCompressor /SOLID lzma
 RequestExecutionLevel admin
 
 !define APPNAME "e-editor"
-; 前の名前（上書きでインストールしたとき・アンインストールのとき、前の名前のショートカットも消す）
-!define OLDNAME "かんたん動画エディタ"
-!define APPID "kantan-video-editor-cpp"
-!define EXE "kantan-video-editor.exe"
-!define PROGID "KantanVideoProject.Cpp"
+!define APPID "e-editor-cpp"
+!define EXE "e-editor.exe"
+!define PROGID "EEditorProject.Cpp"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPID}"
+; オブジェクトマスクの AI の部品（onnxruntime.dll）が使う Microsoft Visual C++ ランタイムの版（14.44 以上）
+!define VCRT_KEY "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+!define VCRT_MINOR 44
 
 Name "${APPNAME}"
 OutFile "${OUTFILE}"
@@ -68,31 +69,59 @@ Function LaunchApp
   Exec '"$WINDIR\explorer.exe" "$INSTDIR\${EXE}"'
 FunctionEnd
 
-; 以前の版は、ユーザーごとに %LOCALAPPDATA%\Programs に入れていた（管理者の許可が要らない入れ方）。
-; 残っていると、スタートメニューやデスクトップのショートカットと「アプリ」の一覧が 2 つになるので、先にアンインストールする
-Function RemovePerUserInstall
-  ReadRegStr $0 HKCU "${UNINST_KEY}" "InstallLocation"
-  ${If} $0 != ""
-  ${AndIf} ${FileExists} "$0\uninstall.exe"
-    DetailPrint "以前の版（ユーザーごとのインストール）をアンインストールしています: $0"
-    ExecWait '"$0\uninstall.exe" /S _?=$0'
-    Delete "$0\uninstall.exe"
-    RMDir "$0"
+; Visual C++ ランタイム（x64）が入っているか（64 ビットと 32 ビットのレジストリの両方を見る）。$R0 に 1 / 0
+Function CheckVcRuntime
+  StrCpy $R0 0
+  ReadRegDWORD $0 HKLM "${VCRT_KEY}" "Installed"
+  ReadRegDWORD $1 HKLM "${VCRT_KEY}" "Major"
+  ReadRegDWORD $2 HKLM "${VCRT_KEY}" "Minor"
+  ${If} $0 == 1
+  ${AndIf} $1 == 14
+  ${AndIf} $2 >= ${VCRT_MINOR}
+    StrCpy $R0 1
+    Return
   ${EndIf}
-  DeleteRegKey HKCU "${UNINST_KEY}"
-  DeleteRegKey HKCU "Software\${APPID}"
+  SetRegView 32
+  ReadRegDWORD $0 HKLM "${VCRT_KEY}" "Installed"
+  ReadRegDWORD $1 HKLM "${VCRT_KEY}" "Major"
+  ReadRegDWORD $2 HKLM "${VCRT_KEY}" "Minor"
+  SetRegView 64
+  ${If} $0 == 1
+  ${AndIf} $1 == 14
+  ${AndIf} $2 >= ${VCRT_MINOR}
+    StrCpy $R0 1
+  ${EndIf}
+FunctionEnd
+
+; オブジェクトマスク（AI）は Microsoft Visual C++ ランタイムを使う。入っていない・古いときだけ、Microsoft の配布元から
+; ダウンロードして入れる（インストーラーには入れない。Microsoft の署名を確かめてから動かす）。
+; 入れられなくても、オブジェクトマスクのほかはそのまま使える（アプリが、使うときに理由を知らせる）
+Function EnsureVcRuntime
+  Call CheckVcRuntime
+  ${If} $R0 == 1
+    Return
+  ${EndIf}
+  DetailPrint "Microsoft Visual C++ ランタイムを、Microsoft からダウンロードして入れています…"
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\vcredist.ps1" "${VCREDIST_PS1}"
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\vcredist.ps1" "$PLUGINSDIR"'
+  Pop $0
+  Call CheckVcRuntime
+  ${If} $R0 == 1
+    DetailPrint "Microsoft Visual C++ ランタイムを入れました"
+  ${Else}
+    DetailPrint "Microsoft Visual C++ ランタイムを入れられませんでした（$0）。オブジェクトマスク（AI）を使うときは、https://aka.ms/vc14/vc_redist.x64.exe から入れてください"
+  ${EndIf}
 FunctionEnd
 
 Section "Install"
-  Call RemovePerUserInstall
   ; ショートカットは、この PC のすべてのユーザーのスタートメニューとデスクトップに置く
   SetShellVarContext all
   !include "${INSTALL_FILES}"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  Call EnsureVcRuntime
 
-  Delete "$SMPROGRAMS\${OLDNAME}.lnk"
-  Delete "$DESKTOP\${OLDNAME}.lnk"
   CreateShortcut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\${EXE}"
   CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${EXE}"
 
@@ -123,8 +152,6 @@ Section "Uninstall"
   SetShellVarContext all
   Delete "$SMPROGRAMS\${APPNAME}.lnk"
   Delete "$DESKTOP\${APPNAME}.lnk"
-  Delete "$SMPROGRAMS\${OLDNAME}.lnk"
-  Delete "$DESKTOP\${OLDNAME}.lnk"
 
   ; .kvproj がこのアプリを指しているときだけ外す
   ReadRegStr $0 HKLM "Software\Classes\.kvproj" ""

@@ -17,6 +17,10 @@
 
 using namespace kv;
 
+namespace kv {
+int runWheelTest(const QString& out);  // 一時的: 確認が終わったら消す
+}
+
 static QStringList openableFiles(const QStringList& args) {
   static const QStringList exts = {"mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "mts", "m2ts", "ts", "flv", "3gp", "mpg", "mpeg",
                                    "jpg", "jpeg", "png", "webp", "bmp", "gif", "tif", "tiff", "heic", "heif", "avif",
@@ -33,7 +37,7 @@ static QStringList openableFiles(const QStringList& args) {
 int main(int argc, char** argv) {
   QApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
   QApplication app(argc, argv);
-  QApplication::setApplicationName(QStringLiteral("kantan-video-editor"));
+  QApplication::setApplicationName(QStringLiteral("e-editor"));
   QApplication::setApplicationDisplayName(QStringLiteral("e-editor"));
   QApplication::setOrganizationName(QStringLiteral("JPHACKS"));
   QApplication::setApplicationVersion(QStringLiteral(KV_VERSION));
@@ -49,9 +53,10 @@ int main(int argc, char** argv) {
   theme::apply(app);
 
   const QStringList args = app.arguments();
+  if (const int wt = int(args.indexOf(QStringLiteral("--wheel-test"))); wt >= 0) return kv::runWheelTest(args.value(wt + 1));  // 一時的
 
   // 2 つ目に起動されたときは、ファイルを最初のウィンドウへ渡して終わる
-  const QString serverName = QStringLiteral("kantan-video-editor-") + qEnvironmentVariable("USERNAME");
+  const QString serverName = QStringLiteral("e-editor-") + qEnvironmentVariable("USERNAME");
   QLocalServer server;
   {
     QLocalSocket probe;

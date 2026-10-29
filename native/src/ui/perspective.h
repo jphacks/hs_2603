@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QObject>
 #include <QPoint>
+#include <QRect>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -27,6 +28,11 @@ struct PerspectiveLayout {
   QString rightCurrent;
   int leftWidth = 264;
   int rightWidth = 316;
+  /**
+   * この並びを覚えたときにあったビュー（閉じていたものも）。ここに無いビュー（あとの版で増えたビュー）は、
+   * 並びを戻すときに、そのビューの欄（home）の最後に開く
+   */
+  QStringList known;
 };
 
 /**
@@ -67,6 +73,23 @@ class PerspectiveManager : public QObject {
   bool leftCollapsed() const { return leftCollapsed_; }
   /** 左の欄にビューがあるか（無ければ、欄そのものを出していない） */
   bool leftHasViews() const;
+
+  /** ビューを見せるために押す所（操作の案内で使う） */
+  struct ViewReach {
+    /** もう前に出ていて、中身が見えている */
+    bool visible = false;
+    /** 閉じている（「表示」→「ビュー」から開く） */
+    bool closed = false;
+    /** 折りたたんだ左の欄にある（rect は、細い帯のタブの名前） */
+    bool collapsed = false;
+    /** 押す所（画面の座標）。visible ならタブそのもの。閉じていれば空 */
+    QRect rect;
+    /** ビューの名前（メディア など） */
+    QString title;
+  };
+  ViewReach reachView(const QString& id) const;
+  /** ビューの中身（無ければ nullptr） */
+  QWidget* viewWidget(const QString& id) const;
 
  signals:
   void leftCollapsedChanged(bool collapsed);

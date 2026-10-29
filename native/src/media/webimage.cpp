@@ -400,7 +400,7 @@ void WebImageImporter::startRequest(const Job& job) {
   req.setMaximumRedirectsAllowed(kMaxRedirects);
   req.setTransferTimeout(kTimeoutMs);
   req.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
-  req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Mozilla/5.0 (Windows NT 10.0; Win64; x64) KantanVideoEditor"));
+  req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Mozilla/5.0 (Windows NT 10.0; Win64; x64) e-editor"));
   req.setRawHeader("Accept", "image/webp,image/png,image/jpeg,image/gif,image/*;q=0.8,*/*;q=0.1");
   QNetworkReply* reply = nam_->get(req);
   auto data = std::make_shared<QByteArray>();

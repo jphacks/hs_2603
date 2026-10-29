@@ -10,7 +10,7 @@
 ## 1. 始める前の状態
 - `review.json` はなかったので 1 回目として作業した。タスクのフォルダーには `plan.md` だけがあった。
 - git: ブランチ `feat/ikumu1`、`origin/feat/ikumu1` と同じ、HEAD は `1f7d805`。`git status --porcelain` は `?? .agents/tasks/timeline-playhead-left/` だけ。依頼文にある widgets.h・widgets.cpp・inspector.cpp の変更は 1f7d805 ですでにコミットされていて、作業ツリーには変更がない（計画 1.3 と同じ）。私はこれらに触っていない。
-- ユーザーのアプリ: 作業を始めたとき（00:37:45）に `Get-Process -Name kantan-video-editor` を実行したが、何も出なかった。つまり、その時点でアプリはすでに起動していなかった（計画を書いた時点の PID 24972 は見つからなかった）。私はどのプロセスも終了させていない。最後の確認（00:49 ごろ）でも起動していない。
+- ユーザーのアプリ: 作業を始めたとき（00:37:45）に `Get-Process -Name e-editor` を実行したが、何も出なかった。つまり、その時点でアプリはすでに起動していなかった（計画を書いた時点の PID 24972 は見つからなかった）。私はどのプロセスも終了させていない。最後の確認（00:49 ごろ）でも起動していない。
 - `timelinewidget.cpp` は UTF-8（BOM なし）・CRLF（936 行、LF だけの行はなし）。修正後も UTF-8（BOM なし）・CRLF（937 行、LF だけの行はなし）のまま。
 
 ## 2. 変更の内容
@@ -96,22 +96,22 @@
 ## 3. アプリのビルド
 コマンド（出力はリポジトリの外のログに書いた）:
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy 2>&1 | Out-File -Encoding utf8 C:\kantan-dev\tmp\kv-playhead\build.log; "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\kantan-dev\tmp\kv-playhead\build.log
+powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy 2>&1 | Out-File -Encoding utf8 C:\e-editor-dev\tmp\kv-playhead\build.log; "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\e-editor-dev\tmp\kv-playhead\build.log
 ```
 ログの全文:
 ```
-[1/4] Automatic MOC for target kantan-video-editor
-[2/3] Building CXX object CMakeFiles/kantan-video-editor.dir/src/ui/timelinewidget.cpp.obj
-[3/3] Linking CXX executable kantan-video-editor.exe
+[1/4] Automatic MOC for target e-editor
+[2/3] Building CXX object CMakeFiles/e-editor.dir/src/ui/timelinewidget.cpp.obj
+[3/3] Linking CXX executable e-editor.exe
 BUILD-EXIT=0
 ```
-`warning:` も `error:` もない。新しくできたのは `native\build\kantan-video-editor.exe`（2026-10-22 00:47:58。git では無視されるフォルダー）だけ。配置していないので、`native\dist\kantan-video-editor\kantan-video-editor.exe` は 2026-10-21 13:34:55 のまま。
+`warning:` も `error:` もない。新しくできたのは `native\build\e-editor.exe`（2026-10-22 00:47:58。git では無視されるフォルダー）だけ。配置していないので、`native\dist\e-editor\e-editor.exe` は 2026-10-21 13:34:55 のまま。
 
 ## 4. ハーネス
-- 場所は `C:\kantan-dev\tmp\kv-playhead\`。計画の付録 A の `CMakeLists.txt`・`playheadcheck.cpp`（UTF-8、BOM なし）・`run.ps1`（ASCII だけ）を、そのまま作った。main.cpp 以外のアプリのソース（.cpp 23 本と .h 23 本）をリポジトリから直接コンパイルし、Qt6::Test（Qt 6.8.3、MinGW 13.1）を使う。MainWindow と MediaManager は使わないので、ユーザーの自動保存には書き込んでいない。
+- 場所は `C:\e-editor-dev\tmp\kv-playhead\`。計画の付録 A の `CMakeLists.txt`・`playheadcheck.cpp`（UTF-8、BOM なし）・`run.ps1`（ASCII だけ）を、そのまま作った。main.cpp 以外のアプリのソース（.cpp 23 本と .h 23 本）をリポジトリから直接コンパイルし、Qt6::Test（Qt 6.8.3、MinGW 13.1）を使う。MainWindow と MediaManager は使わないので、ユーザーの自動保存には書き込んでいない。
 - マウスは `QTest::mousePress/mouseMove/mouseRelease/mouseDClick` の QWindow 版で入れた。OS からの入力と同じ `QWindowSystemInterface` の経路を通る。DPR は 1.25（このマシンの値）。ビューポートに付けたイベントフィルターで、マウスの全イベントが渡した位置にぴったり届いたことを確かめた（最初と最後の `setup:` のチェックが OK。`note: mouse arrived at ...` は 1 回も出ていない）。
 - ハーネスの修正はしていない。修正前のコードで、最初の実行から計画どおりの結果が出た。
-- コマンド: `powershell -NoProfile -ExecutionPolicy Bypass -File C:\kantan-dev\tmp\kv-playhead\run.ps1 2>&1 | Out-File ... run-<phase>.log; "RUN-EXIT=$LASTEXITCODE" | Out-File -Append ...`
+- コマンド: `powershell -NoProfile -ExecutionPolicy Bypass -File C:\e-editor-dev\tmp\kv-playhead\run.ps1 2>&1 | Out-File ... run-<phase>.log; "RUN-EXIT=$LASTEXITCODE" | Out-File -Append ...`
 
 ### 4.1 修正前のコード（00:45 ごろ。アプリのファイルに触る前）
 ```
@@ -131,9 +131,9 @@ OK   e: scroll 0: no red inside the header column
 FAIL e: scroll 0: the whole knob shows (left half over the corner)
 OK   e: normal position x=400 is drawn
 OK   e: normal position leaves the header and the corner untouched
-note: saved C:/kantan-dev/tmp/kv-playhead/shots/ref-e-normal.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-playhead/shots/ref-e-normal.png (the first run must be on the unmodified code)
 OK   e: playhead left of the screen is not drawn
-note: saved C:/kantan-dev/tmp/kv-playhead/shots/ref-e-hidden.png (the first run must be on the unmodified code)
+note: saved C:/e-editor-dev/tmp/kv-playhead/shots/ref-e-hidden.png (the first run must be on the unmodified code)
 OK   a: ruler press seeks (x=400)
 OK   a: dragging over the header sets the time to tOf(x) (x=60)
 FAIL a: the red line is drawn under the mouse over the header (x=60)
@@ -266,9 +266,9 @@ RUN-EXIT=0
 - ハーネスで動かしていない操作（どれもコードは変えていない）: クリップの端のドラッグ（長さ変更）、テキストとオーディオの移動と長さ変更、分割、Ctrl+ホイールの拡大縮小、Shift+ホイール、ライブラリからのドラッグ＆ドロップ、実際の再生中の自動スクロール（followPlayhead）、テキストやオーディオの段が多くて縦にスクロールしたとき。
 
 ## 9. 削除した一時ファイル
-- `C:\kantan-dev\tmp\kv-playhead\`（フォルダーごと）: `CMakeLists.txt`、`playheadcheck.cpp`、`run.ps1`、確認用の `probe.ps1` と `final.ps1`、ハーネスのビルドフォルダー `build\`、画像の `shots\`（`baseline\` と `ref-*.png` を含む）、ログ（`build.log`、`run-baseline.log`、`run-fixed.log`、`qtest.log`、`src-list.log`、`enc.log`、`eol.log`、`eol2.log`、`probe.log`、`shots-list.log`、`final.log`）。
-- `C:\kantan-dev\tmp\` の直下に作ったログ: `kv-gitstatus.log`、`kv-ls.log`、`kv-final.log`、`kv-status.log`。
-- 削除したあと `Test-Path 'C:\kantan-dev\tmp\kv-playhead'` は False。`C:\kantan-dev\tmp` には、作業を始める前と同じく何も残っていない。リポジトリには、テストやビルドのターゲットを何も足していない。
+- `C:\e-editor-dev\tmp\kv-playhead\`（フォルダーごと）: `CMakeLists.txt`、`playheadcheck.cpp`、`run.ps1`、確認用の `probe.ps1` と `final.ps1`、ハーネスのビルドフォルダー `build\`、画像の `shots\`（`baseline\` と `ref-*.png` を含む）、ログ（`build.log`、`run-baseline.log`、`run-fixed.log`、`qtest.log`、`src-list.log`、`enc.log`、`eol.log`、`eol2.log`、`probe.log`、`shots-list.log`、`final.log`）。
+- `C:\e-editor-dev\tmp\` の直下に作ったログ: `kv-gitstatus.log`、`kv-ls.log`、`kv-final.log`、`kv-status.log`。
+- 削除したあと `Test-Path 'C:\e-editor-dev\tmp\kv-playhead'` は False。`C:\e-editor-dev\tmp` には、作業を始める前と同じく何も残っていない。リポジトリには、テストやビルドのターゲットを何も足していない。
 
 ## 10. 最後の git の状態
 `git -C c:\git\JPHACK\e-editor status --short`:

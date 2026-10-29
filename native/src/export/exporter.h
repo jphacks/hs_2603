@@ -17,7 +17,7 @@ struct ExportCheck {
 };
 
 ExportCheck checkExportable();
-/** 使う ffmpeg.exe（アプリと同じフォルダ → 環境変数 KANTAN_FFMPEG → PATH） */
+/** 使う ffmpeg.exe（アプリと同じフォルダ → 環境変数 E_EDITOR_FFMPEG → PATH） */
 QString ffmpegPath();
 
 class Exporter : public QObject {
@@ -28,9 +28,10 @@ class Exporter : public QObject {
   bool running() const { return proc_ != nullptr; }
   /**
    * 書き出しを始める。始められなかったときは error に理由を入れて false。
-   * rangeOnly のときは、決めてある書き出す範囲（Editor::exportRange）だけを書き出す
+   * rangeOnly のときは、決めてある書き出す範囲（Editor::exportRange）だけを書き出す。format は書き出す形式（MP4・GIF・MP3 など）
    */
-  bool start(const QString& outputPath, ExportQuality quality, int shortSide, QString* error = nullptr, bool rangeOnly = false);
+  bool start(const QString& outputPath, ExportQuality quality, int shortSide, QString* error = nullptr, bool rangeOnly = false,
+             ExportFormat format = ExportFormat::Mp4H264);
   void cancel();
 
  signals:

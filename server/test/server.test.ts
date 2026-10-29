@@ -126,7 +126,7 @@ describe('新規登録', () => {
   test('つながるかの確認で、このサーバーだと分かり、新規登録の受け付け方も分かる', async () => {
     const h = await req('GET', '/api/health');
     assert.equal(h.status, 200);
-    assert.equal(h.json.service, 'kantan-ai-server');
+    assert.equal(h.json.service, 'e-editor-ai-server');
     assert.equal(h.json.ok, true);
     // はじめは「管理者が承認してから使える」
     assert.equal(h.json.registration, 'approval');
@@ -501,7 +501,7 @@ describe('ワークショップのオーディオ', () => {
     const file = await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${audioId}/file`, headers: as(hanakoToken) });
     assert.equal(file.statusCode, 200);
     assert.equal(file.headers['content-type'], 'audio/mpeg');
-    assert.equal(file.headers['x-kantan-file-type'], 'mp3');
+    assert.equal(file.headers['x-e-editor-file-type'], 'mp3');
     assert.ok(file.rawPayload.equals(mp3()));
     assert.equal((await req('POST', `/api/workshop/templates/${audioId}/use`, { headers: as(hanakoToken) })).json.uses, 1);
     // ログインしていなければ読めない
@@ -957,7 +957,7 @@ describe('ワークショップの写真', () => {
     const file = await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${photoId}/file`, headers: as(hanakoToken) });
     assert.equal(file.statusCode, 200);
     assert.equal(file.headers['content-type'], 'image/png');
-    assert.equal(file.headers['x-kantan-file-type'], 'png');
+    assert.equal(file.headers['x-e-editor-file-type'], 'png');
     assert.ok(file.rawPayload.equals(png(1920, 1080)));
     // 管理画面: 種類で絞り込め、見本も出る。元の写真も見られる（前のテストでログアウトしたので、ログインし直す）
     adminCookie = cookieOf((await req('POST', '/api/auth/login', { body: { email: ADMIN, password: 'new-admin-password-1', client: 'admin' } })).res);
@@ -1076,7 +1076,7 @@ describe('ワークショップの動画', () => {
     const file = await s.app.inject({ method: 'GET', url: `/api/workshop/templates/${videoId}/file`, headers: as(other) });
     assert.equal(file.statusCode, 200);
     assert.equal(file.headers['content-type'], 'video/mp4');
-    assert.equal(file.headers['x-kantan-file-type'], 'mp4');
+    assert.equal(file.headers['x-e-editor-file-type'], 'mp4');
     assert.ok(file.rawPayload.equals(mp4(5, 1920, 1080)));
     // 管理画面: 種類で絞り込め、管理者も中身を見られる
     adminCookie = cookieOf((await req('POST', '/api/auth/login', { body: { email: ADMIN, password: 'new-admin-password-1', client: 'admin' } })).res);

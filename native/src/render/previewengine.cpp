@@ -11,14 +11,19 @@
 #include "core/fontlibrary.h"
 #include "core/textstyles.h"
 #include "core/timeline.h"
+#include "core/transitions.h"
 #include "media/mediamanager.h"
 #include "media/videosource.h"
+#include "mask/maskcontroller.h"
 #include "render/imageops.h"
+#include "render/maskframes.h"
 
 namespace kv {
 
 static constexpr int kSourceMax = 1280;
 static constexpr size_t kIdleSources = 2;
+/** ループ再生で始めに戻る、この秒数前から、範囲の始めのフレームを先読みする */
+static constexpr double kLoopPreloadSeconds = 1.5;
 
 PreviewEngine::PreviewEngine(QObject* parent) : QObject(parent) {
   Editor& ed = editor();
@@ -42,11 +47,14 @@ PreviewEngine::PreviewEngine(QObject* parent) : QObject(parent) {
   });
   // フォントを読み込んだ・外したときは、文字の画像を描き直す（同じファミリー名でも、描くフォントが変わる）
   connect(&fontLibrary(), &FontLibrary::changed, this, [this] {
-    sprites_.clear();
+    cache_.sprites.clear();
     dirty_ = true;
   });
-  // スポイトで色を選んでいる間は、その映像のクロマキーを外して出す
+  // スポイトで色を選んでいる間は、その映像のクロマキーを外して出す（被写体を選んでいる間は、マスクを外して出す）
   connect(&ed, &Editor::chromaPickChanged, this, markDirty);
+  connect(&ed, &Editor::maskPickChanged, this, markDirty);
+  // オブジェクトマスクのトラックの途中の結果ができたら、描き直す
+  connect(&mask::maskController(), &mask::MaskController::liveUpdated, this, markDirty);
   timer_.setTimerType(Qt::PreciseTimer);
   timer_.setInterval(15);
   connect(&timer_, &QTimer::timeout, this, &PreviewEngine::tick);
@@ -64,7 +72,7 @@ void PreviewEngine::setCanvasSize(QSize size) {
   size = size.expandedTo(QSize(16, 16));
   if (size == canvas_) return;
   canvas_ = size;
-  sprites_.clear();
+  cache_.sprites.clear();
   dirty_ = true;
 }
 
@@ -111,7 +119,8 @@ std::optional<QColor> PreviewEngine::sampleSource(const QString& clipId, QPointF
   }
   const auto it = raw_.find(key);
   if (it == raw_.end() || it->second.isNull()) return std::nullopt;
-  const QImage& src = it->second;
+  // クロマキーは、反転とエフェクトを掛けたあとの色で比べるので、色もそこから選ぶ（反転していれば、見えている向きのまま選べる）
+  const QImage src = prepareSourceFrame(it->second, *clip, effectFrameIndex(*clip, t, fps));
   // 画面の点 → 動かす前の位置（画面いっぱいに置いたときの座標）→ 素材の中の割合
   bool invertible = false;
   const QTransform inv = layerMatrix(ls, cs).inverted(&invertible);
@@ -142,6 +151,19 @@ std::optional<QColor> PreviewEngine::sampleSource(const QString& clipId, QPointF
   return QColor(int((r + n / 2) / n), int((g + n / 2) / n), int((b + n / 2) / n));
 }
 
+QImage PreviewEngine::rawFrame(const QString& clipId, double* pts) const {
+  for (const QString& key : {QStringLiteral("clip:") + clipId, QStringLiteral("overlay:") + clipId}) {
+    const auto it = raw_.find(key);
+    if (it == raw_.end() || it->second.isNull()) continue;
+    if (pts) {
+      const auto p = rawPts_.find(key);
+      *pts = p != rawPts_.end() ? p->second : 0.0;
+    }
+    return it->second;
+  }
+  return {};
+}
+
 /**
  * 動画全体の再生速度 S のときの音: 音のミキサーは「聞こえる時間」で動かす。タイムラインの t は、聞こえる時間では t / S。
  * 各音の始まり・長さ・フェード・音量キーフレームの時間を 1/S にし、読み出す速さを S 倍にする（atempo で音程はそのまま）
@@ -152,41 +174,77 @@ static void warpSource(MixSource& s, double S) {
   s.duration /= S;
   s.fadeIn /= S;
   s.fadeOut /= S;
+  s.headExt /= S;
+  s.headXf /= S;
+  s.tailExt /= S;
+  s.tailXf /= S;
   s.speed *= S;
   for (auto& p : s.points) p.t /= S;
 }
 
-void PreviewEngine::updateAudioSnapshot() {
-  const Editor& ed = editor();
+std::shared_ptr<MixSnapshot> buildMixSnapshot(const ProjectData& p, const TimelineLayout& layout, const std::function<const Asset*(const QString&)>& asset,
+                                              double playEnd) {
   auto snap = std::make_shared<MixSnapshot>();
-  for (const auto& l : ed.layout().items) {
+  const int fps = std::max(1, p.settings.fps);
+  // メインのビデオの音（トラックのミュートでは鳴らさない）。トランジションで音もクロスフェードする切れ目では、前後に音を足して重ねる
+  const auto& items = layout.items;
+  for (size_t i = 0; i < items.size() && !p.mainAudioMuted; ++i) {
+    const ClipLayout& l = items[i];
     const VideoClip& c = l.clip;
-    const Asset* a = ed.asset(c.assetId);
+    const Asset* a = asset(c.assetId);
     if (c.isImage || !a || !a->hasAudio || a->status == AssetStatus::Missing || c.muted || (c.volumePoints.empty() && c.volume <= 0.0001)) continue;
     MixSource src{QStringLiteral("clip:") + c.id, a->path, l.start, l.duration, c.in, c.speed, c.volume, c.fadeIn, c.fadeOut};
     src.points = c.volumePoints;  // 音量キーフレーム（タイムライン上の、クリップの先頭からの秒数）
+    src.pan = c.pan;
+    if (i > 0 && c.transIn.type != TransitionType::None && c.transIn.audioCrossfade) {
+      const TransitionSpan sp = transitionSpanAt(layout, int(i), fps);
+      if (sp.active()) {
+        src.headExt = double(sp.before) / fps;
+        src.headXf = double(sp.frames()) / fps;
+      }
+    }
+    if (i + 1 < items.size()) {
+      const Transition& next = items[i + 1].clip.transIn;
+      if (next.type != TransitionType::None && next.audioCrossfade) {
+        const TransitionSpan sp = transitionSpanAt(layout, int(i + 1), fps);
+        if (sp.active()) {
+          src.tailExt = double(sp.after) / fps;
+          src.tailXf = double(sp.frames()) / fps;
+        }
+      }
+    }
     snap->sources.push_back(src);
   }
-  // 重ねるトラックの動画の音（音量・ミュート・フェード・音量キーフレームは、ビデオクリップと同じ）
-  for (const auto& o : ed.project().overlays) {
-    const Asset* a = ed.asset(o.assetId);
-    if (o.isImage || !a || !a->hasAudio || a->status == AssetStatus::Missing || o.muted || (o.volumePoints.empty() && o.volume <= 0.0001)) continue;
-    MixSource src{QStringLiteral("overlay:") + o.id, a->path, o.start, overlayDuration(o, ed.project().settings.fps), o.in, o.speed, o.volume,
+  // 重ねるトラックの動画の音（音量・ミュート・フェード・音量キーフレームは、ビデオクリップと同じ。段のミュートでは鳴らさない）
+  for (const auto& o : p.overlays) {
+    const Asset* a = asset(o.assetId);
+    if (o.isImage || !a || !a->hasAudio || a->status == AssetStatus::Missing || o.muted || isOverlayMuted(p, o) ||
+        (o.volumePoints.empty() && o.volume <= 0.0001)) {
+      continue;
+    }
+    MixSource src{QStringLiteral("overlay:") + o.id, a->path, o.start, overlayDuration(o, p.settings.fps), o.in, o.speed, o.volume,
                   o.fadeIn, o.fadeOut};
     src.points = o.volumePoints;
+    src.pan = o.pan;
     snap->sources.push_back(src);
   }
-  for (const auto& au : ed.project().audios) {
-    const Asset* a = ed.asset(au.assetId);
-    if (!a || a->status == AssetStatus::Missing || (au.volumePoints.empty() && au.volume <= 0.0001)) continue;
+  for (const auto& au : p.audios) {
+    const Asset* a = asset(au.assetId);
+    if (!a || a->status == AssetStatus::Missing || isAudioMuted(p, au) || (au.volumePoints.empty() && au.volume <= 0.0001)) continue;
     MixSource src{QStringLiteral("audio:") + au.id, a->path, au.start, audioDuration(au), au.in, 1.0, au.volume, au.fadeIn, au.fadeOut};
     src.points = au.volumePoints;
+    src.pan = au.pan;
     snap->sources.push_back(src);
   }
-  const double S = ed.project().settings.speed;
+  const double S = p.settings.speed;
   for (auto& s : snap->sources) warpSource(s, S);
-  snap->end = ed.playEnd() / S;
-  audio_.setSnapshot(snap);
+  snap->end = playEnd / S;
+  return snap;
+}
+
+void PreviewEngine::updateAudioSnapshot() {
+  const Editor& ed = editor();
+  audio_.setSnapshot(buildMixSnapshot(ed.project(), ed.layout(), [&ed](const QString& id) { return ed.asset(id); }, ed.playEnd()));
 }
 
 VideoSource* PreviewEngine::source(const QString& key, const QString& path) {
@@ -211,6 +269,11 @@ void PreviewEngine::tick() {
     // 動画全体の再生速度 S: タイムラインの時間は、聞こえる時間（音の時計）の S 倍で進む
     const double S = ed.project().settings.speed;
     if (!wasPlaying_ || ed.seekToken() != seenSeek_ || std::abs(S - playSpeed_) > 1e-9) {
+      // 再生中に再生位置を動かした: 新しい時刻のフレームがそろうまで、前の画面のまま（再生を始めたときは、今の画面が同じ時刻）
+      if (wasPlaying_ && ed.seekToken() != seenSeek_) {
+        awaitExact_ = true;
+        awaitTimer_.restart();
+      }
       wasPlaying_ = true;
       seenSeek_ = ed.seekToken();
       playStart_ = t;
@@ -221,7 +284,34 @@ void PreviewEngine::tick() {
     if (audio_.ok()) t = audio_.started() ? audio_.clock() * S : playStart_;
     else t = playStart_ + wall_.elapsed() / 1000.0 * S;
     const double end = ed.playEnd();
-    if (t >= end) {
+    // ループ再生: くり返す範囲（書き出す範囲、無ければ全体）の終わりまで来たら、始めに戻って続ける（音も始めから鳴らし直す）。
+    // 範囲より後ろへ動かして再生していたときも、動画の終わりまで来たら、範囲の始めに戻る
+    const Editor::TimeRange loop = ed.loopRange();
+    const bool looping = ed.loopPlayback() && loop.end - loop.start >= kMinLoopLength;
+    if (looping && ((playStart_ < loop.end && t >= std::min(loop.end, end)) || t >= end)) {
+      t = loop.start;
+      // 終わりぎわに先読みしておいた、範囲の始めのデコーダーに入れ替える（すぐに始めのフレームを出せるように）
+      std::vector<QString> loopKeys;
+      for (const auto& [key, src] : sources_) {
+        if (key.startsWith(QLatin1String("loop:"))) loopKeys.push_back(key);
+      }
+      for (const QString& key : loopKeys) {
+        auto lit = sources_.find(key);
+        auto rit = sources_.find(key.mid(5));
+        if (rit != sources_.end()) {
+          std::swap(rit->second, lit->second);
+        } else {
+          sources_[key.mid(5)] = std::move(lit->second);
+          sources_.erase(key);
+        }
+      }
+      ed.seek(t);
+      playStart_ = t;
+      audio_.start(t / S);
+      wall_.restart();
+      awaitExact_ = true;
+      awaitTimer_.restart();
+    } else if (t >= end) {
       ed.setTimeFromEngine(end);
       ed.pause();
       t = end;
@@ -241,124 +331,63 @@ void PreviewEngine::tick() {
   compose(t, playing && ed.playing());
 }
 
-QImage PreviewEngine::processedFrame(const QString& key, const QImage& src, const VideoClip& c, bool withColor, bool onBlack) {
-  const bool color = withColor && !isNeutralColor(c.color);
-  // スポイトで色を選んでいる映像は、クロマキーを外して元の色で出す（透明にした所も、元の背景の色を見て選べるように）
-  const bool keyOn = c.chroma.enabled && c.id != editor().chromaPick();
-  if (src.isNull() || (!keyOn && !color)) return src;
-  const ColorAdjust& a = c.color;
-  const ChromaKey& k = c.chroma;
-  const QString params = QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8|%9")
-                             .arg(keyOn)
-                             .arg(k.color.name())
-                             .arg(k.similarity)
-                             .arg(k.blend)
-                             .arg(k.despill)
-                             .arg(color)
-                             .arg(a.brightness)
-                             .arg(a.contrast)
-                             .arg(a.saturation) +
-                         QStringLiteral("|%1|%2|%3").arg(a.temperature).arg(int(a.preset)).arg(onBlack);
-  auto it = processed_.find(key);
-  if (it != processed_.end() && it->second.source == src.cacheKey() && it->second.params == params) return it->second.image;
-  QImage out = keyOn ? chromaKeyImage(src, k) : src.convertToFormat(QImage::Format_ARGB32);
-  if (color) applyColor(out, a);
-  if (keyOn && onBlack) {
-    // 透明にした所を黒で埋める（ぼかし背景も、黒にしたこの映像から作るようにする。書き出しと同じ）
-    QImage flat(out.size(), QImage::Format_RGB32);
-    flat.fill(Qt::black);
-    QPainter fp(&flat);
-    fp.drawImage(0, 0, out);
-    fp.end();
-    out = flat;
-  }
-  processed_[key] = {src.cacheKey(), params, out};
-  return out;
-}
-
 void PreviewEngine::compose(double t, bool playing) {
   const Editor& ed = editor();
+  const ProjectData& project = ed.project();
   const TimelineLayout& layout = ed.layout();
-  const ClipLayout* cur = findClipAt(layout, t);
-  const ClipLayout* next = cur && cur->index + 1 < int(layout.items.size()) ? &layout.items[size_t(cur->index + 1)] : nullptr;
-  const int fps = ed.project().settings.fps;
-  const double projectSpeed = ed.project().settings.speed;
+  const double projectSpeed = project.settings.speed;
+  const FramePlan plan = planFrame(project, layout, [&ed](const QString& id) { return ed.asset(id); }, t);
 
+  // 要るフレームを用意する（写真はプレビュー用の画像、動画はデコーダーから。再生中は、動画全体の再生速度も掛けた速さで先読みする）
   std::set<QString> keep;
-  QImage clipFrame;
+  std::map<QString, QImage> frames;
+  std::map<QString, double> framePts;  // 使ったフレームの素材の時刻（オブジェクトマスクを、同じフレームのものにする）
   bool loading = false;  // 動画のフレームをまだ読み込んでいる
   exact_ = true;
-  if (cur) {
-    const VideoClip& c = cur->clip;
-    const Asset* a = ed.asset(c.assetId);
-    const double local = std::clamp(t - cur->start, 0.0, cur->duration);
-    if (a && a->status != AssetStatus::Missing) {
-      if (c.isImage) {
-        clipFrame = media().previewImage(c.assetId);
-        exact_ = !clipFrame.isNull();
-      } else {
-        const QString key = QStringLiteral("clip:") + c.id;
-        keep.insert(key);
-        VideoSource* src = source(key, a->path);
-        const double srcT = c.in + local * c.speed;
-        // 再生中は、動画全体の再生速度も掛けた速さで先読みする
-        src->setTarget(srcT, playing, c.speed * ed.project().settings.speed);
-        clipFrame = src->frameAt(srcT, &exact_);
-        loading = clipFrame.isNull() && !src->failed();
-      }
-    }
-    // 次のクリップを先読みしておく
-    if (next && !next->clip.isImage && next->start - t < 3) {
-      const Asset* na = ed.asset(next->clip.assetId);
-      if (na && na->status != AssetStatus::Missing) {
-        const QString key = QStringLiteral("clip:") + next->clip.id;
-        keep.insert(key);
-        source(key, na->path)->setTarget(next->clip.in, false, next->clip.speed * ed.project().settings.speed);
-      }
-    }
-  }
-  // 重ねるトラック: 今の時間に出ているもののフレーム（下の段から順に描く）。もうすぐ始まる動画は先読みしておく
-  struct OverlayFrame {
-    const OverlayItem* item;
-    QImage frame;
-    double local;
-  };
-  std::vector<OverlayFrame> overlayFrames;
-  {
-    std::vector<const OverlayItem*> order;
-    for (const auto& o : ed.project().overlays) order.push_back(&o);
-    std::stable_sort(order.begin(), order.end(), [](const OverlayItem* a, const OverlayItem* b) {
-      if (a->track != b->track) return a->track < b->track;
-      return a->start < b->start;
-    });
-    for (const OverlayItem* o : order) {
-      const Asset* a = ed.asset(o->assetId);
-      if (!a || a->status == AssetStatus::Missing || a->status == AssetStatus::Error) continue;
-      const double dur = overlayDuration(*o, fps);
-      const bool visible = t >= o->start - 1e-9 && t < o->start + dur - 1e-9;
-      const QString key = QStringLiteral("overlay:") + o->id;
-      if (!visible) {
-        if (!o->isImage && o->start > t && o->start - t < 3) {
-          keep.insert(key);
-          source(key, a->path)->setTarget(o->in, false, o->speed * projectSpeed);
-        }
+  const ClipLayout* cur = findClipAt(layout, t);
+  const QString mainKey = cur ? QStringLiteral("clip:") + cur->clip.id : QString();
+  for (const FrameNeed& n : plan.needs) {
+    if (n.isImage) {
+      QImage img = media().previewImage(n.assetId);
+      if (img.isNull()) {
+        if (n.key == mainKey) exact_ = false;
         continue;
       }
-      const double local = std::clamp(t - o->start, 0.0, dur);
-      QImage f;
-      if (o->isImage) {
-        f = media().previewImage(o->assetId);
-      } else {
+      frames[n.key] = std::move(img);
+      framePts[n.key] = 0;
+      continue;
+    }
+    keep.insert(n.key);
+    VideoSource* src = source(n.key, n.path);
+    src->setTarget(n.srcT, playing, n.rate * projectSpeed);
+    bool ex = true;
+    double pts = n.srcT;
+    QImage f = src->frameAt(n.srcT, &ex, &pts);
+    exact_ = exact_ && ex;
+    if (f.isNull() && !src->failed()) loading = true;
+    if (!f.isNull()) {
+      frames[n.key] = std::move(f);
+      framePts[n.key] = pts;
+    }
+  }
+  // もうすぐ使う動画は、最初のフレームを読んでおく
+  for (const FrameNeed& n : plan.preload) {
+    keep.insert(n.key);
+    source(n.key, n.path)->setTarget(n.srcT, false, n.rate * projectSpeed);
+  }
+  // ループ再生で、もうすぐ始めに戻るとき: 範囲の始めのフレームも読んでおく（今使っているデコーダーは動かせないので、
+  // そのときは "loop:" の付いた別のデコーダーで読み、戻るときに入れ替える）
+  if (playing && ed.loopPlayback()) {
+    const Editor::TimeRange loop = ed.loopRange();
+    const double wrapAt = t < loop.end ? std::min(loop.end, ed.playEnd()) : ed.playEnd();
+    if (loop.end - loop.start >= kMinLoopLength && wrapAt - t < kLoopPreloadSeconds) {
+      const FramePlan lp = planFrame(project, layout, [&ed](const QString& id) { return ed.asset(id); }, loop.start);
+      for (const FrameNeed& n : lp.needs) {
+        if (n.isImage) continue;
+        const QString key = keep.count(n.key) ? QStringLiteral("loop:") + n.key : n.key;
         keep.insert(key);
-        VideoSource* src = source(key, a->path);
-        const double srcT = o->in + local * o->speed;
-        src->setTarget(srcT, playing, o->speed * projectSpeed);
-        bool ex = true;
-        f = src->frameAt(srcT, &ex);
-        exact_ = exact_ && ex;
-        if (f.isNull() && !src->failed()) loading = true;
+        source(key, n.path)->setTarget(n.srcT, false, n.rate * projectSpeed);
       }
-      if (!f.isNull()) overlayFrames.push_back({o, f, local});
     }
   }
   // 使っていないデコーダーは少しだけ残しておく（前のクリップへ戻ったときにすぐ表示できるように）
@@ -379,109 +408,25 @@ void PreviewEngine::compose(double t, bool playing) {
 
   // 読み込み中は直前の画面を出したままにする（黒い画面がちらつかないように）
   if (loading && !frame_.isNull()) return;
-
-  // スポイト用に、この画面に使う元のフレームを覚えておく
-  raw_.clear();
-  if (cur && !clipFrame.isNull()) raw_[QStringLiteral("clip:") + cur->clip.id] = clipFrame;
-  for (const OverlayFrame& of : overlayFrames) raw_[QStringLiteral("overlay:") + of.item->id] = of.frame;
-
-  QImage canvas;
-  if (cur && !clipFrame.isNull()) {
-    // クロマキーで透明にした所は黒（書き出しと同じく、黒い背景の上に置いてから色を調整する）。切り抜いた所も黒
-    const QImage keyed = processedFrame(QStringLiteral("clip:") + cur->clip.id, clipFrame, cur->clip, false, true);
-    canvas = composeClipLayer(keyed, cur->clip.fit, canvas_, cropSourceRect(cur->clip, QSizeF(1, 1)));
-    applyColor(canvas, cur->clip.color);
-    const double local = std::clamp(t - cur->start, 0.0, cur->duration);
-    // 位置・拡大率・回転・伸縮・不透明度（キーフレームがあれば、この時間の値）。動かしていなければ何もしない
-    if (!layerIsPlain(cur->clip)) canvas = transformLayer(canvas, layerStateAt(cur->clip, local));
-    const double fade = 1 - fadeFactor(local, cur->duration, cur->clip.fadeIn, cur->clip.fadeOut);
-    if (fade > 0.001) {
-      QPainter p(&canvas);
-      p.fillRect(canvas.rect(), QColor(0, 0, 0, int(std::lround(fade * 255))));
-    }
-  } else {
-    canvas = QImage(canvas_, QImage::Format_RGB32);
-    canvas.fill(Qt::black);
+  // 再生中にシークした・ループで戻った直後は、フレームがその時刻のものになるまで待つ（少し待ってもそろわなければ出す）
+  if (awaitExact_) {
+    if (!playing || exact_ || awaitTimer_.elapsed() > 400 || frame_.isNull()) awaitExact_ = false;
+    else return;
   }
 
-  // 重ねるトラック（クロマキー・色の調整は素材だけに掛け、余白は透明。フェードは透明度で）
-  if (!overlayFrames.empty()) {
-    QPainter op(&canvas);
-    std::set<QString> liveOverlays;
-    for (const OverlayFrame& of : overlayFrames) {
-      const OverlayItem& o = *of.item;
-      const QString key = QStringLiteral("overlay:") + o.id;
-      liveOverlays.insert(key);
-      const LayerState ls = layerStateAt(o, of.local);
-      const double alpha = std::clamp(ls.opacity, 0.0, 1.0) * fadeFactor(of.local, overlayDuration(o, fps), o.fadeIn, o.fadeOut);
-      if (alpha <= 0.001) continue;
-      const QImage media = processedFrame(key, of.frame, o, true, false);
-      op.setOpacity(alpha);
-      drawClipMedia(op, media, cropSourceRect(o, QSizeF(1, 1)), ls, canvas_);
-    }
-    op.end();
-  }
-  // 使わなくなった加工済みのフレームは手放す
-  for (auto it = processed_.begin(); it != processed_.end();) {
-    bool used = cur && it->first == QStringLiteral("clip:") + cur->clip.id;
-    for (const OverlayFrame& of : overlayFrames) used = used || it->first == QStringLiteral("overlay:") + of.item->id;
-    if (used) ++it;
-    else it = processed_.erase(it);
-  }
+  // スポイト・被写体を選ぶ用に、この画面に使う元のフレームと、その素材の時刻を覚えておく
+  raw_ = frames;
+  rawPts_ = framePts;
 
-  // テキスト
-  const QSize design = designSize(ed.project().settings.aspect);
-  const QString editingId = !playing && ed.selection().type == Selection::Text ? ed.selection().id : QString();
-  QPainter p(&canvas);
-  std::set<QString> live;
-  // 下の段の文字から描く（タイムラインの上の段の文字ほど手前に重なる。書き出しと同じ順。選んでいるかどうかでは変えない）
-  const auto& texts = ed.project().texts;
-  for (const size_t index : textPaintOrder(texts)) {
-    const TextItem& item = texts[index];
-    // 編集中の文字は、確定前の内容（変換中の文字を含む）で描く
-    const QString& shownText = item.id == textOverrideId_ ? textOverride_ : item.text;
-    if (!isTextVisible(item, t) || shownText.isEmpty()) continue;
-    live.insert(item.id);
-    // 動かしていない文字は、位置まで描いた画像をそのまま重ねる。動かす文字は、画面の中央に置いた画像を
-    // 位置・拡大率・回転・不透明度で動かす（動かしても描き直さない）
-    const bool plain = layerIsPlain(item);
-    const LayerState ls = layerStateAt(item, t - item.start);
-    TextItem drawItem = item;
-    drawItem.text = shownText;
-    // 変換中の文字を差し込んだときも、一部だけ別のフォントにした範囲が、元の文字の位置からずれないようにする
-    if (shownText != item.text) adjustFontSpans(item.text, shownText, drawItem.fontSpans);
-    drawItem.letterSpacing = ls.letterSpacing;  // 字間のキーフレームも含めた、この時間の字間で描く
-    if (!plain) {
-      drawItem.x = 0.5;
-      drawItem.y = 0.5;
-    }
-    const QString key = textSpriteKey(drawItem, canvas_);
-    auto it = sprites_.find(item.id);
-    if (it == sprites_.end() || it->second.key != key) {
-      sprites_[item.id] = renderTextSprite(drawItem, design, canvas_);
-      it = sprites_.find(item.id);
-    }
-    const AnimState st = previewTextState(item, t, editingId);
-    if (st.alpha <= 0.001 || it->second.image.isNull()) continue;
-    if (plain) {
-      p.setOpacity(st.alpha);
-      p.drawImage(it->second.pos + QPointF(0, st.offsetY * canvas_.height()), it->second.image);
-      continue;
-    }
-    if (st.alpha * ls.opacity <= 0.001) continue;
-    p.save();
-    p.setOpacity(st.alpha * ls.opacity);
-    drawLayer(p, it->second.image, it->second.pos, ls, QPointF(0, st.offsetY * canvas_.height()), canvas_);
-    p.restore();
-  }
-  p.end();
-  if (sprites_.size() > live.size() + 16) {
-    for (auto it = sprites_.begin(); it != sprites_.end();) {
-      if (live.count(it->first)) ++it;
-      else it = sprites_.erase(it);
-    }
-  }
-  frame_ = canvas;
+  ComposeOptions opt;
+  opt.canvas = canvas_;
+  opt.chromaPick = ed.chromaPick();
+  // オブジェクトマスク（被写体を選んでいる映像は、マスクを外して元の映像を出す）
+  opt.masks = resolveFrameMasks(project, plan, [&ed](const QString& id) { return ed.asset(id); }, framePts, ed.maskPick());
+  opt.textOverrideId = textOverrideId_;
+  opt.textOverride = textOverride_;
+  opt.editingId = !playing && ed.selection().type == Selection::Text ? ed.selection().id : QString();
+  frame_ = composeFrame(project, layout, t, frames, opt, &cache_);
   emit frameReady();
 }
 

@@ -25,7 +25,21 @@ struct MixSource {
   double fadeOut = 0;
   /** 音量キーフレーム（クリップの先頭からの秒数）。あるときは volume ではなく、これで音量を変える */
   std::vector<VolumePoint> points;
+  /** パン（-1 が左だけ、0 が真ん中、+1 が右だけ） */
+  double pan = 0;
+  /**
+   * トランジションで音もクロスフェードするとき（メインのビデオのクリップ）: 前（headExt 秒）・後ろ（tailExt 秒）にも素材の音を足して、
+   * 足した所を含む headXf・tailXf 秒の間で、次のクリップの音と入れ替える（書き出しの acrossfade の qsin と同じ変わり方）。
+   * 足した所の音量・フェードは、クリップの端の値のまま
+   */
+  double headExt = 0;
+  double headXf = 0;
+  double tailExt = 0;
+  double tailXf = 0;
 };
+
+/** 素材の音の、タイムライン上のクリップの先頭からの時刻 local（秒）での音量の倍率（音量・キーフレーム・フェード・クロスフェード） */
+double mixSourceGain(const MixSource& s, double local);
 
 struct MixSnapshot {
   std::vector<MixSource> sources;
@@ -48,6 +62,12 @@ class AudioEngine {
 
   // miniaudio のコールバックから呼ばれる
   void render(float* out, unsigned frames);
+
+  /**
+   * 再生とは別に、タイムラインの t からの frames サンプル分（ステレオ）を、プレビューと同じ混ぜ方で作る（確かめる用）。
+   * 再生していないときだけ使う
+   */
+  void mixOffline(float* out, int frames, double t, const MixSnapshot& snap) { mixBlock(out, frames, t, snap); }
 
  private:
   struct Reader;

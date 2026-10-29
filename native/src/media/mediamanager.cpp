@@ -3,6 +3,7 @@
 #include <QCollator>
 #include <QCryptographicHash>
 #include <QDataStream>
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -383,6 +384,65 @@ QImage MediaManager::previewImage(const QString& assetId) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = images_.find(assetId);
   return it == images_.end() ? QImage() : it->second;
+}
+
+QString MediaManager::addGeneratedImage(const QImage& image, const QString& name) {
+  if (image.isNull()) return {};
+  const QString dir = QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(QStringLiteral("generated"));
+  QDir().mkpath(dir);
+  const QString file = QDir(dir).filePath(
+      QStringLiteral("%1-%2.png").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")), newId().left(8)));
+  const QImage flat = image.convertToFormat(QImage::Format_RGB32);
+  if (!flat.save(file, "PNG")) return {};
+  Asset a;
+  a.id = newId();
+  a.path = QFileInfo(file).absoluteFilePath();
+  a.name = name;
+  a.kind = AssetKind::Image;
+  a.duration = 0;
+  a.width = flat.width();
+  a.height = flat.height();
+  a.hasAudio = false;
+  a.status = AssetStatus::Loading;
+  {
+    // プレビューには、整え終わる前から出す（読み込み用の画像・サムネイルは、いつもどおり裏で作る）
+    std::lock_guard<std::mutex> lock(mutex_);
+    images_[a.id] = std::max(flat.width(), flat.height()) > 2048 ? flat.scaled(2048, 2048, Qt::KeepAspectRatio, Qt::SmoothTransformation) : flat;
+  }
+  editor().addAsset(a);
+  prepare(a);
+  return a.id;
+}
+
+QString MediaManager::addGeneratedVideo(const QString& path, const QString& name) {
+  const QString abs = QFileInfo(path).absoluteFilePath();
+  if (!QFileInfo(abs).isFile()) return {};
+  // もう一覧にある（前に作った逆再生の動画など）: そのまま使う（見つからない印が付いていたら、読み込み直す）
+  for (const auto& [id, a] : editor().assets()) {
+    if (QFileInfo(a.path).absoluteFilePath().compare(abs, Qt::CaseInsensitive) != 0) continue;
+    if (a.status == AssetStatus::Missing || a.status == AssetStatus::Error) {
+      editor().updateAsset(id, [](Asset& x) { x.status = AssetStatus::Loading; });
+      if (const Asset* known = editor().asset(id)) prepare(*known);
+    }
+    editor().addAsset(a);  // 一覧から外してあったら、戻す
+    return id;
+  }
+  ProbeInfo info;
+  QString error;
+  if (!probeMedia(abs, info, error) || !info.hasVideo) return {};
+  Asset a;
+  a.id = newId();
+  a.path = abs;
+  a.name = name;
+  a.kind = AssetKind::Video;
+  a.duration = info.duration;
+  a.width = info.width;
+  a.height = info.height;
+  a.hasAudio = info.hasAudio;
+  a.status = AssetStatus::Loading;
+  editor().addAsset(a);
+  prepare(a);
+  return a.id;
 }
 
 /** メディアのファイルがあるか調べて状態を決める。見つからない数を返す */

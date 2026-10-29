@@ -290,8 +290,20 @@ QImage VideoDecoder::frameImage(int maxW, int maxH) {
   const double outW = swap ? dh : dw;
   const double outH = swap ? dw : dh;
   const double scale = std::min({1.0, maxW / outW, maxH / outH});
-  const int tw = std::max(2, int(std::lround(dw * scale)));
-  const int th = std::max(2, int(std::lround(dh * scale)));
+  return convertFrame(std::max(2, int(std::lround(dw * scale))), std::max(2, int(std::lround(dh * scale))));
+}
+
+QImage VideoDecoder::frameImageStretched(int w, int h) {
+  if (!frame_ || frame_->width <= 0 || frame_->height <= 0 || w < 2 || h < 2) return {};
+  // 回転する素材は、回転の前の向きで、回転したあとに w x h になる大きさにする
+  const bool swap = rotation_ == 90 || rotation_ == 270;
+  return convertFrame(swap ? h : w, swap ? w : h);
+}
+
+QImage VideoDecoder::convertFrame(int tw, int th) {
+  if (!frame_ || frame_->width <= 0 || frame_->height <= 0) return {};
+  const int fw = frame_->width;
+  const int fh = frame_->height;
   if (!sws_ || swsSrcW_ != fw || swsSrcH_ != fh || swsSrcFmt_ != frame_->format || swsDstW_ != tw || swsDstH_ != th) {
     if (sws_) sws_freeContext(sws_);
     sws_ = sws_getContext(fw, fh, AVPixelFormat(frame_->format), tw, th, AV_PIX_FMT_BGRA, SWS_BILINEAR, nullptr, nullptr, nullptr);
@@ -520,15 +532,20 @@ bool AudioDecoder::buildTempo(double tempo) {
 
 void AudioDecoder::seek(double t, double tempo) {
   if (!fmt_) return;
-  const double target = std::max(0.0, t) + startSeconds(fmt_);
-  av_seek_frame(fmt_, stream_, int64_t(std::floor(target / timeBase_)), AVSEEK_FLAG_BACKWARD);
+  // 少し手前から読む（AAC・Opus などは、1 つ前のまとまりを読まないと最初の音が欠けて、小さく始まってしまう）。
+  // 手前に何も無い（素材の始まり）ときは、最初のまとまりから読む
+  constexpr double kPreroll = 0.1;
+  const double target = std::max(0.0, t) - kPreroll + startSeconds(fmt_);
+  const int64_t ts = int64_t(std::floor(target / timeBase_));
+  if (av_seek_frame(fmt_, stream_, ts, AVSEEK_FLAG_BACKWARD) < 0) av_seek_frame(fmt_, stream_, ts, 0);
   avcodec_flush_buffers(dec_);
   swr_close(swr_);
   swr_init(swr_);
   fifo_.clear();
   fifoPos_ = 0;
   eof_ = false;
-  discardUntil_ = std::max(0.0, t);
+  // 手前から読んだ分は捨てる（素材の始まりのときも、0 秒より前の音は捨てる）
+  discardUntil_ = std::max(1e-9, t);
   outSamples_ = 0;
   tempo_ = tempo;
   buildTempo(tempo);

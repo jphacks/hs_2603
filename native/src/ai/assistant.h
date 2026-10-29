@@ -79,6 +79,8 @@ class Assistant : public QObject {
   void proposed(const QString& kind, const std::vector<kv::ai::TextIdea>& ideas);
   /** 見比べて選ぶ案（プレビューつき）を出した */
   void choicesProposed(const kv::ai::ChoiceSet& set);
+  /** 操作の案内（show_guide）を出した。画面で、手順を順に示す */
+  void guideProposed(const std::vector<kv::ai::GuideStep>& steps);
   void failed(const QString& message);
   /** この会話で使ったトークンが変わった（AI の返事を受け取るたび。「新しい会話」でも） */
   void usageChanged(const kv::ai::Usage& session);

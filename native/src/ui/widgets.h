@@ -111,6 +111,11 @@ class LineSlider : public QSlider {
   using QSlider::QSlider;
   /** その位置（スライダーの座標）が、線かつまみの上か */
   bool hitsLine(const QPoint& pos) const;
+  /**
+   * その位置が、スライダーの中か（選んでいるときに、ホイールで値を変える範囲）。つまみそのものと、線の長さの範囲で
+   * つまみと同じ太さの帯だけ（外側の余白は含めない）
+   */
+  bool hitsBody(const QPoint& pos) const;
 
  protected:
   void mousePressEvent(QMouseEvent* e) override;
@@ -123,7 +128,9 @@ class LineSlider : public QSlider {
 
 /**
  * 見出し・値の表示つきのスライダー。ダブルクリックで基準値に戻す。
- * ホイール（スライダーや数値の上で回す）と矢印キー（数値をクリックするか Tab で選んだとき）でも値を変えられる。
+ * 線・つまみを押す・数値をクリックする・Tab のどれかで選ぶと、選んでいる間だけ、ホイール（スライダーの中か数値の上で回す）と
+ * 矢印キーでも値を変えられる。選んでいないスライダーの上のホイールは、パネルのスクロールになる。
+ * Esc・Enter・この欄の外のクリックで、選んだ状態を終える
  */
 class SliderRow : public QWidget {
   Q_OBJECT
@@ -165,13 +172,19 @@ class SliderRow : public QWidget {
   void settle();
   void setHot(bool on);
   void refreshValueStyle();
+  /** 選んでいるか（選んでいる間だけ、ホイールと矢印キーで値を変える） */
+  bool active() const { return focused_; }
+  void setSelected(bool on);
+  /** 線・つまみ・数値を押したとき: 選んで、フォーカスも移す */
+  void selectByMouse();
   QLabel* label_;
   QLabel* valueLabel_;
-  QSlider* slider_;
+  QSlider* slider_ = nullptr;
   QLabel* bubble_ = nullptr;
   QTimer* settle_;
   bool bubbleOn_ = false;
   bool hot_ = false;
+  /** 選んでいる（線・つまみ・数値を押した / Tab で来た）。Esc・Enter・欄の外のクリックで外れる */
   bool focused_ = false;
   double min_, max_, step_;
   double unit_;
@@ -226,10 +239,13 @@ class Section : public QWidget {
   explicit Section(const QString& title, QWidget* parent = nullptr);
   QVBoxLayout* body() { return body_; }
   void setHeaderWidget(QWidget* w);
+  /** 見出しの名前（操作の案内で、まとまりを探すのに使う） */
+  const QString& title() const { return title_; }
 
  private:
   QVBoxLayout* body_;
   QHBoxLayout* head_;
+  QString title_;
 };
 
 QLabel* makeLabel(const QString& text, const char* role = nullptr, QWidget* parent = nullptr);

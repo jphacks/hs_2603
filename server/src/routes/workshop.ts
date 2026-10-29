@@ -355,7 +355,7 @@ export function workshopRoutes(app: FastifyInstance, ctx: AppContext): void {
     );
     if (!rows[0]) throw new ApiError(404, 'not_found', '見つかりません（公開をやめたのかもしれません）');
     reply.header('Content-Type', fileContentType(rows[0].kind, rows[0].file_type));
-    reply.header('X-Kantan-File-Type', rows[0].file_type);
+    reply.header('X-E-Editor-File-Type', rows[0].file_type);
     return rows[0].data;
   });
 

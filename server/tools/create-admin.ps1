@@ -12,13 +12,13 @@ try { $Host.UI.RawUI.WindowTitle = 'e-editor AI サーバー - 管理者を作�
 
 $code = 1
 try {
-  $node = Get-KantanNode
-  if (-not (Test-Path -LiteralPath (Join-Path $KantanServerDir '.env'))) {
+  $node = Get-EEditorNode
+  if (-not (Test-Path -LiteralPath (Join-Path $EEditorServerDir '.env'))) {
     throw 'server\.env がありません。先に start.cmd を起動して、server\.env を書いてください'
   }
   # ライブラリが無ければ入れる（start.cmd を起動したことがあれば、入っている）
-  if (-not (Test-Path -LiteralPath (Join-Path $KantanServerDir 'node_modules\pg\package.json'))) {
-    & $node @KantanNodeFlags (Join-Path $PSScriptRoot 'deps.ts')
+  if (-not (Test-Path -LiteralPath (Join-Path $EEditorServerDir 'node_modules\pg\package.json'))) {
+    & $node @EEditorNodeFlags (Join-Path $PSScriptRoot 'deps.ts')
     if ($LASTEXITCODE -ne 0) { throw 'ライブラリを入れられませんでした' }
   }
   $ask = -not $Email
@@ -33,17 +33,17 @@ try {
     if ($Email -notmatch '^[^\s@]+@[^\s@]+\.[^\s@]+$') { throw 'メールアドレスが入力されませんでした' }
     $Name = (Read-Host '名前（空のままでもかまいません）').Trim()
   }
-  $cli = Join-Path $KantanServerDir 'src\cli\create-admin.ts'
+  $cli = Join-Path $EEditorServerDir 'src\cli\create-admin.ts'
   $cliArgs = @('--email', $Email)
   if ($Name) { $cliArgs += @('--name', $Name) }
   if ($Reset) { $cliArgs += '--reset' }
-  & $node @KantanNodeFlags $cli @cliArgs
+  & $node @EEditorNodeFlags $cli @cliArgs
   $code = $LASTEXITCODE
   # 2: もう登録されている
   if ($code -eq 2 -and $ask) {
     $answer = Read-Host 'このメールアドレスは、もう登録されています。管理者にして、仮のパスワードを作り直しますか？（y で作り直す）'
     if ($answer.Trim() -match '^(y|yes)$') {
-      & $node @KantanNodeFlags $cli @cliArgs '--reset'
+      & $node @EEditorNodeFlags $cli @cliArgs '--reset'
       $code = $LASTEXITCODE
     }
   }

@@ -21,8 +21,11 @@ class VideoSource {
   const QString& path() const { return path_; }
   /** 素材の時刻 t を表示したい。playing のときは先読みする */
   void setTarget(double t, bool playing, double rate);
-  /** t に表示するフレーム（無ければ直前に表示したもの）。exact は t のフレームが用意できているか */
-  QImage frameAt(double t, bool* exact = nullptr);
+  /**
+   * t に表示するフレーム（無ければ直前に表示したもの）。exact は t のフレームが用意できているか。
+   * pts には、返したフレームの素材の時刻（オブジェクトマスクを同じフレームのものにするため）
+   */
+  QImage frameAt(double t, bool* exact = nullptr, double* pts = nullptr);
   bool failed() const;
 
  private:
@@ -45,9 +48,12 @@ class VideoSource {
   unsigned long long serial_ = 0;
   std::deque<Frame> frames_;
   double frameDur_ = 1.0 / 30;
+  /** frames_ を用意し始めたシークの目標（0 なら、frames_ の先頭は素材の最初のフレーム） */
+  double seekedTo_ = -1;
   bool eof_ = false;
   bool failed_ = false;
   QImage last_;
+  double lastPts_ = 0;
 };
 
 }  // namespace kv

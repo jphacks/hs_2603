@@ -12,12 +12,11 @@
 #include <memory>
 
 #include "core/editor.h"
-#include "core/filters.h"
 #include "core/timeline.h"
 #include "media/ffutil.h"
 #include "media/mediamanager.h"
-#include "render/imageops.h"
-#include "render/textrender.h"
+#include "render/compositor.h"
+#include "render/maskframes.h"
 
 namespace kv::ai {
 
@@ -26,17 +25,12 @@ namespace {
 /** 1 枚分の、写し取った状態（別スレッドで使うので、編集データは参照せずコピーで持つ） */
 struct Job {
   double t = 0;
-  bool hasClip = false;
-  bool isImage = false;
-  QString path;
-  QImage still;  // 写真のクリップ
-  double srcT = 0;
-  FitMode fit = FitMode::Contain;
-  ColorAdjust color;
-  bool plain = true;
-  LayerState layer;
-  double fade = 0;  // 黒を重ねる割合
-  std::vector<TextItem> texts;
+  /** この画面に要るフレーム（オブジェクトマスクを選ぶのに使う） */
+  FramePlan plan;
+  /** デコードして用意する動画のフレーム */
+  std::vector<FrameNeed> videos;
+  /** 写真のフレーム（UI のスレッドで、プレビュー用の画像を写しておく） */
+  std::map<QString, QImage> stills;
 };
 
 QSize canvasFor(Aspect aspect, int longSide) {
@@ -44,48 +38,6 @@ QSize canvasFor(Aspect aspect, int longSide) {
   const double k = double(longSide) / std::max(d.width(), d.height());
   auto even = [](double v) { return std::max(2, int(std::lround(v / 2)) * 2); };
   return {even(d.width() * k), even(d.height() * k)};
-}
-
-QImage compose(const Job& job, const QImage& frame, QSize size, QSize design) {
-  QImage canvas;
-  if (job.hasClip && !frame.isNull()) {
-    canvas = composeClipLayer(frame, job.fit, size);
-    applyColor(canvas, job.color);
-    if (!job.plain) canvas = transformLayer(canvas, job.layer);
-    if (job.fade > 0.001) {
-      QPainter p(&canvas);
-      p.fillRect(canvas.rect(), QColor(0, 0, 0, int(std::lround(job.fade * 255))));
-    }
-  } else {
-    canvas = QImage(size, QImage::Format_RGB32);
-    canvas.fill(Qt::black);
-  }
-  QPainter p(&canvas);
-  for (const TextItem& item : job.texts) {
-    const bool plain = layerIsPlain(item);
-    const LayerState ls = layerStateAt(item, job.t - item.start);
-    TextItem drawItem = item;
-    drawItem.letterSpacing = ls.letterSpacing;  // 字間のキーフレームも含めた、この時間の字間
-    if (!plain) {
-      drawItem.x = 0.5;
-      drawItem.y = 0.5;
-    }
-    const TextSprite s = renderTextSprite(drawItem, design, size);
-    const AnimState st = textAnimState(item, job.t);
-    if (s.image.isNull() || st.alpha <= 0.001) continue;
-    const QPointF offset(0, st.offsetY * size.height());
-    if (plain) {
-      p.setOpacity(st.alpha);
-      p.drawImage(s.pos + offset, s.image);
-      continue;
-    }
-    p.save();
-    p.setOpacity(st.alpha * ls.opacity);
-    drawLayer(p, s.image, s.pos, ls, offset, size);
-    p.restore();
-  }
-  p.end();
-  return canvas;
 }
 
 /** 動画 1 つ分のデコーダーと、直前に作ったコマ */
@@ -156,52 +108,63 @@ void grabImpl(const ProjectData& project, const std::vector<double>& times, int 
   for (const auto& t : project.texts) end = std::max(end, t.start + t.duration);
   for (const auto& a : project.audios) end = std::max(end, a.start + audioDuration(a));
   const QSize size = canvasFor(project.settings.aspect, longSide);
-  const QSize design = designSize(project.settings.aspect);
+  // 何がどこにあるか（要るフレームの一覧）は、プレビューと同じ決め方。写真は、ここでプレビュー用の画像を写しておく
+  const AssetLookup lookup = [&ed](const QString& id) { return ed.asset(id); };
   std::vector<Job> jobs;
   for (double t : times) {
     Job job;
     job.t = std::clamp(t, 0.0, std::max(0.0, end));
-    if (const ClipLayout* cur = findClipAt(layout, job.t)) {
-      const VideoClip& c = cur->clip;
-      const Asset* a = ed.asset(c.assetId);
-      const double local = std::clamp(job.t - cur->start, 0.0, cur->duration);
-      if (a && a->status != AssetStatus::Missing && a->status != AssetStatus::Error) {
-        job.hasClip = true;
-        job.isImage = c.isImage;
-        if (c.isImage) job.still = media().previewImage(c.assetId);
-        else job.path = a->path;
-        job.srcT = c.in + local * c.speed;
-        job.fit = c.fit;
-        job.color = c.color;
-        job.plain = layerIsPlain(c);
-        job.layer = layerStateAt(c, local);
-        job.fade = 1 - fadeFactor(local, cur->duration, c.fadeIn, c.fadeOut);
+    job.plan = planFrame(project, layout, lookup, job.t);
+    const FramePlan& plan = job.plan;
+    for (const FrameNeed& n : plan.needs) {
+      if (!n.isImage) {
+        job.videos.push_back(n);
+        continue;
       }
-    }
-    // 下の段の文字から描く（上の段の文字ほど手前。プレビュー・書き出しと同じ順）
-    for (const size_t index : textPaintOrder(project.texts)) {
-      const TextItem& item = project.texts[index];
-      if (isTextVisible(item, job.t) && !item.text.isEmpty()) job.texts.push_back(item);
+      const QImage img = media().previewImage(n.assetId);
+      if (!img.isNull()) job.stills[n.key] = img;
     }
     jobs.push_back(std::move(job));
   }
 
+  // オブジェクトマスクを使う映像（マスクは、読んだコマの時刻で選ぶ。素材の情報はここで写しておく）
+  std::map<QString, Asset> assets;
+  for (const Job& job : jobs) {
+    for (const FrameNeed& n : job.plan.needs) {
+      if (const Asset* a = ed.asset(n.assetId)) assets[n.assetId] = *a;
+    }
+  }
   QPointer<QObject> guard(context);
-  QThreadPool::globalInstance()->start([jobs = std::move(jobs), size, design, quality, guard, done = std::move(done)] {
+  QThreadPool::globalInstance()->start([project, layout, jobs = std::move(jobs), assets, size, quality, guard, done = std::move(done)] {
     std::vector<FrameShot> shots;
     std::map<QString, std::unique_ptr<Reader>> readers;
+    const AssetLookup lookup = [&assets](const QString& id) -> const Asset* {
+      const auto it = assets.find(id);
+      return it == assets.end() ? nullptr : &it->second;
+    };
     for (const Job& job : jobs) {
-      QImage frame = job.still;
-      if (job.hasClip && !job.isImage) {
-        auto& r = readers[job.path];
+      // 合成はプレビューと同じ計算（文字の画像などは毎回作る）
+      ComposeOptions opt;
+      opt.canvas = size;
+      std::map<QString, QImage> frames = job.stills;
+      std::map<QString, double> framePts;
+      for (const FrameNeed& n : job.videos) {
+        // デコーダーは映像（クリップ）ごとに持つ（トランジションの間は、同じ素材の前後のクリップを同じ時刻に読むので、
+        // 素材ごとに 1 つだと行ったり来たりして遅く、別の位置のコマが混ざりやすい）
+        auto& r = readers[n.key + QLatin1Char('|') + n.path];
         if (!r) {
           r = std::make_unique<Reader>();
-          r->open = r->dec.open(job.path);
+          r->open = r->dec.open(n.path);
           if (!r->open) r->dec.close();
         }
-        frame = videoFrame(*r, job.srcT);
+        const QImage f = videoFrame(*r, n.srcT);
+        if (!f.isNull()) {
+          frames[n.key] = f;
+          framePts[n.key] = r->pts;
+        }
       }
-      const QImage img = compose(job, frame, size, design);
+      opt.masks = resolveFrameMasks(project, job.plan, lookup, framePts);
+      const QImage img = composeFrame(project, layout, job.t, frames, opt, nullptr);
       FrameShot shot;
       shot.t = job.t;
       shot.size = img.size();

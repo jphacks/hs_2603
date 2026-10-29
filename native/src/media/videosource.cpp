@@ -41,7 +41,7 @@ bool VideoSource::failed() const {
   return failed_;
 }
 
-QImage VideoSource::frameAt(double t, bool* exact) {
+QImage VideoSource::frameAt(double t, bool* exact, double* pts) {
   std::lock_guard<std::mutex> lock(mutex_);
   const double eps = frameDur_ * 0.25;
   int best = -1;
@@ -55,12 +55,16 @@ QImage VideoSource::frameAt(double t, bool* exact) {
     // 最後のフレームより先を求められていて、まだデコードが追いついていない
     ok = !(best == int(frames_.size()) - 1 && !eof_ && t - f.pts > frameDur_ * 1.5);
     last_ = f.image;
-  } else if (!frames_.empty() && frames_.front().pts - t < frameDur_ * 1.5) {
-    // 素材の最初のフレームより少し前
+    lastPts_ = f.pts;
+  } else if (!frames_.empty() && (frames_.front().pts - t < frameDur_ * 1.5 || (t <= 1e-6 && seekedTo_ <= 1e-6 && seekedTo_ >= 0))) {
+    // 素材の最初のフレームより少し前（素材の始まり 0 を求められたときは、映像が少し遅れて始まる素材でも、最初のフレーム。
+    // 書き出しでも、最初のフレームから使う）
     ok = true;
     last_ = frames_.front().image;
+    lastPts_ = frames_.front().pts;
   }
   if (exact) *exact = ok;
+  if (pts) *pts = lastPts_;
   return last_;
 }
 
@@ -97,6 +101,7 @@ void VideoSource::run() {
       if (needSeek) {
         frames_.clear();
         eof_ = false;
+        seekedTo_ = std::max(0.0, target);
       } else {
         const double ahead = playing ? std::max(0.4, 0.4 * rate) : 0.0;
         const bool reached = lastPts >= target - fd * 0.75;

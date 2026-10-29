@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(KantanVideoEditor VERSION 0.1.0 LANGUAGES C CXX)
+project(e-editor VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,6 +23,14 @@ foreach(lib avformat avcodec avutil swscale swresample avfilter)
   endif()
 endforeach()
 
+# ONNX Runtime（オブジェクトマスクの AI）: ヘッダーだけを使う（onnxruntime.dll は、使うときにアプリが LoadLibrary で読む。リンクしない）
+set(ONNXRUNTIME_DIR "" CACHE PATH "ONNX Runtime release root (include/onnxruntime_c_api.h)")
+if(NOT EXISTS "${ONNXRUNTIME_DIR}/include/onnxruntime_c_api.h")
+  message(FATAL_ERROR "ONNXRUNTIME_DIR が正しくありません: ${ONNXRUNTIME_DIR}")
+endif()
+add_library(onnxruntime_headers INTERFACE)
+target_include_directories(onnxruntime_headers SYSTEM INTERFACE "${ONNXRUNTIME_DIR}/include")
+
 add_library(miniaudio STATIC third_party/miniaudio/miniaudio.c)
 target_include_directories(miniaudio PUBLIC third_party/miniaudio)
 target_compile_definitions(miniaudio PRIVATE MA_NO_DECODING MA_NO_ENCODING MA_NO_GENERATION MA_NO_RESOURCE_MANAGER MA_NO_NODE_GRAPH MA_NO_ENGINE)
@@ -32,6 +40,9 @@ set(SOURCES
   src/core/model.h src/core/model.cpp
   src/core/timeline.h src/core/timeline.cpp
   src/core/filters.h src/core/filters.cpp
+  src/core/effects.h src/core/effects.cpp
+  src/core/transitions.h src/core/transitions.cpp
+  src/core/subtitles.h src/core/subtitles.cpp
   src/core/textstyles.h src/core/textstyles.cpp
   src/core/texttemplates.h src/core/texttemplates.cpp
   src/core/animtemplates.h src/core/animtemplates.cpp
@@ -41,12 +52,22 @@ set(SOURCES
   src/core/exportplan.h src/core/exportplan.cpp
   src/media/ffutil.h src/media/ffutil.cpp
   src/media/videosource.h src/media/videosource.cpp
+  src/media/reverser.h src/media/reverser.cpp
   src/media/audioengine.h src/media/audioengine.cpp
   src/media/mediamanager.h src/media/mediamanager.cpp
   src/media/webimage.h src/media/webimage.cpp
   src/media/audiopreview.h src/media/audiopreview.cpp
   src/render/imageops.h src/render/imageops.cpp
   src/render/textrender.h src/render/textrender.cpp
+  src/mask/ortapi.h src/mask/ortapi.cpp
+  src/mask/edgetamconsts.h src/mask/edgetamconsts.cpp
+  src/mask/edgetam.h src/mask/edgetam.cpp
+  src/mask/masktrack.h src/mask/masktrack.cpp
+  src/mask/maskjob.h src/mask/maskjob.cpp
+  src/mask/maskcontroller.h src/mask/maskcontroller.cpp
+  src/render/compositor.h src/render/compositor.cpp
+  src/render/maskframes.h src/render/maskframes.cpp
+  src/render/stillframe.h src/render/stillframe.cpp
   src/render/previewengine.h src/render/previewengine.cpp
   src/export/exporter.h src/export/exporter.cpp
   src/ui/theme.h src/ui/theme.cpp
@@ -56,6 +77,10 @@ set(SOURCES
   src/ui/previewwidget.h src/ui/previewwidget.cpp
   src/ui/timelinewidget.h src/ui/timelinewidget.cpp
   src/ui/animpanel.h src/ui/animpanel.cpp
+  src/ui/effectlist.h src/ui/effectlist.cpp
+  src/ui/markerdialog.h src/ui/markerdialog.cpp
+  src/ui/effectsview.h src/ui/effectsview.cpp
+  src/ui/clipdialogs.h src/ui/clipdialogs.cpp
   src/ui/inspector.h src/ui/inspector.cpp
   src/ui/exportdialog.h src/ui/exportdialog.cpp
   src/ui/workspacebar.h src/ui/workspacebar.cpp
@@ -66,6 +91,7 @@ set(SOURCES
   src/ai/aiconfig.h src/ai/aiconfig.cpp
   src/ai/bedrock.h src/ai/bedrock.cpp
   src/ai/framegrab.h src/ai/framegrab.cpp
+  src/ai/guidecatalog.h src/ai/guidecatalog.cpp
   src/ai/tools.h src/ai/tools.cpp
   src/ai/assistant.h src/ai/assistant.cpp
   src/ai/servercall.h src/ai/servercall.cpp
@@ -75,19 +101,23 @@ set(SOURCES
   src/ui/accountdialog.h src/ui/accountdialog.cpp
   src/ui/workshopdialog.h src/ui/workshopdialog.cpp
   src/ui/serverstatus.h src/ui/serverstatus.cpp
+  src/ui/guide.h src/ui/guide.cpp
   src/ui/aipanel.h src/ui/aipanel.cpp
   src/ui/mainwindow.h src/ui/mainwindow.cpp
   src/uitest.h src/uitest.cpp
+  src/wheeltest.cpp
 )
 
-qt_add_executable(kantan-video-editor WIN32 ${SOURCES} resources/app.qrc resources/app.rc)
+qt_add_executable(e-editor WIN32 ${SOURCES} resources/app.qrc resources/app.rc)
 # generated: build.ps1 が作るファイル（配る exe に組み込む AI サーバーのアドレス。native/release.env から作る）
-target_include_directories(kantan-video-editor PRIVATE src "${CMAKE_BINARY_DIR}/generated")
-target_compile_definitions(kantan-video-editor PRIVATE UNICODE _UNICODE NOMINMAX
+target_include_directories(e-editor PRIVATE src "${CMAKE_BINARY_DIR}/generated")
+target_compile_definitions(e-editor PRIVATE UNICODE _UNICODE NOMINMAX
   KV_VERSION="${PROJECT_VERSION}")
 if(MSVC)
-  target_compile_options(kantan-video-editor PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /MP)
+  target_compile_options(e-editor PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus /MP)
 else()
-  target_compile_options(kantan-video-editor PRIVATE -Wall -Wno-unused-parameter)
+  target_compile_options(e-editor PRIVATE -Wall -Wno-unused-parameter)
 endif()
-target_link_libraries(kantan-video-editor PRIVATE Qt6::Widgets Qt6::Svg Qt6::Network ffmpeg miniaudio ole32 shell32 uuid crypt32)
+# version: オブジェクトマスクの AI の部品が使う Visual C++ ランタイムの版を確かめる（GetFileVersionInfo）
+target_link_libraries(e-editor PRIVATE Qt6::Widgets Qt6::Svg Qt6::Network ffmpeg onnxruntime_headers miniaudio ole32 shell32 uuid crypt32
+  version)

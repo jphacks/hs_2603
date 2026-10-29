@@ -60,20 +60,20 @@ index 8c8fc7d..de58ef3 100644
 コマンド（出力はリポジトリの外のログに書き、最後に終了コードを足した）:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File 'c:\git\JPHACK\e-editor\native\build.ps1' -NoDeploy *>&1 | Out-File -Encoding utf8 C:\kantan-dev\tmp\kv-docs\build-1.log; "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\kantan-dev\tmp\kv-docs\build-1.log
+powershell -NoProfile -ExecutionPolicy Bypass -File 'c:\git\JPHACK\e-editor\native\build.ps1' -NoDeploy *>&1 | Out-File -Encoding utf8 C:\e-editor-dev\tmp\kv-docs\build-1.log; "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\e-editor-dev\tmp\kv-docs\build-1.log
 ```
 
 ログ（全文）:
 
 ```
-[1/4] Automatic MOC for target kantan-video-editor
-[2/3] Building CXX object CMakeFiles/kantan-video-editor.dir/src/ui/mainwindow.cpp.obj
-[3/3] Linking CXX executable kantan-video-editor.exe
+[1/4] Automatic MOC for target e-editor
+[2/3] Building CXX object CMakeFiles/e-editor.dir/src/ui/mainwindow.cpp.obj
+[3/3] Linking CXX executable e-editor.exe
 BUILD-EXIT=0
 ```
 
 - 終了コード 0。`warning` も `error` もない（`-Wall -Wno-unused-parameter`）。コンパイルし直したのは mainwindow.cpp だけ。
-- 新しくなったのは `native\build\kantan-video-editor.exe`（2026-10-22 15:29:43）だけ。配置していないので、`native\dist\kantan-video-editor\kantan-video-editor.exe` は 14:43:29 のまま。
+- 新しくなったのは `native\build\e-editor.exe`（2026-10-22 15:29:43）だけ。配置していないので、`native\dist\e-editor\e-editor.exe` は 14:43:29 のまま。
 
 ## 3. ショートカット一覧
 
@@ -92,7 +92,7 @@ BUILD-EXIT=0
 ### 3.3 ハーネスでの表示の確認
 
 作り:
-- 場所は `C:\kantan-dev\tmp\kv-docs\harness\`（リポジトリの外。終わったあと消した）。
+- 場所は `C:\e-editor-dev\tmp\kv-docs\harness\`（リポジトリの外。終わったあと消した）。
 - `extract.ps1` が、`MainWindow::showShortcuts()` の中身を HEAD（315〜362 行）と作業ツリー（315〜363 行）からそのまま写して、.inc ファイルにする。変えたのは 1 行目のクラス名だけ（QMainWindow を継いだ空のクラスにした）。ハーネスはこの関数を呼び、`dlg.exec()` の中で 0.8 秒後に寸法を測り、`grab()` の画像を保存してからダイアログを閉じる。
 - MainWindow は作っていない（プレビュー・メディアの管理・自動保存のタイマーも作られない）。アプリ名は別の名前にし、QStandardPaths をテストモードにした。終わったあと、`%LOCALAPPDATA%` に `qttest` や `kv-docs-harness` のフォルダーはできていなかった。自動保存のファイルの時刻は 15:23:08 で、作業を始める前のまま。
 - アプリの main.cpp と同じく、`HighDpiScaleFactorRoundingPolicy::PassThrough` にしてから `theme::apply` を呼んだ（リポジトリの theme.cpp をそのままコンパイル）。翻訳ファイルは読んでいない（Qt の標準の文言にしか効かず、このダイアログの文字はすべてアプリが書いたもの）。
@@ -155,7 +155,7 @@ OK   after: the whole dialog (with its frame) fits the screen's available area
 OK   after: the new row comes right after the zoom row (zoom 10, new 11)
 OK   after: the new row's key is Alt+ドラッグ
 OK   after: the new key cell is drawn like the other key cells (right-aligned, muted color)
-OK   after: saved C:\kantan-dev\tmp\kv-docs\harness\out/shortcuts-after.png (525x640 px)
+OK   after: saved C:\e-editor-dev\tmp\kv-docs\harness\out/shortcuts-after.png (525x640 px)
 note: dialog before 420x482, after 420x512, row height 30
 OK   the dialog keeps its width
 OK   the dialog grows by the 30 px that showShortcuts reserves per row
@@ -190,4 +190,4 @@ RESULT: ALL OK
 - timelinewidget.cpp と .h の SHA-256 は、作業の前後で同じ（`EA70B2EE…`、`A501EED2…`）。
 - README.md と mainwindow.cpp は、どちらも編集の前後で UTF-8・BOM なし・CRLF（CRLF の行が 252→253、499→500。LF だけの行は 0）。
 - ユーザーのアプリ（PID 30500、15:21:56 起動）は起動したまま。
-- 一時フォルダー `C:\kantan-dev\tmp\kv-docs\`（ビルドとハーネスのログ、ハーネス、画像）は、この報告を書いたあとに消した。
+- 一時フォルダー `C:\e-editor-dev\tmp\kv-docs\`（ビルドとハーネスのログ、ハーネス、画像）は、この報告を書いたあとに消した。

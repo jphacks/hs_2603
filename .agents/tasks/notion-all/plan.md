@@ -6,7 +6,7 @@
 ## 対象
 1. フォントのインポート（TTF/OTF/TTC、AppLocalData/fonts にコピーして起動時に登録、ファミリー名で保存）
 2. 同梱フォント（OFL: Noto Sans JP R/B, M PLUS Rounded 1c R/B, Zen Maru Gothic R/B, Dela Gothic One, RocknRoll One,
-   Rampart One, Reggae One, Mochiy Pop One, Kosugi Maru(Apache), Yusei Magic）。setup.ps1 で kantan-dev にDL → build.ps1 で dist/fonts
+   Rampart One, Reggae One, Mochiy Pop One, Kosugi Maru(Apache), Yusei Magic）。setup.ps1 で e-editor-dev にDL → build.ps1 で dist/fonts
 3. テキストのテンプレート保存（見た目・登場アニメ・キーフレーム。文字は保存しない。テキスト欄に表示、名前変更・削除）
 4. 文字の一部だけフォント変更（設定欄の入力欄で選んだ範囲 + フォント選択）
 5. 重ねるトラック（OverlayItem : VideoClip {start, track, group}。音も鳴る）
@@ -38,5 +38,5 @@
 - [x] setup.ps1 / common.ps1 / build.ps1 のフォント
 - [x] ビルド OK（UI まで）
 - [x] 一時的なテスト（p2test.cpp, --p2-test）で実行確認（すべて OK）→ 消した。消したあともビルド・リンク OK
-- [x] setup.ps1 でフォントを C:\kantan-dev\fonts にダウンロード（SHA-256 確認 OK）
+- [x] setup.ps1 でフォントを C:\e-editor-dev\fonts にダウンロード（SHA-256 確認 OK）
 - [ ] build.ps1（デプロイ込み）でフォントのコピー確認 → dist のアプリが起動中のため未確認

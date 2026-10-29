@@ -2,9 +2,11 @@
 
 #include <QInputMethodEvent>
 #include <QLabel>
+#include <QPainterPath>
 #include <QPointer>
 #include <QPushButton>
 #include <QToolButton>
+#include <QTransform>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -118,10 +120,29 @@ class PreviewStage : public QWidget {
   void blinkReset();
   void updateCanvasSize();
   QString hitText(QPointF pos) const;
-  /** スポイト（クロマキーの透明にする色を、プレビューのクリックで選ぶ）の間 true */
+  /** スポイト（クロマキーの透明にする色を、プレビューのクリックで選ぶ）か、オブジェクトマスクの被写体を選んでいる間 true */
   bool picking() const;
+  /** オブジェクトマスクの被写体を選んでいる間 true */
+  bool maskPicking() const;
+  /** スポイト・被写体を選ぶのをやめる */
+  void stopPicking();
   /** スポイト: pos（ウィジェット座標）に見えている元の色を、その映像の透明にする色にして、スポイトを終える */
   void pickChromaAt(QPointF pos);
+
+  // ---- オブジェクトマスクの被写体を選ぶ ----
+  /**
+   * 映像 clipId の素材のフレーム（0〜1 の割合。反転の前）→ ウィジェット座標の変換と、その映像が見えている範囲（切り抜き・画面の中）。
+   * 今の再生位置に出ていなければ false
+   */
+  bool sourceToWidget(const QString& clipId, QTransform* m, QPainterPath* visible) const;
+  /** ウィジェットの点 → 素材のフレームの割合。その映像の見えている所でなければ false */
+  bool widgetToSource(const QString& clipId, QPointF pos, QPointF* src) const;
+  /** カーソルを合わせた所の被写体を探す（マスクは、できたらプレビューに薄く重ねる） */
+  void maskHoverAt(QPointF pos, Qt::KeyboardModifiers mods);
+  void maskClickAt(QPointF pos, Qt::KeyboardModifiers mods);
+  void paintMaskPick(QPainter& p, const QRectF& r);
+  /** マスク（Grayscale8）を、色を付けた半透明の画像と縁の線にする */
+  static QImage tintMask(const QImage& mask, const QColor& color);
   /** その位置に見えている、重ねるトラックの映像（前に重なっているものから探す）。無ければ空 */
   QString hitOverlay(QPointF pos) const;
   /** 重ねるトラックの映像の枠（基準解像度の座標）。今の時間に出ていなければ false */
@@ -154,6 +175,13 @@ class PreviewStage : public QWidget {
   bool guideV_ = false, guideH_ = false;
   bool dropHover_ = false;
   bool fullScreen_ = false;
+  /** 被写体を選ぶ: カーソルの位置（ウィジェット座標）と、押しているキー（Shift で足す・Alt / Ctrl で外す） */
+  QPointF maskCursor_;
+  bool maskCursorIn_ = false;
+  Qt::KeyboardModifiers maskMods_;
+  /** カーソルを合わせた所のマスク（色を付けたもの）と、作ったときの元（同じなら作り直さない） */
+  QImage maskTint_;
+  QString maskTintKey_;
 
   // 文字の直接編集の状態
   QString editId_;
@@ -189,6 +217,19 @@ class TransportBar : public QWidget {
   void refresh();
   QLabel* time_;
   QToolButton* play_;
+  /** ループ再生のオン・オフ */
+  QToolButton* loop_;
+  /** ガイド（セーフマージン・三分割のグリッド）のメニュー */
+  QToolButton* guides_;
+  QAction* safe_;
+  QAction* grid_;
+  /** オブジェクトマスク（被写体をクリックして選ぶ）のボタン */
+  QToolButton* objMask_;
+  int objMaskIcon_ = -1;
+  /** 今出しているアイコンの状態（再生中は何度も refresh するので、変わったときだけ描き直す。-1 はまだ） */
+  int playIcon_ = -1;
+  int loopIcon_ = -1;
+  int guidesIcon_ = -1;
   Segmented* aspect_;
 };
 

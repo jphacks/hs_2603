@@ -15,7 +15,7 @@ export class ApiError extends Error {
   }
 }
 
-export const ADMIN_COOKIE = 'kantan_admin';
+export const ADMIN_COOKIE = 'e_editor_admin';
 
 export function readCookie(req: FastifyRequest, name: string): string {
   const header = req.headers.cookie ?? '';
@@ -63,7 +63,7 @@ export async function authenticate(db: Db, req: FastifyRequest, kind: SessionKin
  * ブラウザーは、ほかのサイトからこの独自のヘッダーを付けて送れない（CORS を許していないため）
  */
 export function requireAdminHeader(req: FastifyRequest): void {
-  if (req.headers['x-kantan-admin'] !== '1') throw new ApiError(403, 'bad_request', '管理画面から操作してください');
+  if (req.headers['x-e-editor-admin'] !== '1') throw new ApiError(403, 'bad_request', '管理画面から操作してください');
   const origin = req.headers.origin;
   // req.host は、TRUST_PROXY のときだけ X-Forwarded-Host を見る（Caddy などの裏で動かしても、元のアドレスと比べられる）
   const host = req.host;

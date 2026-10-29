@@ -2,6 +2,9 @@
 
 #include <QDialog>
 
+#include "core/exportplan.h"
+
+class QComboBox;
 class QLabel;
 class QProgressBar;
 class QStackedWidget;
@@ -33,7 +36,16 @@ class ExportDialog : public QDialog {
   void begin(const QString& path);
   /** 範囲を決めてあって、「指定した範囲」を選んでいるか */
   bool rangeSelected() const;
+  ExportFormat format() const;
+  ExportQuality quality() const;
+  /** 選んでいる解像度（短い辺。GIF は GIF 用の大きさ） */
+  int shortSide() const;
   QStackedWidget* pages_;
+  QComboBox* format_;
+  QLabel* formatHint_;
+  /** 解像度の欄（音だけの形式では隠す） */
+  QWidget* resBox_;
+  Segmented* gifRes_;
   /** 書き出す部分（全体 / 指定した範囲）。範囲を決めてあるときだけ出す */
   QWidget* partBox_;
   Segmented* part_;

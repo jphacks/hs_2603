@@ -37,7 +37,7 @@
 | 変えないもの（seek、←→・Home/End、再生と followPlayhead、undo の結合、拡大縮小とホイール、ビデオのクリップ・ドロップ・ダブルクリック、見出しと赤い線） | 合う | 該当のコードに変更なし。吸着は updateText・updateAudio に渡す値を変えるだけで、`merge_` と `endMerge()` はそのまま（記録 (g) の 12 回）。ドラッグ中の Ctrl+ホイールのあとは次の移動で新しい間隔（記録 (d)） |
 | (j) Alt でドラッグして離したあとにメニューバーが選ばれない。対策は入れるなら最小限 | 合う | 対策は入れていない（必要なかった）。`MainWindow::eventFilter` は Alt の ShortcutOverride を受け取らない（`mine` は Alt 付きを除く）。そのため Qt の中の動きは、ハーネスの素の QMainWindow で試した結果がアプリにも当てはまる。本物の Windows のキー入力の経路は 3 章の「確かめられないこと」に入っていて、手での確認手順がある |
 | スタイル・日本語のコメント・頼まれていない変更なし | 合う | `scrubTo` は press と move で同じ処理を 2 回書かないための関数（計画 D5）で、それ以外の整理はない |
-| 変更は timelinewidget.cpp/.h だけ。README・mainwindow に Alt の説明なし。コミット・stash なし。テストやビルドのターゲットの追加なし | 合う | `git status`・`git log`・`git stash list`。ハーネスはリポジトリの外（`C:\kantan-dev\tmp\kv-magnet\`） |
+| 変更は timelinewidget.cpp/.h だけ。README・mainwindow に Alt の説明なし。コミット・stash なし。テストやビルドのターゲットの追加なし | 合う | `git status`・`git log`・`git stash list`。ハーネスはリポジトリの外（`C:\e-editor-dev\tmp\kv-magnet\`） |
 
 ## 3. 検証の記録（verification.md）
 

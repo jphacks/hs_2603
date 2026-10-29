@@ -83,7 +83,7 @@ void ServerStatus::refresh() {
   QStringList tip;
   if (a.server().isEmpty()) {
     tip << QStringLiteral("AI サーバーのアドレスが決まっていません")
-        << QStringLiteral("%1 に KANTAN_AI_SERVER=（AI サーバーのアドレス）を書くと、AI アシスタントを使えます").arg(envHintPath());
+        << QStringLiteral("%1 に E_EDITOR_AI_SERVER=（AI サーバーのアドレス）を書くと、AI アシスタントを使えます").arg(envHintPath());
   } else if (!a.linkDetail().isEmpty()) {
     tip << a.linkDetail();
     // アドレスの書き方の問題なら、どのファイルを直せばよいかだけ出す（組み込んだアドレスなら、使う人には直せないので出さない）
@@ -104,7 +104,7 @@ void ServerStatus::announce() {
   announce_ = false;
   const ai::Account& a = ai::account();
   if (a.server().isEmpty()) {
-    editor().toast(QStringLiteral("%1 に KANTAN_AI_SERVER が見つかりません").arg(envHintPath()), ToastKind::Error);
+    editor().toast(QStringLiteral("%1 に E_EDITOR_AI_SERVER が見つかりません").arg(envHintPath()), ToastKind::Error);
   } else if (a.link() == ai::Account::Link::Online) {
     editor().toast(QStringLiteral("AI サーバーにつながっています"), ToastKind::Success);
   } else if (a.link() != ai::Account::Link::Checking) {
@@ -128,7 +128,7 @@ void ServerStatus::onClicked() {
     const QString path = envHintPath();
     menu_->addAction(QStringLiteral("AI サーバーのアドレスが決まっていません"))->setEnabled(false);
     menu_->addAction(QStringLiteral("%1 に").arg(path))->setEnabled(false);
-    menu_->addAction(QStringLiteral("KANTAN_AI_SERVER=（AI サーバーのアドレス）を書いてください"))->setEnabled(false);
+    menu_->addAction(QStringLiteral("E_EDITOR_AI_SERVER=（AI サーバーのアドレス）を書いてください"))->setEnabled(false);
     menu_->addSeparator();
     menu_->addAction(QStringLiteral(".env のフォルダーを開く"), this, [path] {
       const QString dir = QFileInfo(path).absolutePath();

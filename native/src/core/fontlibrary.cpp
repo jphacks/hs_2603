@@ -84,9 +84,9 @@ QString FontLibrary::labelOf(const QString& family) const {
 void FontLibrary::loadAll() {
   if (loaded_) return;
   loaded_ = true;
-  // 同梱のフォント: アプリのフォルダーの fonts（開発中の確認用に、環境変数 KANTAN_FONT_DIR でも指定できる）
+  // 同梱のフォント: アプリのフォルダーの fonts（開発中の確認用に、環境変数 E_EDITOR_FONT_DIR でも指定できる）
   QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/fonts");
-  if (const QString env = qEnvironmentVariable("KANTAN_FONT_DIR"); !env.isEmpty() && QFileInfo(env).isDir()) dir = env;
+  if (const QString env = qEnvironmentVariable("E_EDITOR_FONT_DIR"); !env.isEmpty() && QFileInfo(env).isDir()) dir = env;
   QStringList files = fontFilesIn(dir);
   std::stable_sort(files.begin(), files.end(), [](const QString& a, const QString& b) {
     return bundledOrder(QFileInfo(a).fileName()) < bundledOrder(QFileInfo(b).fileName());

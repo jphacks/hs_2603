@@ -15,11 +15,20 @@
 
 #include "core/model.h"
 #include "media/audioengine.h"
+#include "render/compositor.h"
 #include "render/textrender.h"
 
 namespace kv {
 
 class VideoSource;
+struct TimelineLayout;
+
+/**
+ * プレビューで鳴らす音の一覧（メインのビデオ・重ねるトラックの動画・オーディオ。ミュート・パン・トランジションのクロスフェード・
+ * 動画全体の再生速度も入れる）。playEnd は再生の終わり（タイムラインの秒）
+ */
+std::shared_ptr<MixSnapshot> buildMixSnapshot(const ProjectData& p, const TimelineLayout& layout, const std::function<const Asset*(const QString&)>& asset,
+                                              double playEnd);
 
 class PreviewEngine : public QObject {
   Q_OBJECT
@@ -47,6 +56,11 @@ class PreviewEngine : public QObject {
    * （クロマキー・色の調整の前。周りの数画素の平均）。今の画面にその映像が出ていない・点がその映像の外なら空
    */
   std::optional<QColor> sampleSource(const QString& clipId, QPointF at) const;
+  /**
+   * 今の画面に使った映像 clipId（メイン・重ねるトラック）の元のフレーム（反転・エフェクトの前）と、その素材の時刻（写真は 0）。
+   * 今の画面に出ていなければ空（オブジェクトマスクの被写体を選ぶのに使う）
+   */
+  QImage rawFrame(const QString& clipId, double* pts = nullptr) const;
 
  signals:
   void frameReady();
@@ -57,18 +71,13 @@ class PreviewEngine : public QObject {
   void updateAudioSnapshot();
   VideoSource* source(const QString& key, const QString& path);
   /**
-   * クロマキー（と、withColor なら色の調整）を掛けたフレーム。同じフレーム・同じ設定なら、前に作ったものを使う
-   * （一時停止中に何度描き直しても、重い処理をくり返さない）。onBlack なら、透明にした所を黒で埋める（メインのトラック）
+   * 加工したフレーム（クロマキー・色の調整）と文字の画像。同じフレーム・同じ設定なら、前に作ったものを使う
+   * （一時停止中に何度描き直しても、重い処理をくり返さない）
    */
-  QImage processedFrame(const QString& key, const QImage& src, const VideoClip& c, bool withColor, bool onBlack);
-  struct Processed {
-    qint64 source = 0;
-    QString params;
-    QImage image;
-  };
-  std::map<QString, Processed> processed_;
-  /** 今の画面に使った映像の元のフレーム（"clip:<id>" / "overlay:<id>"。スポイト用） */
+  ComposeCache cache_;
+  /** 今の画面に使った映像の元のフレーム（"clip:<id>" / "overlay:<id>"。スポイト用）と、その素材の時刻 */
   std::map<QString, QImage> raw_;
+  std::map<QString, double> rawPts_;
 
   QTimer timer_;
   AudioEngine audio_;
@@ -77,13 +86,18 @@ class PreviewEngine : public QObject {
   bool exact_ = false;
   std::map<QString, std::unique_ptr<VideoSource>> sources_;
   std::deque<QString> idle_;  // 今は使っていないデコーダー（新しい順）
-  std::map<QString, TextSprite> sprites_;
   QString textOverrideId_;
   QString textOverride_;
   std::atomic<bool> dirty_{true};
   bool wasPlaying_ = false;
   int seenSeek_ = -1;
   double playStart_ = 0;
+  /**
+   * 再生中にシークした・ループで始めに戻った直後: 動画のフレームがその時刻のものになるまで、前の画面を出したままにする
+   * （離れた時刻の古いフレームに、新しい時刻の文字などを重ねて出さないように。少し待ってもそろわなければ出す）
+   */
+  bool awaitExact_ = false;
+  QElapsedTimer awaitTimer_;
   /** 再生を始めたときの、動画全体の再生速度（再生中に変わったら、その位置から始め直す） */
   double playSpeed_ = 1;
   QElapsedTimer wall_;

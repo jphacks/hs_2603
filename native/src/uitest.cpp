@@ -122,10 +122,10 @@ void prepareUiTest(const QString& outDir, const QString& mode) {
       for (const QSslError& e : errors) onlyTestCert = onlyTestCert && e.certificate() == leaf.first();
       if (onlyTestCert) reply->ignoreSslErrors(errors);
     });
-    writeFile(exeEnv(), "KANTAN_AI_SERVER=https://localhost:18794\n");
+    writeFile(exeEnv(), "E_EDITOR_AI_SERVER=https://localhost:18794\n");
     queueDrops("tls", 3);  // 起動したときのつながりの確認を、3 回続けて切る
   } else if (mode == u"httpdrop") {
-    writeFile(exeEnv(), "KANTAN_AI_SERVER=http://127.0.0.1:18795\n");
+    writeFile(exeEnv(), "E_EDITOR_AI_SERVER=http://127.0.0.1:18795\n");
     queueDrops("http", 2);  // 依頼を受け取ってから 2 回切る（GET は送り直してよい）
   } else if (mode == u"real") {
     // 本物のサーバーのアドレスは、ソースに書かずにリポジトリの .env から写す

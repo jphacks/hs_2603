@@ -43,7 +43,9 @@
 #include "core/timeline.h"
 #include "media/audiopreview.h"
 #include "media/mediamanager.h"
+#include "ai/guidecatalog.h"
 #include "ui/accountdialog.h"
+#include "ui/guide.h"
 #include "ui/plaintextinput.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
@@ -583,11 +585,13 @@ AiPanel::AiPanel(QWidget* parent) : QWidget(parent), assistant_(new ai::Assistan
   iv->setSpacing(10);
   iv->addWidget(wrapLabel(QStringLiteral("編集を頼んだり、タイトルやテロップの案を出してもらったりできます。"
                                          "見た目をおまかせすると、いくつかの案をプレビューで見比べて選べます。\n\n"
+                                         "使い方を聞くと、押す場所を画面の矢印で案内します。\n\n"
                                          "例:\n"
                                          "・1本目を2倍速にして\n"
                                          "・最後に「ご視聴ありがとうございました」と入れて\n"
                                          "・最初に「夏の思い出」とタイトルを入れて。見た目はおまかせ\n"
-                                         "・BGM を動画の長さに合わせて、最後はフェードアウトして"),
+                                         "・BGM を動画の長さに合わせて、最後はフェードアウトして\n"
+                                         "・トランジションはどうやって付けるの？"),
                           "muted", intro_));
   introNote_ = wrapLabel(QString(), "dim", intro_);
   iv->addWidget(introNote_);
@@ -720,6 +724,7 @@ AiPanel::AiPanel(QWidget* parent) : QWidget(parent), assistant_(new ai::Assistan
   connect(assistant_, &ai::Assistant::replied, this, &AiPanel::addReply);
   connect(assistant_, &ai::Assistant::acted, this, &AiPanel::addAction);
   connect(assistant_, &ai::Assistant::proposed, this, &AiPanel::addIdeas);
+  connect(assistant_, &ai::Assistant::guideProposed, this, &AiPanel::addGuide);
   connect(assistant_, &ai::Assistant::choicesProposed, this, &AiPanel::addChoices);
   connect(assistant_, &ai::Assistant::failed, this, &AiPanel::addError);
   // 失敗したり途中で止まったりした回は、案を大きく並べた画面を自動では開かない
@@ -785,7 +790,7 @@ void AiPanel::refreshAccount() {
     // アドレスはアプリの中では決めない（.env に書いてもらう）
     const QString env = ai::envFile().isEmpty() ? ai::suggestedEnvPath() : ai::envFile();
     gateTitle_->setText(QStringLiteral("AI サーバーのアドレスが決まっていません"));
-    gateText_->setText(QStringLiteral("AI アシスタントを使うには、%1 に\nKANTAN_AI_SERVER=（AI サーバーのアドレス）\nを書いて、アプリに戻ってきてください。"
+    gateText_->setText(QStringLiteral("AI アシスタントを使うには、%1 に\nE_EDITOR_AI_SERVER=（AI サーバーのアドレス）\nを書いて、アプリに戻ってきてください。"
                                       "アドレスは、AI サーバーを動かしている人（管理者）に教えてもらってください。")
                            .arg(env));
     gateButton_->hide();
@@ -1003,6 +1008,130 @@ void AiPanel::addIdeas(const QString& kind, const std::vector<ai::TextIdea>& ide
     });
   }
   addItem(card);
+}
+
+void AiPanel::setGuide(GuideController* guide) {
+  guide_ = guide;
+}
+
+void AiPanel::addGuide(const std::vector<ai::GuideStep>& steps) {
+  if (steps.empty() || !guide_) return;
+  // この欄の案内（「もう一度見せる」で始め直すと、案内の番号が変わる）
+  struct GuideCard {
+    int session = 0;
+    std::vector<ai::GuideStep> steps;
+    std::vector<QLabel*> badges;
+    QLabel* status = nullptr;
+    QPushButton* stop = nullptr;
+    QPushButton* next = nullptr;
+    QPushButton* replay = nullptr;
+  };
+  auto state = std::make_shared<GuideCard>();
+  state->steps = steps;
+  auto* card = new QFrame(this);
+  card->setObjectName(QStringLiteral("AiGuide"));
+  card->setStyleSheet(QStringLiteral("#AiGuide{background:#1c2633;border:1px solid #2c3d55;border-radius:6px;}"));
+  auto* cv = new QVBoxLayout(card);
+  cv->setContentsMargins(10, 8, 10, 10);
+  cv->setSpacing(6);
+  auto* head = new QHBoxLayout();
+  head->setSpacing(6);
+  auto* icon = new QLabel(card);
+  icon->setPixmap(theme::iconPixmap(QStringLiteral("mouse-pointer-click"), 14, theme::accent, card->devicePixelRatioF()));
+  head->addWidget(icon);
+  head->addWidget(makeLabel(QStringLiteral("操作の案内"), nullptr, card));
+  head->addStretch(1);
+  state->stop = new QPushButton(QStringLiteral("やめる"), card);
+  state->stop->setProperty("flat", true);
+  state->stop->setFocusPolicy(Qt::NoFocus);
+  state->stop->setToolTip(QStringLiteral("画面の案内をやめます（Esc でもやめられます）"));
+  head->addWidget(state->stop);
+  cv->addLayout(head);
+  for (size_t i = 0; i < steps.size(); ++i) {
+    const ai::GuideTarget* t = ai::guideTarget(steps[i].target);
+    auto* row = new QWidget(card);
+    auto* h = new QHBoxLayout(row);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->setSpacing(8);
+    auto* badge = new QLabel(row);
+    badge->setAlignment(Qt::AlignCenter);
+    badge->setFixedSize(20, 20);
+    h->addWidget(badge, 0, Qt::AlignTop);
+    auto* texts = new QVBoxLayout();
+    texts->setSpacing(1);
+    // どこか（場所の名前）と、そこですること（AI の説明）
+    texts->addWidget(wrapLabel(t ? t->place : steps[i].target, nullptr, row));
+    if (!steps[i].text.isEmpty()) texts->addWidget(wrapLabel(steps[i].text, "dim", row));
+    h->addLayout(texts, 1);
+    cv->addWidget(row);
+    state->badges.push_back(badge);
+  }
+  state->status = wrapLabel(QString(), "muted", card);
+  cv->addWidget(state->status);
+  auto* buttons = new QHBoxLayout();
+  buttons->setSpacing(6);
+  state->replay = new QPushButton(QStringLiteral("もう一度見せる"), card);
+  state->replay->setToolTip(QStringLiteral("はじめの手順から、もう一度画面で案内します"));
+  state->next = new QPushButton(QStringLiteral("次へ"), card);
+  state->next->setToolTip(QStringLiteral("この手順を飛ばして、次の手順を案内します"));
+  for (QPushButton* b : {state->replay, state->next}) {
+    b->setFocusPolicy(Qt::NoFocus);
+    buttons->addWidget(b);
+  }
+  buttons->addStretch(1);
+  cv->addLayout(buttons);
+
+  // current: 今の手順（案内していなければ -1）、running: 案内している、done: 最後まで終わった
+  const qreal dpr = devicePixelRatioF();
+  auto refresh = [state, dpr](int current, bool running, bool done) {
+    const int n = int(state->badges.size());
+    for (int i = 0; i < n; ++i) {
+      QLabel* b = state->badges[size_t(i)];
+      const bool now = running && i == current;
+      const bool past = done || (running && i < current);
+      b->setStyleSheet(now    ? QStringLiteral("QLabel{background:#2680eb;color:#ffffff;border-radius:10px;font-weight:600;}")
+                       : past ? QStringLiteral("QLabel{background:#22402c;border-radius:10px;}")
+                              : QStringLiteral("QLabel{background:#2a2f36;color:#8a96a6;border-radius:10px;}"));
+      if (past) b->setPixmap(theme::iconPixmap(QStringLiteral("check"), 12, theme::ok, dpr));
+      else b->setText(QString::number(i + 1));
+      b->setAccessibleName(QStringLiteral("手順 %1%2").arg(i + 1).arg(now ? QStringLiteral("（今の手順）") : past ? QStringLiteral("（済み）") : QString()));
+    }
+    state->status->setText(running ? QStringLiteral("画面の矢印の所を押すと、次へ進みます（Esc でやめる）")
+                           : done  ? QStringLiteral("案内が終わりました")
+                                   : QStringLiteral("案内をやめました"));
+    state->stop->setVisible(running);
+    state->next->setVisible(running && current < n - 1);
+  };
+  connect(guide_, &GuideController::progressed, card, [state, refresh](int session, int current, int count) {
+    if (session == state->session) refresh(current, current < count, current >= count);
+  });
+  connect(guide_, &GuideController::ended, card, [state, refresh](int session, bool finished) {
+    if (session == state->session) refresh(-1, false, finished);
+  });
+  // 今の手順を画面で示せないとき（出ていないメニュー など）は、その理由を出す
+  auto notice = [state](const QString& message) {
+    state->status->setText(message.isEmpty() ? QStringLiteral("画面の矢印の所を押すと、次へ進みます（Esc でやめる）")
+                                             : QStringLiteral("この手順は、今の画面では示せません（%1）。「次へ」で飛ばせます").arg(message));
+  };
+  connect(guide_, &GuideController::noticed, card, [state, notice](int session, const QString& message) {
+    if (session == state->session) notice(message);
+  });
+  connect(state->stop, &QPushButton::clicked, card, [this, state] {
+    if (guide_ && guide_->session() == state->session) guide_->stop();
+  });
+  connect(state->next, &QPushButton::clicked, card, [this, state] {
+    if (guide_ && guide_->session() == state->session) guide_->next();
+  });
+  auto begin = [this, state, refresh, notice] {
+    if (!guide_) return;
+    // 始めるときの知らせ（progressed・noticed）は、番号を受け取る前に届くので、ここで出し直す
+    state->session = guide_->start(state->steps);
+    refresh(guide_->current(), guide_->active(), false);
+    if (guide_->active() && !guide_->notice().isEmpty()) notice(guide_->notice());
+  };
+  connect(state->replay, &QPushButton::clicked, card, begin);
+  addItem(card);
+  begin();
 }
 
 void AiPanel::addChoices(const ai::ChoiceSet& set) {
@@ -1585,6 +1714,8 @@ void AiPanel::clearConversation() {
   autoCompare_.reset();
   assistant_->reset();
   stopPanelPreview();
+  // 案内の欄も消えるので、画面の案内もやめる
+  if (guide_) guide_->stop();
   // はじめの説明と最後の伸縮だけを残す
   while (items_->count() > 2) {
     QLayoutItem* it = items_->takeAt(1);

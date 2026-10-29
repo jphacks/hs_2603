@@ -1,6 +1,6 @@
 #pragma once
 // AI サーバーにログインする画面: ログイン・新規登録・パスワードの変更。
-// サーバーのアドレスは .env の KANTAN_AI_SERVER か exe に組み込んだもので決め、画面には出さない（つながらないときだけ、その理由を出す）。
+// サーバーのアドレスは .env の E_EDITOR_AI_SERVER か exe に組み込んだもので決め、画面には出さない（つながらないときだけ、その理由を出す）。
 // 起動したとき（ログインしていなければ）と、右下の「AI サーバー」・AI の欄から開く。
 
 #include <QDialog>
@@ -31,7 +31,7 @@ class AccountDialog : public QDialog {
   void refreshLink();
   /** 新規登録を受け付けているかに合わせて、「登録する」を押せるようにする */
   void refreshRegistration();
-  /** サーバーのアドレスに問題があれば、その文（.env の KANTAN_AI_SERVER を直してもらう） */
+  /** サーバーのアドレスに問題があれば、その文（.env の E_EDITOR_AI_SERVER を直してもらう） */
   QString serverProblem() const;
   void submitLogin();
   void submitRegister();

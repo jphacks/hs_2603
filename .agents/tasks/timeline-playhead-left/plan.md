@@ -34,8 +34,8 @@
 ### 1.3 リポジトリと環境の状態（依頼文と違う点がある）
 - ブランチ `feat/ikumu1`。HEAD は 1f7d805 で `origin/feat/ikumu1` と同じ。調べたときの `git status --porcelain` は空だった。
 - 依頼文にある widgets.h・widgets.cpp・inspector.cpp の変更と `.agents/tasks/inspector-wheel/` は、1f7d805 ですでにコミットされている（作者 tanu196、2026-10-21 13:39）。`.agents/` は追跡されているので、作業が終わったときの `git status` は ` M native/src/ui/timelinewidget.cpp` と `?? .agents/tasks/timeline-playhead-left/` だけになるはず。ほかのファイルには触らない。
-- ユーザーのアプリが起動している（PID 24972、`native\dist\kantan-video-editor\kantan-video-editor.exe`、13:38:17 から）。終了させない。配置もしない（`-NoDeploy` だけ）。`-NoDeploy` は `native\build\kantan-video-editor.exe` だけを作るので、起動中のアプリとはぶつからない。
-- ツール: `C:\kantan-dev`（Qt 6.8.3 mingw_64、MinGW 13.1、FFmpeg、CMake、Ninja）。`Qt6TestConfig.cmake` と `Qt6Test.dll` がある。`native\build` は構成済み（`build.ninja` と `kantan-configure.txt` がある）なので、ビルドは差分だけ。アプリは `-Wall -Wno-unused-parameter` でビルドする。
+- ユーザーのアプリが起動している（PID 24972、`native\dist\e-editor\e-editor.exe`、13:38:17 から）。終了させない。配置もしない（`-NoDeploy` だけ）。`-NoDeploy` は `native\build\e-editor.exe` だけを作るので、起動中のアプリとはぶつからない。
+- ツール: `C:\e-editor-dev`（Qt 6.8.3 mingw_64、MinGW 13.1、FFmpeg、CMake、Ninja）。`Qt6TestConfig.cmake` と `Qt6Test.dll` がある。`native\build` は構成済み（`build.ninja` と `e-editor-configure.txt` がある）なので、ビルドは差分だけ。アプリは `-Wall -Wno-unused-parameter` でビルドする。
 - テストの仕組みはリポジトリにない（README の「開発の始め方」にもない）。前回と同じく、リポジトリの外に一時的なハーネスを作る。
 
 ## 2. 決めたこと
@@ -55,20 +55,20 @@
 - execute_pwsh の画面はコマンドを何度も表示して出力が切れることがある。ビルドとハーネスの出力はログファイルに書き、最後に終了コードの目印を足して、読み取りツールで読む。パスはすべて絶対パスで書き、git は `git -C c:\git\JPHACK\e-editor` で呼ぶ。
 - アプリのビルド（コンパイルだけ。配置しない）:
   ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy 2>&1 | Out-File -Encoding utf8 C:\kantan-dev\tmp\kv-playhead\build.log; "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\kantan-dev\tmp\kv-playhead\build.log
+  powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy 2>&1 | Out-File -Encoding utf8 C:\e-editor-dev\tmp\kv-playhead\build.log; "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\e-editor-dev\tmp\kv-playhead\build.log
   ```
   成功の条件: ログの最後の行が `BUILD-EXIT=0` で、`error:` がなく、timelinewidget.cpp の `warning:` もない。ログの日本語は文字化けしてもかまわない。
 - ハーネス（`<phase>` は `baseline` か `fixed`）:
   ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File C:\kantan-dev\tmp\kv-playhead\run.ps1 2>&1 | Out-File -Encoding utf8 C:\kantan-dev\tmp\kv-playhead\run-<phase>.log; "RUN-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\kantan-dev\tmp\kv-playhead\run-<phase>.log
+  powershell -NoProfile -ExecutionPolicy Bypass -File C:\e-editor-dev\tmp\kv-playhead\run.ps1 2>&1 | Out-File -Encoding utf8 C:\e-editor-dev\tmp\kv-playhead\run-<phase>.log; "RUN-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\e-editor-dev\tmp\kv-playhead\run-<phase>.log
   ```
   1 回目はアプリのソースを全部コンパイルするので、タイムアウトは 1800000 ms にする。ハーネスは 900x328 の小さなウィンドウを 1〜2 秒出す。その間、マウスをそのウィンドウの上で動かさない（ドラッグ中に本物のマウスの動きが混ざるため。ウィンドウは今のカーソルの位置を避けて出す）。
 
 ## 4. 計画
 
 - [ ] 1. ハーネスを作り、修正前のコードで基準をとる。
-      `C:\kantan-dev\tmp\kv-playhead\` に付録 A の 3 ファイルを作る: `CMakeLists.txt`、`playheadcheck.cpp`（UTF-8 BOM なし）、`run.ps1`（ASCII だけ）。パスは ASCII にする（ユーザーの %TEMP% には日本語が入っていて、MinGW が動かない）。このステップではリポジトリのファイルに触らない。
-      Files: C:\kantan-dev\tmp\kv-playhead\CMakeLists.txt, playheadcheck.cpp, run.ps1（一時ファイル）
+      `C:\e-editor-dev\tmp\kv-playhead\` に付録 A の 3 ファイルを作る: `CMakeLists.txt`、`playheadcheck.cpp`（UTF-8 BOM なし）、`run.ps1`（ASCII だけ）。パスは ASCII にする（ユーザーの %TEMP% には日本語が入っていて、MinGW が動かない）。このステップではリポジトリのファイルに触らない。
+      Files: C:\e-editor-dev\tmp\kv-playhead\CMakeLists.txt, playheadcheck.cpp, run.ps1（一時ファイル）
       Verify: 3 章のハーネスのコマンドを `<phase>` = `baseline` で実行し、`run-baseline.log` を読む。期待する結果は、最後が `RESULT: 11 check(s) FAILED` と `RUN-EXIT=1`。
       - FAIL になる 11 行（修正前は線とつまみが見出しと角に隠れ、角のクリックは無視されるため）:
         - `e: red line is drawn over the header column at x=60 (all rows)`
@@ -87,7 +87,7 @@
       - `note: saved ...ref-e-normal.png` と `note: saved ...ref-e-hidden.png` が出る（修正前の画像を基準として保存する）。
       - `note: device pixel ratio 1.25`（このマシンの値）が出る。`setup: mouse events land at the intended viewport position` は OK になる。
       OK になるはずの行が FAIL になったり、FAIL の数が違ったりしたら、ハーネスが間違っている。アプリではなくハーネスを直し、`shots\ref-*.png` を消してから、基準が合うまで繰り返す。
-      合ったら、修正前の画像を残す: `New-Item -ItemType Directory -Force C:\kantan-dev\tmp\kv-playhead\shots\baseline | Out-Null; Copy-Item C:\kantan-dev\tmp\kv-playhead\shots\*.png C:\kantan-dev\tmp\kv-playhead\shots\baseline\ -Exclude ref-*`
+      合ったら、修正前の画像を残す: `New-Item -ItemType Directory -Force C:\e-editor-dev\tmp\kv-playhead\shots\baseline | Out-Null; Copy-Item C:\e-editor-dev\tmp\kv-playhead\shots\*.png C:\e-editor-dev\tmp\kv-playhead\shots\baseline\ -Exclude ref-*`
       `shots\baseline\e-head-60.png` と `shots\baseline\c-corner.png` を読み取りツールで開き、赤い線が x < 108 の見出しの上に出ていないこと（修正前の問題）を目で確かめる。
 
 - [ ] 2. timelinewidget.cpp を付録 B のとおりに変える。手順 1 のあとに行う。
@@ -100,7 +100,7 @@
       失敗したら、アプリのコードを直して手順 2 と 3 をやり直す。ハーネスの期待値を変えて通すことはしない（失敗の原因がハーネスにあると示せるときだけ、ハーネスを直し、手順 1 の基準からやり直す）。
 
 - [ ] 4. 修正後の画像を目で見て確かめる。手順 3 のあとに行う。
-      `C:\kantan-dev\tmp\kv-playhead\shots\` の次の PNG を読み取りツールで開く。画像は DPR 1.25 の実ピクセルで、横 1125px ぐらいある。
+      `C:\e-editor-dev\tmp\kv-playhead\shots\` の次の PNG を読み取りツールで開く。画像は DPR 1.25 の実ピクセルで、横 1125px ぐらいある。
       - `e-head-60.png`: 赤い線が、見出しの列の上（左から 60 の位置）を、テキスト・ビデオ・オーディオの 3 行とその下まで通っている。目盛りの行の左上の角に赤いつまみがある。見出しは不透明な濃い灰色で、アイコンと「テキスト」「ビデオ」「オーディオ」が読める（線が通るところだけ赤）。見出しの下のクリップ（青）・テキスト（茶）・オーディオ（緑）は見出しから透けていない。左上の「0:12」が読める。
       - `e-head-left.png`: 線とつまみが画面の一番左端にある。
       - `c-corner.png`: つまみが左上の角の「0:12」の上に重なっていて、「0:12」は重なっていない部分が見えている。線が見出しの上を通っている。
@@ -109,12 +109,12 @@
       見た結果を（チェックの OK と合わせて）最後の報告に書く。
 
 - [ ] 5. 一時ファイルを消し、作業ツリーを確かめる。
-      `Remove-Item -Recurse -Force -LiteralPath 'C:\kantan-dev\tmp\kv-playhead'` を実行する。手順 1 で作ったこのフォルダーだけを消す。`C:\kantan-dev\tmp` のほかのものには触らない。
+      `Remove-Item -Recurse -Force -LiteralPath 'C:\e-editor-dev\tmp\kv-playhead'` を実行する。手順 1 で作ったこのフォルダーだけを消す。`C:\e-editor-dev\tmp` のほかのものには触らない。
       Verify:
-      - `Test-Path 'C:\kantan-dev\tmp\kv-playhead'` が False。
+      - `Test-Path 'C:\e-editor-dev\tmp\kv-playhead'` が False。
       - `git -C c:\git\JPHACK\e-editor status --short` が ` M native/src/ui/timelinewidget.cpp` と、このワークフローの `?? .agents/tasks/timeline-playhead-left/` だけを出す。
       - `git -C c:\git\JPHACK\e-editor diff` に付録 B の変更だけがある（printf、qDebug、ハーネスのコードがない）。`git -C c:\git\JPHACK\e-editor diff --check` が何も出さない。何もコミットしない。
-      - ユーザーのアプリ（kantan-video-editor.exe）は起動したまま。配置していないので `native\dist` は古いまま。
+      - ユーザーのアプリ（e-editor.exe）は起動したまま。配置していないので `native\dist` は古いまま。
 
 ## 5. ユーザーが自分で確かめる手順（最後の報告にこのまま書く）
 1. アプリを閉じてから `build.cmd` をダブルクリックします（今回は起動中のアプリを止めないよう、配置をしていないので、`native\dist` の exe はまだ古いままです）。
@@ -138,7 +138,7 @@
 - 押すたびにタイムスタンプを 6 秒進め、意図しないダブルクリックが起きないようにする（`delay` は時刻を進めるだけで、実際には待たない）。
 - 配置: 幅 900、viewport の高さ 270 前後。拡大率は 60 px/秒（「全体を表示」が走るので決め直す）。クリップ A 0〜6 秒、B 6〜12 秒、テキスト 0〜3 秒、オーディオ 0〜8 秒。スクロール 120 のとき、見出しの下は 0.2〜2.0 秒で、3 つともその下にある。行の位置: 目盛り 0〜26、テキスト 26〜58、ビデオ 58〜124、オーディオ 124〜170。
 
-`C:\kantan-dev\tmp\kv-playhead\CMakeLists.txt`:
+`C:\e-editor-dev\tmp\kv-playhead\CMakeLists.txt`:
 ```cmake
 # Temporary harness for the playhead fix. Delete this folder when done.
 cmake_minimum_required(VERSION 3.21)
@@ -150,7 +150,7 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Svg Network Test)
 
 set(KV "C:/git/JPHACK/e-editor/native")
-set(FFMPEG_DIR "C:/kantan-dev/ffmpeg")
+set(FFMPEG_DIR "C:/e-editor-dev/ffmpeg")
 add_library(ffmpeg INTERFACE)
 target_include_directories(ffmpeg INTERFACE "${FFMPEG_DIR}/include")
 foreach(lib avformat avcodec avutil swscale swresample avfilter)
@@ -169,11 +169,11 @@ target_compile_definitions(kv-playhead PRIVATE UNICODE _UNICODE NOMINMAX KV_VERS
 target_link_libraries(kv-playhead PRIVATE Qt6::Widgets Qt6::Svg Qt6::Network Qt6::Test ffmpeg miniaudio ole32 shell32 uuid)
 ```
 
-`C:\kantan-dev\tmp\kv-playhead\run.ps1`（ASCII だけ。子の powershell で動くので、環境変数の変更は残らない）:
+`C:\e-editor-dev\tmp\kv-playhead\run.ps1`（ASCII だけ。子の powershell で動くので、環境変数の変更は残らない）:
 ```powershell
 # Temporary: build and run the playhead check harness. Delete this folder when done.
 $ErrorActionPreference = 'Continue'
-$d = 'C:\kantan-dev'
+$d = 'C:\e-editor-dev'
 $h = Join-Path $d 'tmp\kv-playhead'
 $env:PATH = "$d\Qt\Tools\mingw1310_64\bin;$d\Qt\6.8.3\mingw_64\bin;$d\ffmpeg\bin;$env:PATH"
 $env:TEMP = $env:TMP = Join-Path $d 'tmp'
@@ -191,7 +191,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "build failed ($LASTEXITCODE)"; exit 3 }
 exit $LASTEXITCODE
 ```
 
-`C:\kantan-dev\tmp\kv-playhead\playheadcheck.cpp`（UTF-8 BOM なし。表示する文字は ASCII だけ）:
+`C:\e-editor-dev\tmp\kv-playhead\playheadcheck.cpp`（UTF-8 BOM なし。表示する文字は ASCII だけ）:
 ```cpp
 // 一時的な確認用（再生ヘッドを見出しの列の上まで動かせるか）。確認が終わったらフォルダーごと消す
 #include <QApplication>
@@ -223,7 +223,7 @@ static constexpr int kVideoMid = 91;   // ビデオの行 58..124
 static constexpr int kAudioMid = 147;  // オーディオの行 124..170
 static constexpr int kTracksEnd = 170;
 static constexpr double kPps = 60;
-static const char* const kShots = "C:/kantan-dev/tmp/kv-playhead/shots";
+static const char* const kShots = "C:/e-editor-dev/tmp/kv-playhead/shots";
 
 static int failures = 0;
 static int mismatches = 0;

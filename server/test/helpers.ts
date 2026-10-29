@@ -27,7 +27,7 @@ export type TestDb = { url: string; stop: () => Promise<void> };
 
 /** 一時フォルダーに PostgreSQL を作って起動する（テストが終わったら消す） */
 export async function startPostgres(): Promise<TestDb> {
-  const dir = await mkdtemp(path.join(tmpdir(), 'kantan-pg-'));
+  const dir = await mkdtemp(path.join(tmpdir(), 'e-editor-pg-'));
   const port = await freePort();
   const pg = new EmbeddedPostgres({
     databaseDir: path.join(dir, 'data'),
@@ -40,9 +40,9 @@ export async function startPostgres(): Promise<TestDb> {
   });
   await pg.initialise();
   await pg.start();
-  await pg.createDatabase('kantan_test');
+  await pg.createDatabase('e_editor_test');
   return {
-    url: `postgres://postgres:test-password@127.0.0.1:${port}/kantan_test`,
+    url: `postgres://postgres:test-password@127.0.0.1:${port}/e_editor_test`,
     stop: async () => {
       await pg.stop();
       await rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -127,7 +127,7 @@ export async function startServer(databaseUrl: string, env: Record<string, strin
 
 /** 管理画面のふりをして呼ぶ（クッキーと、管理画面の印のヘッダー） */
 export function adminHeaders(cookie: string, change = true): Record<string, string> {
-  return { cookie, ...(change ? { 'x-kantan-admin': '1' } : {}) };
+  return { cookie, ...(change ? { 'x-e-editor-admin': '1' } : {}) };
 }
 
 export function cookieOf(res: { headers: Record<string, unknown> }): string {

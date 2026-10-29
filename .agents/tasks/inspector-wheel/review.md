@@ -17,7 +17,7 @@ Reviewed: the user request, plan.md, `git diff` / `git status`, verification.md,
 6. Working tree:
    - HEAD 6020166 equals origin/feat/ikumu1. The reflog shows no commit after the 2026-10-20 checkout, and the stash is empty.
    - `status` lists only the 3 intended files plus `.agents/`. The only ignored entries are the existing `native/build/` and `native/dist/`.
-   - `C:\kantan-dev\tmp\kv-wheelcheck` is gone (Test-Path False).
+   - `C:\e-editor-dev\tmp\kv-wheelcheck` is gone (Test-Path False).
    - `.agents/` holds only plan.md and verification.md.
    - The diff contains no debug or test code.
 

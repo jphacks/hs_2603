@@ -14,7 +14,7 @@ Request (2026-10-24): "自分が作ったテキスト（フォント設定、色
 - Server rebuilds the style from known keys only (enums, colors `#rrggbb`, numeric clamps = app's textFromJson/propLimits ranges, ≤100 keyframes per prop, fontFamily ≤100). No text content is ever stored (only name/description). Author shown = display name (never the email; empty → 名前なし).
 - App API: GET/POST /api/workshop/templates, DELETE /api/workshop/templates/:id (owner), POST …/:id/use, POST …/:id/report. Admin: GET /api/admin/workshop, PATCH /api/admin/workshop/:id {status, clearReports}, DELETE; settings GET/PATCH gain `workshop {mode}`. Health gains `workshop` (mode) and api 3.
 - App: `ai/workshop.*` client; `TextTemplates` keeps per-template meta (workshopId of a downloaded one + author, publishedId of my published one); `ui/workshopdialog.*` (browse dialog + publish dialog); library text tab button; template right-click menu gains publish/unpublish.
-- Installer: per-machine. RequestExecutionLevel admin, `$PROGRAMFILES64\kantan-video-editor-cpp`, SetShellVarContext all, HKLM (64-bit view) for uninstall + .kvproj, remove an old per-user install first, finish page launches the app unelevated (via explorer.exe) so drag & drop from Explorer keeps working.
+- Installer: per-machine. RequestExecutionLevel admin, `$PROGRAMFILES64\e-editor-cpp`, SetShellVarContext all, HKLM (64-bit view) for uninstall + .kvproj, remove an old per-user install first, finish page launches the app unelevated (via explorer.exe) so drag & drop from Explorer keeps working.
 
 ## Progress
 - [x] server: 003_workshop.sql, settings (workshop mode), src/workshop.ts (sanitizeStyle), routes/workshop.ts, admin routes (list/patch/delete, settings, overview counts), health `workshop` + api 3; tests 34/34 (7 new), tsc OK
@@ -37,7 +37,7 @@ Request: "オーディオとかもワークショップに追加できるよう�
 - Upload: raw `application/octet-stream` to `POST /api/workshop/audio?name=&description=&fileName=&duration=`; format from magic bytes (`detectAudio`), not the extension. Limits: 1KB–20MB and ≤30 min per file, 200MB per user, 100 items per user (text + audio); downloads 300/h per user.
 - Old apps: `GET /api/workshop/templates` without `kind` returns text only. New app on an old server: the app filters by kind (audio list empty) and a 404 from `POST /api/workshop/audio` says the server is old.
 - Rights: the audio publish dialog requires 「自分で作った音か、公開してよいと許可されている音です」; report + admin listen/hide/delete.
-- Downloaded audio: `%LOCALAPPDATA%\JPHACKS\kantan-video-editor\workshop\audio\<id>\<name>.<type>` (not the cache: projects reference it). Workshop audio cannot be republished.
+- Downloaded audio: `%LOCALAPPDATA%\JPHACKS\e-editor\workshop\audio\<id>\<name>.<type>` (not the cache: projects reference it). Workshop audio cannot be republished.
 - UI: menu bar 「ワークショップ(W)」 between 表示 and ヘルプ (テキストのテンプレートを探す... / オーディオを探す...), visible when `ai::workshopVisible()`. It opens one non-modal window (QWidget with Qt::Window, owned by the main window; not QDialog so Enter in the search box can't press a card button). Segmented kind switch, Esc closes, closing stops a workshop preview, reopening reloads. The text tab's 「ワークショップ」 button opens the same window. The perspective changes made for the left tab were reverted.
 - Admin page: kind tag + filter, `<audio controls preload=none>` sample (210px wide so the action column fits), kind-neutral texts (overview notice, audit labels, delete confirm, not-found messages).
 

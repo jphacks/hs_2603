@@ -1,7 +1,7 @@
 #pragma once
 // ワークショップ: 自分で作ったテキストのテンプレート（見た目・登場のアニメーション・キーフレーム。文字そのものは送らない）と、
 // オーディオ（BGM・効果音など）を AI サーバーで公開し、ほかの人が公開したものを探して、マイテンプレート・オーディオの一覧に追加して使う。
-// 追加したオーディオのファイルは %LOCALAPPDATA%\JPHACKS\kantan-video-editor\workshop\audio\<ID>\ に置く（プロジェクトがそのファイルを使う）。
+// 追加したオーディオのファイルは %LOCALAPPDATA%\JPHACKS\e-editor\workshop\audio\<ID>\ に置く（プロジェクトがそのファイルを使う）。
 // AI サーバーのアカウントでログインして使う（AI を使えないアカウントでも使える）。使い方（すぐ公開・管理者が確認してから公開・使えない）は、
 // AI サーバーの管理画面で決める。通信は ServerCall を通す。
 
@@ -58,7 +58,7 @@ const QStringList& workshopAudioExtensions();
 constexpr qint64 kWorkshopAudioMaxBytes = 20LL * 1024 * 1024;
 /** 公開できるオーディオの長さの上限（秒。サーバーと同じ） */
 constexpr double kWorkshopAudioMaxSeconds = 30 * 60;
-/** ワークショップから追加したオーディオを置くフォルダー（%LOCALAPPDATA%\JPHACKS\kantan-video-editor\workshop\audio） */
+/** ワークショップから追加したオーディオを置くフォルダー（%LOCALAPPDATA%\JPHACKS\e-editor\workshop\audio） */
 QString workshopAudioDir();
 /** ワークショップのオーディオ id を、もう手元に置いてあれば、そのファイル（無ければ空） */
 QString workshopAudioFile(const QString& id);
@@ -69,7 +69,7 @@ bool isWorkshopAudio(const QString& path);
 constexpr qint64 kWorkshopImageMaxBytes = 10LL * 1024 * 1024;
 /** 公開する写真の大きさ: フル HD（横長なら 1920×1080、縦長なら 1080×1920）に収まるように縮めた大きさ（収まっていればそのまま） */
 QSize workshopImageSize(const QSize& size);
-/** ワークショップから追加した写真を置くフォルダー（%LOCALAPPDATA%\JPHACKS\kantan-video-editor\workshop\image） */
+/** ワークショップから追加した写真を置くフォルダー（%LOCALAPPDATA%\JPHACKS\e-editor\workshop\image） */
 QString workshopImageDir();
 /** ワークショップの写真 id を、もう手元に置いてあれば、そのファイル（無ければ空） */
 QString workshopImageFile(const QString& id);
@@ -80,7 +80,7 @@ bool isWorkshopImage(const QString& path);
 constexpr qint64 kWorkshopVideoMaxBytes = 30LL * 1024 * 1024;
 constexpr double kWorkshopVideoMaxSeconds = 15;
 constexpr double kWorkshopVideoSlack = 0.5;
-/** ワークショップから追加した動画を置くフォルダー（%LOCALAPPDATA%\JPHACKS\kantan-video-editor\workshop\video） */
+/** ワークショップから追加した動画を置くフォルダー（%LOCALAPPDATA%\JPHACKS\e-editor\workshop\video） */
 QString workshopVideoDir();
 /** ワークショップの動画 id を、もう手元に置いてあれば、そのファイル（無ければ空） */
 QString workshopVideoFile(const QString& id);

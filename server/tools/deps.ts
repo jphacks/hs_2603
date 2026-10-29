@@ -1,6 +1,6 @@
 // ライブラリ（node_modules）を package-lock.json のとおりに入れる。tools/supervisor.ts と create-admin.cmd が使う。
 //   node --experimental-strip-types tools/deps.ts   入っていない・古いときだけ入れる
-// 入れたときの package.json と package-lock.json の印を node_modules/.kantan-deps.json に残して、変わったかを見分ける。
+// 入れたときの package.json と package-lock.json の印を node_modules/.e-editor-deps.json に残して、変わったかを見分ける。
 // 開発用のライブラリ（TypeScript など）が入っていれば、入れ直すときも入れる（入っていなければ、サーバーに要るものだけ）。
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -14,7 +14,7 @@ const runtime = path.join(serverDir, '.runtime');
 /** サーバーを動かしたまま入れるときの作業場所と、入れ替えた前のもの */
 const NEXT = path.join(runtime, 'next');
 const PREVIOUS = path.join(runtime, 'previous');
-const STAMP = '.kantan-deps.json';
+const STAMP = '.e-editor-deps.json';
 const FILES = ['package.json', 'package-lock.json'];
 
 function signature(dir: string): string {

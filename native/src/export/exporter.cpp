@@ -12,10 +12,17 @@
 #include <cmath>
 
 #include "core/editor.h"
+#include "core/effects.h"
 #include "core/filters.h"
 #include "core/timeline.h"
+#include "mask/masktrack.h"
 #include "media/ffutil.h"
+#include "render/compositor.h"
+#include "render/maskframes.h"
 #include "render/textrender.h"
+
+#include <atomic>
+#include <thread>
 
 namespace kv {
 
@@ -25,7 +32,9 @@ ExportCheck checkExportable() {
   if (p.clips.empty()) return {false, QStringLiteral("クリップがありません")};
   std::vector<QString> used;
   for (const auto& c : p.clips) used.push_back(c.assetId);
-  for (const auto& o : p.overlays) used.push_back(o.assetId);
+  for (const auto& o : p.overlays) {
+    if (!o.isEffectLayer()) used.push_back(o.assetId);  // エフェクトレイヤーは素材を使わない
+  }
   for (const auto& a : p.audios) used.push_back(a.assetId);
   for (const auto& id : used) {
     const Asset* a = ed.asset(id);
@@ -40,7 +49,7 @@ ExportCheck checkExportable() {
 QString ffmpegPath() {
   const QString local = QCoreApplication::applicationDirPath() + QStringLiteral("/ffmpeg.exe");
   if (QFileInfo::exists(local)) return local;
-  const QString env = qEnvironmentVariable("KANTAN_FFMPEG");
+  const QString env = qEnvironmentVariable("E_EDITOR_FFMPEG");
   if (!env.isEmpty() && QFileInfo::exists(env)) return env;
   const QString found = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
   return found;
@@ -108,6 +117,85 @@ static bool writeSpacingSequence(const ExportRequest& req, const TextItem& t, Te
   return true;
 }
 
+/**
+ * オブジェクトマスクの PNG（Grayscale8、素材の大きさ。反転したあとの向き）を、[cNsrc]（素材を readStart から読み、速さで割って lead 秒ずらし、
+ * fps で frames 枚にしたもの）のフレームと 1 対 1 で書く。pattern は objmask-…-%05d.png の形で、0 番から並べる（写真は pattern の 1 枚）。
+ * n 番のフレームは、ffmpeg の fps と同じく「(素材の時刻 - readStart) / speed + lead を FPS で四捨五入した番号が n 以下のうち、最後のフレーム」
+ * （無ければ最初のフレーム）。トラックした範囲の外は、端のマスクのまま（プレビューと同じ）。描くのは同じマスクの 1 回だけで、ほかは写す。書けたら true
+ */
+static bool writeObjectMaskFrames(const VideoClip& c, const Asset& a, const mask::MaskTrack& track, double readStart, double lead, int frames, int fps,
+                                  QSize size, const QString& pattern) {
+  if (frames <= 0 || track.empty()) return false;
+  auto fileOf = [&](int n) {
+    QString f = pattern;
+    f.replace(QStringLiteral("%05d"), QStringLiteral("%1").arg(n, 5, 10, QLatin1Char('0')));
+    return f;
+  };
+  // 書き出しの各フレームに使う、素材のフレーム（マスクの番号）
+  const int count = int(track.frames.size());
+  std::vector<int> pick(size_t(c.isImage ? 1 : frames), 0);
+  if (!c.isImage) {
+    const double speed = std::max(1e-6, c.speed);
+    // -ss で読み始めの位置より前のフレームは捨てられる（残る最初のフレームが、始まりの隙間も埋める）
+    int i = 0;
+    while (i + 1 < count && track.frames[size_t(i)].pts < readStart - 1e-6) ++i;
+    for (int n = 0; n < frames; ++n) {
+      // 四捨五入（ちょうど半分は切り上げ）した番号が n 以下 ⇔ 時刻が (n + 0.5) / fps より前
+      const double limit = readStart + ((n + 0.5) / fps - lead) * speed - 1e-7;
+      while (i + 1 < count && track.frames[size_t(i + 1)].pts < limit) ++i;
+      pick[size_t(n)] = i;
+    }
+  }
+  // 同じマスクは 1 回だけ描く（素材のフレームレートが書き出しより低いと、同じフレームが続く）
+  std::vector<int> unique;
+  std::vector<size_t> slot(pick.size());
+  for (size_t n = 0; n < pick.size(); ++n) {
+    if (unique.empty() || unique.back() != pick[n]) unique.push_back(pick[n]);
+    slot[n] = unique.size() - 1;
+  }
+  std::vector<QString> drawn(unique.size());
+  std::atomic<size_t> next{0};
+  std::atomic<int> running{0};
+  std::atomic<bool> ok{true};
+  auto worker = [&] {
+    for (size_t u = next++; u < unique.size() && ok; u = next++) {
+      const int index = unique[u];
+      FrameMask fm = frameMaskFor(c, &a, c.isImage ? 0.0 : track.frames[size_t(index)].pts);
+      if (!fm.logits) fm.logits = track.logits(index);
+      const QImage img = frameMaskImage(fm, size, c);
+      const QString file = c.isImage ? pattern : pattern + QStringLiteral(".u%1.png").arg(u);
+      if (!img.save(file, "PNG", 90)) ok = false;
+      drawn[u] = file;
+    }
+    --running;
+  };
+  {
+    const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, 16);
+    running = threads;
+    std::vector<std::thread> pool;
+    for (int i = 0; i < threads; ++i) pool.emplace_back(worker);
+    // 描いている間も、ときどき画面を描き直す（固まっているように見せない。操作は受け付けない）
+    while (running.load() > 0) {
+      QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 30);
+      std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+    for (auto& th : pool) th.join();
+  }
+  if (!ok) return false;
+  if (c.isImage) return true;
+  QElapsedTimer pump;
+  pump.start();
+  for (int n = 0; n < frames; ++n) {
+    if (!QFile::copy(drawn[slot[size_t(n)]], fileOf(n))) return false;
+    if (pump.elapsed() > 100) {
+      QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+      pump.restart();
+    }
+  }
+  for (const QString& f : drawn) QFile::remove(f);
+  return true;
+}
+
 Exporter::Exporter(QObject* parent) : QObject(parent) {}
 
 Exporter::~Exporter() {
@@ -118,7 +206,7 @@ Exporter::~Exporter() {
   }
 }
 
-bool Exporter::start(const QString& outputPath, ExportQuality quality, int shortSide, QString* error, bool rangeOnly) {
+bool Exporter::start(const QString& outputPath, ExportQuality quality, int shortSide, QString* error, bool rangeOnly, ExportFormat format) {
   if (proc_) {
     if (error) *error = QStringLiteral("別の書き出しを実行中です");
     return false;
@@ -130,7 +218,8 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
   }
   const Editor& ed = editor();
   const ProjectData& p = ed.project();
-  const QSize out = exportSize(p.settings.aspect, shortSide);
+  // 音だけの形式では、映像は組み立てても使わない（捨てる）ので、小さな大きさで組み立てて早く終える
+  const QSize out = exportSize(p.settings.aspect, exportFormatInfo(format).video ? shortSide : 144);
   const QSize design = designSize(p.settings.aspect);
   const TimelineLayout& layout = ed.layout();
 
@@ -140,6 +229,7 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
   req.height = out.height();
   req.fps = p.settings.fps;
   req.quality = quality;
+  req.format = format;
   req.duration = layout.total;
   req.speed = p.settings.speed;  // 動画全体の再生速度
   if (rangeOnly) {
@@ -151,6 +241,13 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
     req.rangeStart = range->start;
     req.rangeEnd = range->end;
   }
+  // 文字・エフェクトの範囲などの画像を書く一時フォルダー（書き出しが終わったら消す）
+  work_ = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/e-editor-export-XXXXXX"));
+  if (!work_->isValid()) {
+    if (error) *error = QStringLiteral("一時フォルダを作れません");
+    return false;
+  }
+  req.tempDir = work_->path();
   QHash<QString, QString> colorParams;  // 同じ素材を何度も開かない
   // ビデオクリップ 1 つ分（メインのトラックも重ねるトラックも、映像の設定は同じ）
   auto toExportClip = [&](const VideoClip& c, const Asset* a, double duration, bool forceLayer) {
@@ -161,8 +258,12 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
     ec.in = c.in;
     ec.duration = duration;
     ec.speed = c.isImage ? 1 : c.speed;
-    ec.volume = c.muted ? 0 : c.volume;
-    if (!c.muted) ec.points = c.volumePoints;
+    // メインのビデオの音を消している（トラックのミュート）ときも、クリップのミュートと同じ
+    const bool muted = c.muted || (!forceLayer && p.mainAudioMuted);
+    ec.volume = muted ? 0 : c.volume;
+    if (!muted) ec.points = c.volumePoints;
+    ec.pan = c.pan;
+    ec.hideVideo = !forceLayer && p.mainVideoHidden;
     if (forceLayer || !layerIsPlain(c)) {
       ec.layer.transformed = true;
       ec.layer.x = c.x;
@@ -188,13 +289,39 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
     ec.cropR = c.cropR;
     ec.cropB = c.cropB;
     if (c.chroma.enabled) ec.chroma = c.chroma;
+    // 反転とエフェクト。エフェクトの大きさは素材の大きさで決める（正方ピクセルに直したあとの、偶数の大きさ）
+    ec.flipX = c.flipX;
+    ec.flipY = c.flipY;
+    for (const Effect& e : c.effects) {
+      if (effectActive(e)) ec.effects.push_back(e);
+    }
+    ec.srcW = std::max(0, a->width / 2 * 2);
+    ec.srcH = std::max(0, a->height / 2 * 2);
+    // トランジション（メインのトラックだけ。重ねるトラックでは使わない）
+    if (!forceLayer) ec.transIn = c.transIn;
     return ec;
+  };
+  // オブジェクトマスクを使う映像（フレームごとの PNG は、全部の映像をそろえて、読む範囲が決まってから作る）
+  struct MaskItem {
+    bool overlay = false;
+    size_t index = 0;
+    VideoClip clip;
+    Asset asset;
+    std::shared_ptr<const mask::MaskTrack> track;
+  };
+  std::vector<MaskItem> maskItems;
+  auto noteMask = [&](const VideoClip& c, const Asset* a, bool overlay, size_t index) {
+    if (!a || !c.mask.has() || !c.mask.enabled || c.isImage != (a->kind == AssetKind::Image)) return;
+    if (c.mask.mode == MaskMode::Effects && !anyEffectActive(c.effects)) return;  // 掛けるエフェクトが無い
+    std::shared_ptr<const mask::MaskTrack> t = maskTrackFor(c.mask, a);
+    if (t) maskItems.push_back({overlay, index, c, *a, std::move(t)});
   };
   for (const auto& l : layout.items) {
     const VideoClip& c = l.clip;
     const Asset* a = ed.asset(c.assetId);
     if (!a) continue;
     req.clips.push_back(toExportClip(c, a, l.duration, false));
+    noteMask(c, a, false, req.clips.size() - 1);
   }
   // 重ねるトラック: 段の順（下の段から）、同じ段は時間の順に重ねる。動画の音も、音量・フェード・キーフレームどおりに鳴らす
   std::vector<const OverlayItem*> overlays;
@@ -204,6 +331,51 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
     return a->start < b->start;
   });
   for (const OverlayItem* o : overlays) {
+    // 非表示の段の映像・レイヤーは重ねない（音は、段のミュートで別に決める）
+    const bool hidden = isOverlayHidden(p, *o);
+    if (o->isEffectLayer()) {
+      // エフェクトレイヤー: 範囲の画像を、プレビューと同じ計算で描いておく（動かないなら 1 枚、動くならフレームごとの連番）
+      if (o->start >= layout.total || hidden) continue;
+      const double dur = overlayDuration(*o, p.settings.fps);
+      ExportOverlay eo;
+      eo.effectLayer = true;
+      eo.start = o->start;
+      eo.clip.duration = dur;
+      for (const Effect& e : o->effects) {
+        if (effectActive(e)) eo.clip.effects.push_back(e);
+      }
+      if (!isNeutralColor(o->color)) eo.clip.color = o->color;
+      if (eo.clip.effects.empty() && !eo.clip.color) continue;  // 何も変わらない
+      const int frames = exportTextFrames(req, o->start, dur);
+      if (frames <= 0) continue;
+      const int index = int(req.overlays.size());
+      if (effectLayerMaskStatic(*o)) {
+        const QString png = work_->filePath(QStringLiteral("mask-%1.png").arg(index));
+        if (!effectLayerMask(*o, 0, dur, out).save(png, "PNG", 90)) continue;
+        eo.maskPath = QDir::toNativeSeparators(png);
+      } else {
+        const QString pattern = work_->filePath(QStringLiteral("mask-%1-%2.png").arg(index).arg(QStringLiteral("%05d")));
+        const int fps = exportFps(req);
+        QElapsedTimer pump;
+        pump.start();
+        bool ok = true;
+        for (int f = 0; f < frames && ok; ++f) {
+          QString file = pattern;
+          file.replace(QStringLiteral("%05d"), QStringLiteral("%1").arg(f, 5, 10, QLatin1Char('0')));
+          ok = effectLayerMask(*o, double(f) / fps, dur, out).save(file, "PNG", 90);
+          // 枚数が多いと時間がかかるので、ときどき画面を描き直して、固まっているように見せない（操作は受け付けない）
+          if (pump.elapsed() > 100) {
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            pump.restart();
+          }
+        }
+        if (!ok) continue;
+        eo.maskSequence = true;
+        eo.maskPath = QDir::toNativeSeparators(pattern);
+      }
+      req.overlays.push_back(eo);
+      continue;
+    }
     const Asset* a = ed.asset(o->assetId);
     if (!a || o->start >= layout.total) continue;
     const double dur = overlayDuration(*o, p.settings.fps);
@@ -211,8 +383,11 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
     eo.clip = toExportClip(*o, a, dur, true);
     eo.clip.fit = FitMode::Contain;
     eo.start = o->start;
-    req.overlays.push_back(eo);
-    if (!o->isImage && a->hasAudio && !o->muted && (o->volume > 0.0001 || !o->volumePoints.empty())) {
+    if (!hidden) {
+      req.overlays.push_back(eo);
+      noteMask(*o, a, true, req.overlays.size() - 1);
+    }
+    if (!o->isImage && a->hasAudio && !o->muted && !isOverlayMuted(p, *o) && (o->volume > 0.0001 || !o->volumePoints.empty())) {
       ExportAudio ea;
       ea.path = QDir::toNativeSeparators(a->path);
       ea.start = o->start;
@@ -223,12 +398,13 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
       ea.points = o->volumePoints;
       ea.fadeIn = o->fadeIn;
       ea.fadeOut = o->fadeOut;
+      ea.pan = o->pan;
       req.audios.push_back(ea);
     }
   }
   for (const auto& au : p.audios) {
     const Asset* a = ed.asset(au.assetId);
-    if (!a || au.start >= layout.total) continue;
+    if (!a || au.start >= layout.total || isAudioMuted(p, au)) continue;  // ミュートした段の音は鳴らさない
     ExportAudio ea;
     ea.path = QDir::toNativeSeparators(a->path);
     ea.start = au.start;
@@ -238,20 +414,16 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
     ea.points = au.volumePoints;
     ea.fadeIn = au.fadeIn;
     ea.fadeOut = au.fadeOut;
+    ea.pan = au.pan;
     req.audios.push_back(ea);
   }
 
-  work_ = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/kantan-export-XXXXXX"));
-  if (!work_->isValid()) {
-    if (error) *error = QStringLiteral("一時フォルダを作れません");
-    return false;
-  }
   std::vector<PlannedText> texts;
   int i = 0;
   // 下の段の文字から重ねる（タイムラインの上の段の文字ほど手前。プレビューと同じ順）
   for (const size_t index : textPaintOrder(p.texts)) {
     const TextItem& t = p.texts[index];
-    if (t.start >= layout.total || t.text.trimmed().isEmpty()) continue;
+    if (t.start >= layout.total || t.text.trimmed().isEmpty() || isTextHidden(p, t)) continue;  // 非表示の段の文字は重ねない
     const QString png = work_->filePath(QStringLiteral("text-%1.png").arg(i++));
     PlannedText pt;
     const bool plain = layerIsPlain(t);
@@ -288,6 +460,34 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
     texts.push_back(pt);
   }
 
+  // オブジェクトマスク: 書き出しのフレームごとに、そのフレームに使う素材のフレームのマスクを PNG にする（プレビューと同じ描き方。
+  // 素材の大きさで、反転したあとの向き）。作れなかった映像は、マスクを掛けずに書き出す
+  if (!maskItems.empty()) {
+    const std::vector<ClipReadWindow> windows = mainClipWindows(req);
+    const int fps = exportFps(req);
+    int n = 0;
+    for (const MaskItem& item : maskItems) {
+      ExportClip& ec = item.overlay ? req.overlays[item.index].clip : req.clips[item.index];
+      if (ec.srcW < 2 || ec.srcH < 2) continue;
+      double readStart = 0, lead = 0;
+      int frames = 0;
+      if (item.overlay) {
+        readStart = item.clip.in;
+        frames = exportTextFrames(req, req.overlays[item.index].start, ec.duration);
+      } else {
+        readStart = windows[item.index].readStart;
+        lead = windows[item.index].leadSec;
+        frames = windows[item.index].frames;
+      }
+      const QString base = QStringLiteral("objmask-%1").arg(n++);
+      const QString pattern = item.clip.isImage ? work_->filePath(base + QStringLiteral(".png")) : work_->filePath(base + QStringLiteral("-%05d.png"));
+      if (!writeObjectMaskFrames(item.clip, item.asset, *item.track, readStart, lead, frames, fps, QSize(ec.srcW, ec.srcH), pattern)) continue;
+      ec.maskPath = QDir::toNativeSeparators(pattern);
+      ec.maskSequence = !item.clip.isImage;
+      ec.maskCutout = item.clip.mask.mode == MaskMode::Cutout;
+    }
+  }
+
   ExportPlan plan;
   try {
     plan = buildExportPlan(req, texts);
@@ -311,9 +511,9 @@ bool Exporter::start(const QString& outputPath, ExportQuality quality, int short
   tmpOut_ = outPath_ + QStringLiteral(".part");
   QStringList args{QStringLiteral("-hide_banner"), QStringLiteral("-nostdin"), QStringLiteral("-y"), QStringLiteral("-loglevel"), QStringLiteral("warning")};
   args << plan.inputArgs << graphArgs << plan.outputArgs;
-  args << QStringLiteral("-f") << QStringLiteral("mp4") << QStringLiteral("-progress") << QStringLiteral("pipe:1") << QStringLiteral("-nostats") << tmpOut_;
-  if (qEnvironmentVariableIsSet("KANTAN_DEBUG_EXPORT")) {
-    QFile dbg(QDir::tempPath() + QStringLiteral("/kantan-last-export.txt"));
+  args << QStringLiteral("-f") << plan.muxer << QStringLiteral("-progress") << QStringLiteral("pipe:1") << QStringLiteral("-nostats") << tmpOut_;
+  if (qEnvironmentVariableIsSet("E_EDITOR_DEBUG_EXPORT")) {
+    QFile dbg(QDir::tempPath() + QStringLiteral("/e-editor-last-export.txt"));
     if (dbg.open(QIODevice::WriteOnly)) dbg.write((args.join(QLatin1Char('\n')) + QStringLiteral("\n\n") + plan.filterGraph).toUtf8());
   }
 

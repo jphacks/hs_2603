@@ -44,6 +44,16 @@ class MediaManager : public QObject {
   void loadSession(const ProjectFile& file);
   /** 画像クリップのプレビュー用画像 */
   QImage previewImage(const QString& assetId) const;
+  /**
+   * アプリが作った画像（フレームの保持・カラーマット）を PNG にして、今の編集場所のメディアの一覧に入れる（タイムラインには置かない）。
+   * ファイルは、アプリのデータのフォルダ（generated。キャッシュとは別で、消さない）に置く。足したメディアの ID（書けなければ空）
+   */
+  QString addGeneratedImage(const QImage& image, const QString& name);
+  /**
+   * アプリが作った動画（逆再生の動画など）を、今の編集場所のメディアの一覧に入れる（タイムラインには置かない）。
+   * 同じファイルがもう一覧にあれば、その ID。足したメディアの ID（読めなければ空）
+   */
+  QString addGeneratedVideo(const QString& path, const QString& name);
   /** 読み込み中のメディアがあるか */
   bool busy() const;
   void waitForIdle(int msecs);

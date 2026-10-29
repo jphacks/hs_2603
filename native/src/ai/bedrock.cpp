@@ -19,7 +19,7 @@ void BedrockClient::converse(const Config& config, const QJsonObject& body) {
   cancel();
   if (!config.hasServer()) {
     QMetaObject::invokeMethod(
-        this, [this] { emit failed(QStringLiteral("AI サーバーのアドレスが決まっていません。.env に KANTAN_AI_SERVER=（AI サーバーのアドレス）を書いてください。")); },
+        this, [this] { emit failed(QStringLiteral("AI サーバーのアドレスが決まっていません。.env に E_EDITOR_AI_SERVER=（AI サーバーのアドレス）を書いてください。")); },
         Qt::QueuedConnection);
     return;
   }

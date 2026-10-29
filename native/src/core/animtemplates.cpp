@@ -118,7 +118,7 @@ bool AnimTemplates::save() const {
     animToJson(o, t.anim);
     arr.append(o);
   }
-  const QJsonObject root{{QStringLiteral("app"), QStringLiteral("kantan-video-editor")}, {QStringLiteral("version"), 1}, {QStringLiteral("templates"), arr}};
+  const QJsonObject root{{QStringLiteral("app"), QStringLiteral("e-editor")}, {QStringLiteral("version"), 1}, {QStringLiteral("templates"), arr}};
   const QString path = templatesPath();
   QDir().mkpath(QFileInfo(path).absolutePath());
   QSaveFile f(path);

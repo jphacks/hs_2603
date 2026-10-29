@@ -26,6 +26,8 @@ namespace ai {
 class Assistant;
 }
 
+class GuideController;
+
 /** 見比べて選ぶ案の欄 1 つ分の状態（aipanel.cpp） */
 struct AiChoiceCard;
 
@@ -37,6 +39,8 @@ class AiPanel : public QWidget {
   /** 依頼を送る。shown を指定すると、会話の欄にはその短い文を出す。送れなければ false */
   bool ask(const QString& request, const QString& shown = QString());
   ai::Assistant* assistant() const { return assistant_; }
+  /** 操作の案内（AI が show_guide を使ったら、画面で手順を示す）。ウィンドウが作って渡す */
+  void setGuide(GuideController* guide);
 
  signals:
   void closeRequested();
@@ -54,6 +58,8 @@ class AiPanel : public QWidget {
   void addAction(const QString& text);
   void addError(const QString& text);
   void addIdeas(const QString& kind, const std::vector<ai::TextIdea>& ideas);
+  /** 操作の案内の欄（手順の一覧・やめる・次へ・もう一度）を出して、画面での案内を始める */
+  void addGuide(const std::vector<ai::GuideStep>& steps);
   /** 見比べて選ぶ案（プレビューつき）を出す */
   void addChoices(const ai::ChoiceSet& set);
   /** 案を大きく横に並べた画面を開く（そこからも選べる） */
@@ -138,6 +144,7 @@ class AiPanel : public QWidget {
   QString previewKey_;
   /** 案を当てはめている間（その変更では、選んだ案の見分けをしない） */
   bool choosing_ = false;
+  QPointer<GuideController> guide_;
 };
 
 }  // namespace kv

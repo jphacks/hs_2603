@@ -180,6 +180,13 @@ class CollapsedStrip : public QWidget {
     hide();
   }
   QToolButton* button() const { return button_; }
+  /** タブ index の名前を書いている所（この帯の座標。無ければ空） */
+  QRect rectForTab(int index) const {
+    for (const auto& [r, i] : titleRects()) {
+      if (i == index) return r;
+    }
+    return {};
+  }
 
  protected:
   void resizeEvent(QResizeEvent*) override { button_->move((width() - 1 - button_->width()) / 2, 5); }
@@ -358,7 +365,8 @@ static QJsonObject toJson(const PerspectiveLayout& l) {
                      {QStringLiteral("leftCurrent"), l.leftCurrent},
                      {QStringLiteral("rightCurrent"), l.rightCurrent},
                      {QStringLiteral("leftWidth"), l.leftWidth},
-                     {QStringLiteral("rightWidth"), l.rightWidth}};
+                     {QStringLiteral("rightWidth"), l.rightWidth},
+                     {QStringLiteral("known"), QJsonArray::fromStringList(l.known)}};
 }
 
 static QStringList stringList(const QJsonValue& v) {
@@ -377,6 +385,12 @@ static PerspectiveLayout layoutFromJson(const QJsonObject& o) {
   l.rightCurrent = o.value(QStringLiteral("rightCurrent")).toString();
   l.leftWidth = std::clamp(o.value(QStringLiteral("leftWidth")).toInt(264), 120, 1600);
   l.rightWidth = std::clamp(o.value(QStringLiteral("rightWidth")).toInt(316), 120, 1600);
+  // 「known」が無いのは、ビューが 4 つ（メディア・オーディオ・テキスト・プロパティ）だった版で覚えた並び
+  if (o.contains(QStringLiteral("known"))) {
+    l.known = stringList(o.value(QStringLiteral("known")));
+  } else {
+    l.known = {QStringLiteral("media"), QStringLiteral("audio"), QStringLiteral("text"), QStringLiteral("properties")};
+  }
   return l;
 }
 
@@ -450,7 +464,10 @@ ViewArea* PerspectiveManager::areaContaining(const QString& id) const {
 
 PerspectiveLayout PerspectiveManager::defaultLayout() const {
   PerspectiveLayout l;
-  for (const View& v : views_) (v.home == Side::Left ? l.left : l.right) << v.id;
+  for (const View& v : views_) {
+    (v.home == Side::Left ? l.left : l.right) << v.id;
+    l.known << v.id;
+  }
   l.leftCurrent = l.left.value(0);
   l.rightCurrent = l.right.value(0);
   return l;
@@ -481,6 +498,7 @@ PerspectiveLayout PerspectiveManager::capture() {
   l.rightCurrent = idOf(right_->currentWidget());
   l.leftWidth = leftWidth_;
   l.rightWidth = rightWidth_;
+  for (const View& v : views_) l.known << v.id;
   return l;
 }
 
@@ -501,6 +519,12 @@ void PerspectiveManager::apply(const PerspectiveLayout& layout) {
   };
   place(left_, layout.left, layout.leftCurrent);
   place(right_, layout.right, layout.rightCurrent);
+  // 並びを覚えたあとに増えたビュー（エフェクトなど）は、閉じたのではないので、そのビューの欄の最後に開く
+  for (const View& v : views_) {
+    if (placed.contains(v.id) || layout.known.contains(v.id)) continue;
+    areaOf(v.home)->addTab(v.widget, v.title);
+    placed << v.id;
+  }
   leftWidth_ = layout.leftWidth;
   rightWidth_ = layout.rightWidth;
   left_->setCollapsed(leftCollapsed_);  // 折りたたんでいるかは、並びを変えてもそのまま
@@ -589,6 +613,36 @@ void PerspectiveManager::showView(const QString& id) {
 
 bool PerspectiveManager::leftHasViews() const {
   return left_->count() > 0;
+}
+
+QWidget* PerspectiveManager::viewWidget(const QString& id) const {
+  const View* v = view(id);
+  return v ? v->widget : nullptr;
+}
+
+PerspectiveManager::ViewReach PerspectiveManager::reachView(const QString& id) const {
+  ViewReach r;
+  const View* v = view(id);
+  if (!v) return r;
+  r.title = v->title;
+  ViewArea* a = areaContaining(id);
+  if (!a || !a->isVisible()) {
+    r.closed = true;
+    return r;
+  }
+  const int index = a->indexOf(v->widget);
+  auto global = [](const QWidget* w, const QRect& local) { return local.isEmpty() ? QRect() : QRect(w->mapToGlobal(local.topLeft()), local.size()); };
+  if (a == left_ && leftCollapsed_) {
+    // 折りたたんだ帯: タブの名前を押すと、そのタブを前にして開く
+    CollapsedStrip* strip = left_->strip();
+    r.collapsed = true;
+    r.rect = global(strip, strip->rectForTab(index));
+    if (r.rect.isEmpty()) r.rect = global(strip->button(), strip->button()->rect());
+    return r;
+  }
+  r.rect = global(a->bar(), a->bar()->tabRect(index));
+  r.visible = a->currentIndex() == index && v->widget->isVisible();
+  return r;
 }
 
 void PerspectiveManager::setLeftCollapsed(bool on) {
@@ -811,6 +865,7 @@ void PerspectiveManager::fillViewMenu(QMenu* menu) {
   for (const View& v : views_) {
     const QString id = v.id;
     QAction* a = menu->addAction(v.title);
+    a->setObjectName(QStringLiteral("view.open.") + id);  // 閉じたビューを開き直す案内で、この項目を指す
     a->setCheckable(true);
     a->setChecked(areaContaining(id) != nullptr);
     connect(a, &QAction::triggered, this, [this, id](bool on) {

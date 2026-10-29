@@ -52,14 +52,14 @@ These have no wheel behavior: Segmented, QCheckBox, ColorSwatches, QPushButton/Q
   - Without it, scrolling over the font box would still focus it, show the blue focus border, and take focus from the text box. That is still wheel interaction with the control, which the user asked to remove. Tab and click focus, and arrow keys once focused, are unchanged.
 
 ## 3. Build procedure (verified)
-- Toolchain: present at `C:\kantan-dev`. The user folder name has Japanese characters, so tools/common.ps1 chooses `C:\kantan-dev`. Qt 6.8.3 mingw_64, MinGW 13.1, FFmpeg, CMake and Ninja were checked, and Qt6Test exists.
-- `native\build` is already configured, and `kantan-configure.txt` matches build.ps1's signature, so builds are incremental. The repo path is ASCII, so build.ps1 builds in place without the robocopy copy.
+- Toolchain: present at `C:\e-editor-dev`. The user folder name has Japanese characters, so tools/common.ps1 chooses `C:\e-editor-dev`. Qt 6.8.3 mingw_64, MinGW 13.1, FFmpeg, CMake and Ninja were checked, and Qt6Test exists.
+- `native\build` is already configured, and `e-editor-configure.txt` matches build.ps1's signature, so builds are incremental. The repo path is ASCII, so build.ps1 builds in place without the robocopy copy.
 - Compile only:
   `powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy`
   Success means exit code 0 and no errors.
 - Build and deploy without launching:
   `powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1`
-  Success prints `できあがり: ...\native\dist\kantan-video-editor\kantan-video-editor.exe`. If it says the app is still running (アプリが起動したまま), do not kill the process. Report it so the user can close the app.
+  Success prints `できあがり: ...\native\dist\e-editor\e-editor.exe`. If it says the app is still running (アプリが起動したまま), do not kill the process. Report it so the user can close the app.
 - `build.cmd`, the user's double-click option, runs the same script with `-Run`.
 - Shell note: the execute_pwsh shell is persistent and ignored the `cwd` parameter after an earlier `cd`. Always use absolute paths and `git -C c:\git\JPHACK\e-editor`.
 - Files are UTF-8 without BOM. Working-tree line endings are CRLF and the index is LF. Edit with str_replace and keep the existing line endings.
@@ -67,11 +67,11 @@ These have no wheel behavior: Segmented, QCheckBox, ColorSwatches, QPushButton/Q
 ## 4. Plan
 
 - [ ] 1. Create the throwaway harness outside the repository and record a baseline against the unmodified code.
-      Folder: `C:\kantan-dev\tmp\kv-wheelcheck\`. The path must be ASCII because MinGW fails on the user's Japanese %TEMP%.
+      Folder: `C:\e-editor-dev\tmp\kv-wheelcheck\`. The path must be ASCII because MinGW fails on the user's Japanese %TEMP%.
       Write the three files from Appendix A: `CMakeLists.txt`, `wheelcheck.cpp` (UTF-8, no BOM) and `run.ps1` (ASCII only).
       Do not touch any repository file in this step.
-      Files: C:\kantan-dev\tmp\kv-wheelcheck\CMakeLists.txt, wheelcheck.cpp, run.ps1 (temporary)
-      Verify: `powershell -NoProfile -ExecutionPolicy Bypass -File C:\kantan-dev\tmp\kv-wheelcheck\run.ps1` (timeout ≥ 20 min; the first build compiles all app sources). A small window shows for about a second.
+      Files: C:\e-editor-dev\tmp\kv-wheelcheck\CMakeLists.txt, wheelcheck.cpp, run.ps1 (temporary)
+      Verify: `powershell -NoProfile -ExecutionPolicy Bypass -File C:\e-editor-dev\tmp\kv-wheelcheck\run.ps1` (timeout ≥ 20 min; the first build compiles all app sources). A small window shows for about a second.
       Expected baseline exit code: 1.
       - FAIL: `font: focus policy...`, `font: direct wheel event is ignored`, `font: direct wheel does not change...`, `font: real wheel ... scrolls the panel`, `font: real wheel does not change...`, `font: real wheel does not move focus...`, `font: wheel after clicking...`, `size: direct wheel events are ignored`, `size: direct wheel does not change...`, `size: real wheel ... scrolls the panel`, `size: real wheel does not change...`, `size: wheel while dragging...`
       - OK: setup, both `precondition` lines, `font: click opens the list`, `font: choosing from the list...`, `size: dragging...`, `size: clicking the groove...`, `size: arrow key...`, `scope: ...`
@@ -86,21 +86,21 @@ These have no wheel behavior: Segmented, QCheckBox, ColorSwatches, QPushButton/Q
       Verify: `powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy` exits with 0 and shows no new warnings for widgets.cpp or inspector.cpp.
 
 - [ ] 3. Re-run the harness on the fixed code. Depends on 2.
-      Verify: `powershell -NoProfile -ExecutionPolicy Bypass -File C:\kantan-dev\tmp\kv-wheelcheck\run.ps1`. Every line prints `OK`, the last line is `RESULT: ALL OK` and the exit code is 0. Save the full output for the final report.
+      Verify: `powershell -NoProfile -ExecutionPolicy Bypass -File C:\e-editor-dev\tmp\kv-wheelcheck\run.ps1`. Every line prints `OK`, the last line is `RESULT: ALL OK` and the exit code is 0. Save the full output for the final report.
       If something fails, fix the app code in the three files and repeat 2 and 3. Never change the harness's expectations to make it pass.
 
 - [ ] 4. Build and deploy the real app so the user can check it by hand. Depends on 3.
-      Verify: `powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1` prints `できあがり: ...kantan-video-editor.exe`. If the app is running, report it and leave the process alone.
+      Verify: `powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1` prints `できあがり: ...e-editor.exe`. If the app is running, report it and leave the process alone.
 
 - [ ] 5. Remove all temporary material and confirm the working tree.
-      Run `Remove-Item -Recurse -Force -LiteralPath 'C:\kantan-dev\tmp\kv-wheelcheck'`. Delete only this folder, which step 1 created.
+      Run `Remove-Item -Recurse -Force -LiteralPath 'C:\e-editor-dev\tmp\kv-wheelcheck'`. Delete only this folder, which step 1 created.
       Verify:
-      - `Test-Path 'C:\kantan-dev\tmp\kv-wheelcheck'` prints False.
+      - `Test-Path 'C:\e-editor-dev\tmp\kv-wheelcheck'` prints False.
       - `git -C c:\git\JPHACK\e-editor status --short` shows exactly ` M native/src/ui/inspector.cpp`, ` M native/src/ui/widgets.cpp` and ` M native/src/ui/widgets.h`, plus the workflow's own `?? .agents/`.
       - `git -C c:\git\JPHACK\e-editor diff` contains only the Appendix B changes: no printf, qDebug or harness code. Nothing is committed.
 
 ## 5. Manual GUI check for the user (put this in the final report, in Japanese)
-1. アプリを閉じてから `build.cmd` をダブルクリックします。手順 4 のあとなら `native\dist\kantan-video-editor\kantan-video-editor.exe` を開くだけでも確かめられます。
+1. アプリを閉じてから `build.cmd` をダブルクリックします。手順 4 のあとなら `native\dist\e-editor\e-editor.exe` を開くだけでも確かめられます。
 2. 「テキスト」ボタン（または T キー）でテキストを追加し、右側にテキストの設定を出します。
 3. 「フォント」の欄の上でホイールを回します。フォントは変わらず、右側のパネルがスクロールします。欄が青い枠にもなりません。
 4. フォントの欄をクリックすると一覧が開き、選んだフォントに変わります。そのあと欄の上でホイールを回しても変わりません。
@@ -112,7 +112,7 @@ These have no wheel behavior: Segmented, QCheckBox, ColorSwatches, QPushButton/Q
 
 ## Appendix A: temporary harness (outside the repo, deleted in step 5)
 
-`C:\kantan-dev\tmp\kv-wheelcheck\CMakeLists.txt`:
+`C:\e-editor-dev\tmp\kv-wheelcheck\CMakeLists.txt`:
 ```cmake
 # Temporary harness for the wheel fix. Delete this folder when done.
 cmake_minimum_required(VERSION 3.21)
@@ -124,7 +124,7 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Svg Network Test)
 
 set(KV "C:/git/JPHACK/e-editor/native")
-set(FFMPEG_DIR "C:/kantan-dev/ffmpeg")
+set(FFMPEG_DIR "C:/e-editor-dev/ffmpeg")
 add_library(ffmpeg INTERFACE)
 target_include_directories(ffmpeg INTERFACE "${FFMPEG_DIR}/include")
 foreach(lib avformat avcodec avutil swscale swresample avfilter)
@@ -143,11 +143,11 @@ target_compile_definitions(kv-wheelcheck PRIVATE UNICODE _UNICODE NOMINMAX KV_VE
 target_link_libraries(kv-wheelcheck PRIVATE Qt6::Widgets Qt6::Svg Qt6::Network Qt6::Test ffmpeg miniaudio ole32 shell32 uuid)
 ```
 
-`C:\kantan-dev\tmp\kv-wheelcheck\run.ps1` (ASCII only; runs in a child powershell so env changes don't leak):
+`C:\e-editor-dev\tmp\kv-wheelcheck\run.ps1` (ASCII only; runs in a child powershell so env changes don't leak):
 ```powershell
 # Temporary: build and run the wheel check harness. Delete this folder when done.
 $ErrorActionPreference = 'Continue'
-$d = 'C:\kantan-dev'
+$d = 'C:\e-editor-dev'
 $h = Join-Path $d 'tmp\kv-wheelcheck'
 $env:PATH = "$d\Qt\Tools\mingw1310_64\bin;$d\Qt\6.8.3\mingw_64\bin;$d\ffmpeg\bin;$env:PATH"
 $env:TEMP = $env:TMP = Join-Path $d 'tmp'
@@ -165,7 +165,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "build failed ($LASTEXITCODE)"; exit 3 }
 exit $LASTEXITCODE
 ```
 
-`C:\kantan-dev\tmp\kv-wheelcheck\wheelcheck.cpp` (UTF-8 without BOM; printed text is ASCII so the console shows it correctly):
+`C:\e-editor-dev\tmp\kv-wheelcheck\wheelcheck.cpp` (UTF-8 without BOM; printed text is ASCII so the console shows it correctly):
 ```cpp
 // 一時的な確認用（ホイールの無効化）。確認が終わったらフォルダーごと消す
 #include <QApplication>

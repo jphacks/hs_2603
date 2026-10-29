@@ -12,6 +12,7 @@ class ProjectPanel;
 class ClipPanel;
 class TextPanel;
 class AudioPanel;
+class TransitionPanel;
 
 class Inspector : public QScrollArea {
   Q_OBJECT
@@ -37,6 +38,7 @@ class Inspector : public QScrollArea {
   ClipPanel* clip_;
   TextPanel* text_;
   AudioPanel* audio_;
+  TransitionPanel* transition_;
 };
 
 }  // namespace kv

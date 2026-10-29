@@ -308,6 +308,16 @@ bool overlayTrackFree(const std::vector<OverlayItem>& items, int track, double s
                       const QString& excludeId = QString());
 /** 追加するものを入れる段: 重ならない一番下（メインに近い）の段。どの段も重なるなら、一番上にひとつ増やした段 */
 int freeOverlayTrack(const std::vector<OverlayItem>& items, double start, double duration, int fps, const QString& excludeId = QString());
+/**
+ * トラックの非表示・ミュートの印を、今ある段にそろえる（無くなった段の印は外す。あとで同じ番号・ID の段ができても、
+ * 勝手に隠れたり音が消えたりしないように）。段の数・ID・番号をそろえたあとに呼ぶ
+ */
+void normalizeTrackFlags(ProjectData& p);
+/**
+ * 重ねるもの id が、同じ段のほかのものに重なっていたら、上の空いている段へ移す（長さ・始まりを変えたあとに使う。
+ * 下の段へは落とさない: エフェクトレイヤーが、効果を掛けていたものの下に回らないように）。移したら true
+ */
+bool liftOverlayToFreeLane(std::vector<OverlayItem>& items, const QString& id, int fps);
 /** 使っている段の数（1 以上。間が空いていれば間の段も含む） */
 int overlayTrackCount(const std::vector<OverlayItem>& items);
 

@@ -1,5 +1,5 @@
 {
-  "name": "kantan-ai-server",
+  "name": "e-editor-ai-server",
   "version": "0.1.0",
   "private": true,
   "description": "e-editor の AI サーバー（アカウント・トークンの管理・Amazon Bedrock の中継・管理画面）",

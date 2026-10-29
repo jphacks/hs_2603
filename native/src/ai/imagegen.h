@@ -1,6 +1,6 @@
 #pragma once
 // AI で画像を作る（AI サーバーが Bedrock の画像モデルで作る。キーはサーバーだけが持つ）。
-// 作った画像は %LOCALAPPDATA%\JPHACKS\kantan-video-editor\generated\ に JPEG で置く（プロジェクトがそのファイルを使うので、キャッシュとは別）。
+// 作った画像は %LOCALAPPDATA%\JPHACKS\e-editor\generated\ に JPEG で置く（プロジェクトがそのファイルを使うので、キャッシュとは別）。
 
 #include <QObject>
 #include <QString>

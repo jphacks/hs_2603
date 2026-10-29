@@ -753,7 +753,14 @@ bool swapTextTracks(ProjectData& p, int a, int b) {
 }
 
 void syncAudioTrackNos(ProjectData& p) {
-  syncTrackNos(p.audioTrackNos, size_t(audioTrackCount(p.audios)));
+  const size_t count = size_t(audioTrackCount(p.audios));
+  // 段が 1 つだけになると番号を 1 に付け直すので、段のミュートも、残った段の新しい番号に付け直す
+  if (count <= 1 && !p.mutedAudioTracks.empty() && !p.audioTrackNos.empty()) {
+    const bool muted = std::find(p.mutedAudioTracks.begin(), p.mutedAudioTracks.end(), p.audioTrackNos.front()) != p.mutedAudioTracks.end();
+    p.mutedAudioTracks.clear();
+    if (muted) p.mutedAudioTracks.push_back(1);
+  }
+  syncTrackNos(p.audioTrackNos, count);
 }
 
 bool moveAudioToTrack(ProjectData& p, const QString& id, const TextTrackTarget& target) {
@@ -860,6 +867,33 @@ bool overlayTrackFree(const std::vector<OverlayItem>& items, int track, double s
     if (o.track != track || (!excludeId.isEmpty() && o.id == excludeId)) continue;
     if (o.start < start + duration - 1e-6 && start < o.start + overlayDuration(o, fps) - 1e-6) return false;
   }
+  return true;
+}
+
+void normalizeTrackFlags(ProjectData& p) {
+  auto dedupe = [](auto& v) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+  };
+  std::erase_if(p.hiddenTextTracks, [&](const QString& id) { return std::find(p.textTrackIds.begin(), p.textTrackIds.end(), id) == p.textTrackIds.end(); });
+  dedupe(p.hiddenTextTracks);
+  const int lanes = overlayTrackCount(p.overlays);
+  for (auto* v : {&p.hiddenOverlayTracks, &p.mutedOverlayTracks}) {
+    std::erase_if(*v, [&](int k) { return k < 0 || k >= lanes; });
+    dedupe(*v);
+  }
+  std::erase_if(p.mutedAudioTracks, [&](int n) { return std::find(p.audioTrackNos.begin(), p.audioTrackNos.end(), n) == p.audioTrackNos.end(); });
+  dedupe(p.mutedAudioTracks);
+}
+
+bool liftOverlayToFreeLane(std::vector<OverlayItem>& items, const QString& id, int fps) {
+  auto it = std::find_if(items.begin(), items.end(), [&](const OverlayItem& o) { return o.id == id; });
+  if (it == items.end()) return false;
+  const double dur = overlayDuration(*it, fps);
+  int lane = std::max(0, it->track);
+  while (!overlayTrackFree(items, lane, it->start, dur, fps, id)) ++lane;
+  if (lane == it->track) return false;
+  it->track = lane;
   return true;
 }
 

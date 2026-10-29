@@ -13,6 +13,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QShowEvent>
@@ -26,13 +27,20 @@
 #include <cmath>
 
 #include "core/editor.h"
+#include "core/effects.h"
 #include "core/filters.h"
 #include "core/fontlibrary.h"
 #include "core/textstyles.h"
 #include "core/texttemplates.h"
 #include "core/timeline.h"
+#include "core/transitions.h"
+#include "mask/maskcontroller.h"
+#include "mask/masktrack.h"
+#include "render/maskframes.h"
 #include "render/textrender.h"
 #include "ui/animpanel.h"
+#include "ui/clipdialogs.h"
+#include "ui/effectlist.h"
 #include "ui/plaintextinput.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
@@ -41,6 +49,23 @@ namespace kv {
 
 static QString pct(double v) {
   return formatPercent(v);
+}
+
+/** パンの表示（中央 / 左 30 / 右 100） */
+static QString panText(double v) {
+  const long n = std::lround(std::abs(v) * 100);
+  if (n == 0) return QStringLiteral("中央");
+  return (v < 0 ? QStringLiteral("左 %1") : QStringLiteral("右 %1")).arg(n);
+}
+
+/** パンのスライダー（-1 が左だけ、+1 が右だけ。ダブルクリックで中央に戻す） */
+static SliderRow* makePanSlider(QWidget* parent) {
+  auto* s = new SliderRow(QStringLiteral("パン"), -kMaxPan, kMaxPan, 0.01, panText, parent);
+  s->setDefault(0);
+  s->setUnit(0.01, 0.001);
+  s->setValueBubble(true);
+  s->setToolTip(QStringLiteral("音を左右のどちらから鳴らすか（左へ動かすと右の音が小さく、右へ動かすと左の音が小さくなります）"));
+  return s;
 }
 
 static QString signedNum(double v) {
@@ -187,6 +212,37 @@ class ClipPanel : public QWidget {
     timeSec_->body()->addWidget(fromHere);
     addSection(v, timeSec_, false);
 
+    // エフェクトレイヤーだけ: 効果を掛ける範囲（形・境目のぼかし・外側に掛けるか）。位置・大きさは、プレビューの枠や「アニメーション」で変える
+    regionSec_ = new Section(QStringLiteral("効果を掛ける範囲"), this);
+    shape_ = new Segmented({{int(RegionShape::Full), QStringLiteral("画面全体")},
+                            {int(RegionShape::Rect), QStringLiteral("四角")},
+                            {int(RegionShape::Ellipse), QStringLiteral("楕円")}},
+                           0, regionSec_);
+    shape_->setAccessibleName(QStringLiteral("範囲の形"));
+    feather_ = new SliderRow(QStringLiteral("境目のぼかし"), 0, kMaxRegionFeather, 0.005, pct, regionSec_);
+    feather_->setDefault(EffectRegion{}.feather);
+    feather_->setUnit(0.01, 0.001);
+    feather_->setValueBubble(true);
+    invert_ = new QCheckBox(QStringLiteral("範囲の外側に掛ける"), regionSec_);
+    invert_->setToolTip(QStringLiteral("範囲の中はそのまま見せて、外側にだけ効果を掛けます（スポットライトなど）"));
+    auto* regionNote = makeLabel(QStringLiteral("範囲の位置・大きさ・向きは、プレビューの枠をドラッグするか、下の「アニメーション」で変えられます"
+                                                "（キーフレームで動かすと、動く人の顔などを追いかけられます）"),
+                                 "note", regionSec_);
+    regionNote->setWordWrap(true);
+    regionSec_->body()->addWidget(shape_);
+    regionSec_->body()->addWidget(feather_);
+    regionSec_->body()->addWidget(invert_);
+    regionSec_->body()->addWidget(regionNote);
+    addSection(v, regionSec_);
+    connect(shape_, &Segmented::changed, this, [this](const QVariant& x) {
+      editor().updateOverlay(clipId_, [&](OverlayItem& o) { o.region.shape = RegionShape(x.toInt()); });
+    });
+    connect(feather_, &SliderRow::changed, this, [this](double x) {
+      editor().updateOverlay(clipId_, [&](OverlayItem& o) { o.region.feather = x; }, QStringLiteral("feather-") + clipId_);
+    });
+    connect(feather_, &SliderRow::released, this, [] { editor().endMerge(); });
+    connect(invert_, &QCheckBox::toggled, this, [this](bool on) { editor().updateOverlay(clipId_, [&](OverlayItem& o) { o.region.invert = on; }); });
+
     durationSec_ = new Section(QStringLiteral("表示時間"), this);
     duration_ = new SliderRow(QStringLiteral("表示時間"), 0.5, 20, 0.1, [](double x) { return QStringLiteral("%1秒").arg(x, 0, 'f', 1); }, durationSec_);
     duration_->setLabelVisible(false);
@@ -215,9 +271,12 @@ class ClipPanel : public QWidget {
     volNote_ = makeLabel(QString(), "note", audioSec_);
     volNote_->setWordWrap(true);
     volClear_ = new QPushButton(QStringLiteral("音量のキーフレームをすべて削除"), audioSec_);
+    pan_ = makePanSlider(audioSec_);
+    pan_->setObjectName(QStringLiteral("ClipPan"));  // 操作の案内で探す名前（ai/guidecatalog.cpp）
     audioSec_->body()->addLayout(volRow);
     audioSec_->body()->addWidget(volNote_);
     audioSec_->body()->addWidget(volClear_);
+    audioSec_->body()->addWidget(pan_);
     audioSec_->body()->addWidget(mute_);
     addSection(v, audioSec_);
 
@@ -232,6 +291,7 @@ class ClipPanel : public QWidget {
     // 位置・拡大率・回転・不透明度（キーフレームでアニメーションできる）
     v->addWidget(makeSeparator());
     anim_ = new AnimPanel(this);
+    anim_->setObjectName(QStringLiteral("ClipMotion"));
     v->addWidget(anim_);
 
     // サイズ（幅・高さだけの伸縮）と切り抜き。プレビューの枠の辺のつまみでも、幅・高さを変えられる
@@ -252,7 +312,8 @@ class ClipPanel : public QWidget {
     sizeSec_->body()->addWidget(stretchX_);
     sizeSec_->body()->addWidget(stretchY_);
     sizeSec_->body()->addWidget(sizeNote);
-    sizeSec_->body()->addWidget(makeLabel(QStringLiteral("切り抜き（端から切り落とす）"), "muted", sizeSec_));
+    cropLabel_ = makeLabel(QStringLiteral("切り抜き（端から切り落とす）"), "muted", sizeSec_);
+    sizeSec_->body()->addWidget(cropLabel_);
     const QString cropNames[4] = {QStringLiteral("上"), QStringLiteral("下"), QStringLiteral("左"), QStringLiteral("右")};
     for (int i = 0; i < 4; ++i) {
       crop_[i] = new SliderRow(cropNames[i], 0, kMaxCrop, 0.005, pct, sizeSec_);
@@ -306,6 +367,97 @@ class ClipPanel : public QWidget {
     chromaSec_->body()->addWidget(chromaNote_);
     addSection(v, chromaSec_);
     keyButtons_ = {green, blue, pick, dropper};
+
+    // オブジェクトマスク（AI。プレビューで被写体をクリックするだけで、マスクして動きを追いかける）
+    maskSec_ = new Section(QStringLiteral("オブジェクトマスク（AI）"), this);
+    maskSec_->setObjectName(QStringLiteral("ClipObjectMask"));  // 操作の案内で探す名前（ai/guidecatalog.cpp）
+    maskDelete_ = new QPushButton(QStringLiteral("削除"), maskSec_);
+    maskDelete_->setProperty("flat", true);
+    maskDelete_->setCursor(Qt::PointingHandCursor);
+    maskDelete_->setToolTip(QStringLiteral("この映像のオブジェクトマスクを消します（元に戻せます）"));
+    maskSec_->setHeaderWidget(maskDelete_);
+    maskPickBtn_ = new QPushButton(maskSec_);
+    maskPickBtn_->setIcon(theme::icon(QStringLiteral("mouse-pointer-click")));
+    maskIntro_ = makeLabel(QStringLiteral("ボタンを押してから、プレビューで被写体にカーソルを合わせてクリックするだけで、AI がマスクして動きを追いかけます"),
+                           "note", maskSec_);
+    maskIntro_->setWordWrap(true);
+    maskStatus_ = makeLabel(QString(), "muted", maskSec_);
+    maskStatus_->setWordWrap(true);
+    maskProgressRow_ = new QWidget(maskSec_);
+    auto* progressRow = new QHBoxLayout(maskProgressRow_);
+    progressRow->setContentsMargins(0, 0, 0, 0);
+    progressRow->setSpacing(6);
+    maskProgress_ = new QProgressBar(maskProgressRow_);
+    maskProgress_->setRange(0, 1000);
+    maskProgress_->setTextVisible(false);
+    maskProgress_->setAccessibleName(QStringLiteral("トラックの進み具合"));
+    maskStop_ = new QPushButton(QStringLiteral("止める"), maskProgressRow_);
+    maskStop_->setToolTip(QStringLiteral("トラックを途中でやめます（そこまでの結果は残ります）"));
+    progressRow->addWidget(maskProgress_, 1);
+    progressRow->addWidget(maskStop_);
+    maskTrackRow_ = new QWidget(maskSec_);
+    auto* trackRow = new QHBoxLayout(maskTrackRow_);
+    trackRow->setContentsMargins(0, 0, 0, 0);
+    trackRow->setSpacing(6);
+    maskBack_ = new QPushButton(theme::icon(QStringLiteral("rewind")), QStringLiteral("前へ"), maskTrackRow_);
+    maskBoth_ = new QPushButton(theme::icon(QStringLiteral("chevrons-left-right")), QStringLiteral("前後"), maskTrackRow_);
+    maskFwd_ = new QPushButton(theme::icon(QStringLiteral("fast-forward")), QStringLiteral("後ろへ"), maskTrackRow_);
+    maskBack_->setToolTip(QStringLiteral("最初にクリックしたフレームから、前（始めの方）へ追いかけ直します"));
+    maskBoth_->setToolTip(QStringLiteral("最初にクリックしたフレームから、前と後ろへ追いかけ直します"));
+    maskFwd_->setToolTip(QStringLiteral("最初にクリックしたフレームから、後ろ（終わりの方）へ追いかけ直します"));
+    for (auto* b : {maskBack_, maskBoth_, maskFwd_}) trackRow->addWidget(b, 1);
+    // マスクの使い方（マスクがあるときだけ出す）
+    maskSettings_ = new QWidget(maskSec_);
+    auto* ms = new QVBoxLayout(maskSettings_);
+    ms->setContentsMargins(0, 0, 0, 0);
+    ms->setSpacing(maskSec_->body()->spacing());
+    maskOn_ = new QCheckBox(QStringLiteral("マスクを使う"), maskSettings_);
+    maskOn_->setToolTip(QStringLiteral("オフにすると、マスクを掛けずに元の映像を出します（マスクは残ります）"));
+    maskMode_ = new Segmented({{int(MaskMode::Cutout), QStringLiteral("背景を消す")}, {int(MaskMode::Effects), QStringLiteral("エフェクトを中だけに")}},
+                              0, maskSettings_);
+    maskMode_->setAccessibleName(QStringLiteral("マスクの使い方"));
+    maskMode_->setToolTip(QStringLiteral("背景を消す: 被写体だけを残します / エフェクトを中だけに: 下の「エフェクト」（モザイク・ぼかしなど）を被写体の中だけに掛けます"));
+    maskInvert_ = new QCheckBox(QStringLiteral("反転（被写体の外側にする）"), maskSettings_);
+    maskInvert_->setToolTip(QStringLiteral("背景を消す: 被写体を消して、背景を残します / エフェクト: 被写体の外側だけに掛けます"));
+    auto px = [](double x) { return signedNum(x) + QStringLiteral("px"); };
+    maskExpand_ = new SliderRow(QStringLiteral("広げる・狭める"), -kMaxMaskExpand, kMaxMaskExpand, 1, px, maskSettings_);
+    maskExpand_->setDefault(0);
+    maskExpand_->setValueBubble(true);
+    maskExpand_->setToolTip(QStringLiteral("マスクの境目を、外へ広げる（+）・内へ狭める（-）。素材のピクセルで数えます"));
+    maskFeather_ = new SliderRow(QStringLiteral("境目のぼかし"), 0, kMaxMaskFeather, 1,
+                                 [](double x) { return QStringLiteral("%1px").arg(std::lround(x)); }, maskSettings_);
+    maskFeather_->setDefault(0);
+    maskFeather_->setValueBubble(true);
+    maskHint_ = makeLabel(QString(), "note", maskSettings_);  // 直し方（showMask で、動画・写真に合わせて出す）
+    maskHint_->setWordWrap(true);
+    maskNote_ = makeLabel(QString(), "note", maskSettings_);
+    maskNote_->setWordWrap(true);
+    for (QWidget* w : std::initializer_list<QWidget*>{maskOn_, maskMode_, maskInvert_, maskExpand_, maskFeather_, maskNote_, maskHint_}) ms->addWidget(w);
+    maskSec_->body()->addWidget(maskPickBtn_);
+    maskSec_->body()->addWidget(maskIntro_);
+    maskSec_->body()->addWidget(maskStatus_);
+    maskSec_->body()->addWidget(maskProgressRow_);
+    maskSec_->body()->addWidget(maskTrackRow_);
+    maskSec_->body()->addWidget(maskSettings_);
+    addSection(v, maskSec_);
+
+    // 反転とエフェクト（モザイク・ぼかしなど。並べた順に上から掛ける）
+    fxSec_ = new Section(QStringLiteral("エフェクト"), this);
+    flipBox_ = new QWidget(fxSec_);
+    auto* flipRow = new QHBoxLayout(flipBox_);
+    flipRow->setContentsMargins(0, 0, 0, 0);
+    flipRow->setSpacing(18);
+    flipX_ = new QCheckBox(QStringLiteral("左右反転"), flipBox_);
+    flipY_ = new QCheckBox(QStringLiteral("上下反転"), flipBox_);
+    flipX_->setToolTip(QStringLiteral("映像を左右に反転します（鏡に映したように）"));
+    flipY_->setToolTip(QStringLiteral("映像を上下に反転します"));
+    flipRow->addWidget(flipX_);
+    flipRow->addWidget(flipY_);
+    flipRow->addStretch(1);
+    fxList_ = new EffectList(fxSec_);
+    fxSec_->body()->addWidget(flipBox_);
+    fxSec_->body()->addWidget(fxList_);
+    addSection(v, fxSec_);
 
     auto* filterSec = new Section(QStringLiteral("フィルター"), this);
     auto* grid = new QGridLayout();
@@ -394,6 +546,8 @@ class ClipPanel : public QWidget {
       showOpacity();
     });
     connect(mute_, &QCheckBox::toggled, this, [upd](bool on) { upd([&](VideoClip& c) { c.muted = on; }); });
+    connect(pan_, &SliderRow::changed, this, [upd](double x) { upd([&](VideoClip& c) { c.pan = x; }, QStringLiteral("pan-")); });
+    connect(pan_, &SliderRow::released, this, [] { editor().endMerge(); });
     connect(fit_, &Segmented::changed, this, [upd](const QVariant& x) { upd([&](VideoClip& c) { c.fit = FitMode(x.toInt()); }); });
     connect(reset_, &QPushButton::clicked, this, [upd] { upd([](VideoClip& c) { c.color = colorFromPreset(c.color.preset); }); });
     connect(brightness_, &SliderRow::changed, this, [upd](double x) { upd([&](VideoClip& c) { c.color.brightness = x; }, QStringLiteral("br-")); });
@@ -446,6 +600,9 @@ class ClipPanel : public QWidget {
         c.cropL = c.cropT = c.cropR = c.cropB = 0;
       });
     });
+    // 反転
+    connect(flipX_, &QCheckBox::toggled, this, [upd](bool on) { upd([&](VideoClip& c) { c.flipX = on; }); });
+    connect(flipY_, &QCheckBox::toggled, this, [upd](bool on) { upd([&](VideoClip& c) { c.flipY = on; }); });
     // クロマキー
     connect(chromaOn_, &QCheckBox::toggled, this, [upd](bool on) { upd([&](VideoClip& c) { c.chroma.enabled = on; }); });
     connect(despill_, &QCheckBox::toggled, this, [upd](bool on) { upd([&](VideoClip& c) { c.chroma.despill = on; }); });
@@ -491,6 +648,34 @@ class ClipPanel : public QWidget {
       ed.setChromaPick(clipId_);
     });
     connect(&editor(), &Editor::chromaPickChanged, this, [this] { showPicking(); });
+    // オブジェクトマスク
+    connect(maskPickBtn_, &QPushButton::clicked, this, [this] {
+      toggleObjectMaskPick(clipId_);
+      showMask();  // 始められなかったときも、ボタンを今の状態に合わせる
+    });
+    connect(maskDelete_, &QPushButton::clicked, this, [this] {
+      if (editor().maskPick() == clipId_) editor().setMaskPick({});
+      mask::maskController().remove(clipId_);
+    });
+    connect(maskBack_, &QPushButton::clicked, this, [this] { mask::maskController().track(clipId_, mask::TrackDirection::Backward); });
+    connect(maskBoth_, &QPushButton::clicked, this, [this] { mask::maskController().track(clipId_, mask::TrackDirection::Both); });
+    connect(maskFwd_, &QPushButton::clicked, this, [this] { mask::maskController().track(clipId_, mask::TrackDirection::Forward); });
+    connect(maskStop_, &QPushButton::clicked, this, [this] {
+      if (const VideoClip* c = editor().clip(clipId_)) mask::maskController().stop(c->mask.id);
+    });
+    connect(maskOn_, &QCheckBox::toggled, this, [upd](bool on) { upd([&](VideoClip& c) { c.mask.enabled = on; }); });
+    connect(maskMode_, &Segmented::changed, this, [upd](const QVariant& x) { upd([&](VideoClip& c) { c.mask.mode = MaskMode(x.toInt()); }); });
+    connect(maskInvert_, &QCheckBox::toggled, this, [upd](bool on) { upd([&](VideoClip& c) { c.mask.invert = on; }); });
+    connect(maskExpand_, &SliderRow::changed, this, [upd](double x) { upd([&](VideoClip& c) { c.mask.expand = x; }, QStringLiteral("mexp-")); });
+    connect(maskFeather_, &SliderRow::changed, this, [upd](double x) { upd([&](VideoClip& c) { c.mask.feather = x; }, QStringLiteral("mfea-")); });
+    for (auto* s : {maskExpand_, maskFeather_}) connect(s, &SliderRow::released, this, [] { editor().endMerge(); });
+    connect(&editor(), &Editor::maskPickChanged, this, [this] {
+      if (isVisible()) showMask();
+    });
+    connect(&mask::maskController(), &mask::MaskController::trackingChanged, this, [this](const QString& id) {
+      const VideoClip* c = editor().clip(clipId_);
+      if (isVisible() && c && c->mask.id == id) showMask();
+    });
     connect(&editor(), &Editor::thumbsChanged, this, [this](const QString& id) {
       if (id == thumbAsset_) thumbAsset_.clear();
       if (isVisible()) refresh();
@@ -522,6 +707,106 @@ class ClipPanel : public QWidget {
     opacity_->setValue(ed.currentLayerState().opacity);
   }
 
+  /** オブジェクトマスクの欄（選ぶボタン・トラックの状態と進み具合・使い方の設定） */
+  void showMask() {
+    const Editor& ed = editor();
+    const VideoClip* c = ed.clip(clipId_);
+    const OverlayItem* ov = c ? ed.overlay(clipId_) : nullptr;
+    if (!c || (ov && ov->isEffectLayer())) return;
+    const Asset* a = ed.asset(c->assetId);
+    const ObjectMask& m = c->mask;
+    const bool has = m.has();
+    mask::MaskController& mc = mask::maskController();
+    QString why;
+    const bool ready = mc.available(&why, false);  // 表示だけなので、AI の部品は読み込まない（押したときに確かめる）
+    const bool picking = ed.maskPick() == clipId_;
+    maskPickBtn_->setText(picking ? QStringLiteral("選ぶのをやめる")
+                                  : has ? QStringLiteral("選び直す・直す") : QStringLiteral("被写体をクリックして選ぶ"));
+    maskPickBtn_->setToolTip(picking ? QStringLiteral("プレビューで被写体をクリックしてください（Shift+クリックで範囲を足す・Alt+クリックで外す）")
+                                     : QStringLiteral("プレビューで被写体にカーソルを合わせると、AI が選ぶ範囲を見せます。クリックで決めて、動きを追いかけます"));
+    if (maskPickBtn_->property("primary").toBool() != picking) {
+      // 選んでいる間は、ボタンを目立たせる（スポイトと同じ）
+      maskPickBtn_->setProperty("primary", picking);
+      maskPickBtn_->style()->unpolish(maskPickBtn_);
+      maskPickBtn_->style()->polish(maskPickBtn_);
+    }
+    maskPickBtn_->setEnabled(ready || picking);
+    maskIntro_->setVisible(!has);
+    maskDelete_->setVisible(has);
+    const int state = has ? mc.state(m.id) : 0;  // 1: 順番待ち / 2: トラック中
+    maskProgressRow_->setVisible(state != 0);
+    if (state != 0) maskProgress_->setValue(int(std::lround(std::clamp(mc.progress(m.id), 0.0, 1.0) * 1000)));
+    maskTrackRow_->setVisible(has && state == 0);
+    maskBack_->setVisible(!c->isImage);
+    maskFwd_->setVisible(!c->isImage);
+    maskBoth_->setText(c->isImage ? QStringLiteral("マスクを作り直す") : QStringLiteral("前後"));
+    for (QPushButton* b : {maskBack_, maskBoth_, maskFwd_}) b->setEnabled(ready);
+    // 今の状態
+    QString status;
+    if (!ready) {
+      status = why;
+    } else if (state == 2) {
+      status = QStringLiteral("被写体を追いかけています… %1%（ほかの作業を続けられます）").arg(std::lround(mc.progress(m.id) * 100));
+    } else if (state == 1) {
+      status = QStringLiteral("トラックの順番を待っています（前のトラックが終わったら始めます）");
+    } else if (has) {
+      const std::shared_ptr<const mask::MaskTrack> t = maskTrackFor(m, a);
+      if (t && c->isImage) {
+        status = QStringLiteral("マスクを作りました");
+      } else if (t) {
+        double start = 0, dur = 0;
+        ed.clipSpan(c->id, &start, &dur);
+        const double lo = t->frames.front().pts, hi = t->frames.back().pts, fd = t->frameDuration;
+        const int n = int(t->frames.size());
+        if (lo <= c->in + fd && hi >= c->out - 2 * fd) {
+          status = QStringLiteral("この映像の全体をトラックしました（%1 フレーム）").arg(n);
+        } else {
+          // トラックした範囲を、タイムラインの時刻で出す
+          const double sp = std::max(1e-6, c->speed);
+          const double t0 = std::clamp(start + (lo - c->in) / sp, start, start + dur);
+          const double t1 = std::clamp(start + (hi - c->in) / sp, start, start + dur);
+          status = QStringLiteral("トラックした範囲: %1〜%2（%3 フレーム）。範囲の外は、端のフレームのマスクのままです")
+                       .arg(formatTime(t0), formatTime(t1))
+                       .arg(n);
+        }
+      } else if (!m.file.isEmpty() && mask::MaskStore::instance().get(m.file)) {
+        status = QStringLiteral("素材の大きさが、マスクを作ったときと違います。「前後」でトラックし直してください");
+      } else if (!m.file.isEmpty()) {
+        status = QStringLiteral("マスクのデータが見つかりません（別のパソコンで作ったなど）。「%1」で作り直せます")
+                     .arg(c->isImage ? QStringLiteral("マスクを作り直す") : QStringLiteral("前後"));
+      } else {
+        status = c->isImage ? QStringLiteral("まだマスクを作っていません（「マスクを作り直す」で作ります）")
+                            : QStringLiteral("まだトラックしていません（「前後」で、クリックしたフレームから前と後ろへ追いかけます）");
+      }
+    }
+    maskStatus_->setText(status);
+    maskStatus_->setVisible(!status.isEmpty());
+    maskSettings_->setVisible(has);
+    if (!has) return;
+    {
+      const QSignalBlocker b1(maskOn_);
+      const QSignalBlocker b2(maskInvert_);
+      maskOn_->setChecked(m.enabled);
+      maskInvert_->setChecked(m.invert);
+    }
+    maskMode_->setValue(int(m.mode));
+    maskExpand_->setValue(m.expand);
+    maskFeather_->setValue(m.feather);
+    for (QWidget* w : std::initializer_list<QWidget*>{maskMode_, maskInvert_, maskExpand_, maskFeather_}) w->setEnabled(m.enabled);
+    QString note;
+    if (m.enabled && m.mode == MaskMode::Cutout && !ov) {
+      note = QStringLiteral("メインのトラックでは、消した所は黒になります。後ろに映像を見せるには、重ねるトラックに置いてください");
+    } else if (m.enabled && m.mode == MaskMode::Effects && !anyEffectActive(c->effects)) {
+      note = QStringLiteral("下の「エフェクト」で、モザイク・ぼかしなどを足してください（被写体の%1だけに掛かります）")
+                 .arg(m.invert ? QStringLiteral("外側") : QStringLiteral("中"));
+    }
+    maskNote_->setText(note);
+    maskNote_->setVisible(!note.isEmpty());
+    maskHint_->setText(c->isImage ? QStringLiteral("直すとき: 「選び直す・直す」を押して、プレビューで Shift+クリック（範囲を足す）・Alt+クリック（範囲から外す）")
+                                  : QStringLiteral("直すとき: 「選び直す・直す」を押して、ずれているフレームのプレビューで Shift+クリック（範囲を足す）・"
+                                                   "Alt+クリック（範囲から外す）。そのフレームも手がかりにして、トラックし直します"));
+  }
+
   /** スポイトでこの映像の色を選んでいる間は、スポイトのボタンを目立たせる */
   void showPicking() {
     QPushButton* b = keyButtons_[3];
@@ -547,11 +832,40 @@ class ClipPanel : public QWidget {
     const Asset* a = ed.asset(c->assetId);
     double start = 0, dur = 0;
     ed.clipSpan(c->id, &start, &dur);
-    const QString name = a ? a->name : QStringLiteral("ファイルが見つかりません");
-    header_->set(c->isImage ? QStringLiteral("image") : QStringLiteral("film"), ov ? QStringLiteral("%1（重ねる）").arg(name) : name,
-                 ov ? QStringLiteral("%1〜%2").arg(formatTime(start), formatTime(start + dur)) : formatDuration(dur));
+    // エフェクトレイヤー（素材を使わず、下にあるものに効果を掛ける）は、範囲と効果だけを出す
+    const bool layer = ov && ov->isEffectLayer();
+    if (layer) {
+      header_->set(QStringLiteral("sparkles"), QStringLiteral("%1（エフェクトレイヤー）").arg(effectLayerLabel(*ov)),
+                   QStringLiteral("%1〜%2").arg(formatTime(start), formatTime(start + dur)));
+    } else {
+      const QString name = a ? a->name : QStringLiteral("ファイルが見つかりません");
+      header_->set(c->isImage ? QStringLiteral("image") : QStringLiteral("film"), ov ? QStringLiteral("%1（重ねる）").arg(name) : name,
+                   ov ? QStringLiteral("%1〜%2").arg(formatTime(start), formatTime(start + dur)) : formatDuration(dur));
+    }
     timeSec_->setVisible(ov != nullptr);
     if (ov) start_->setValue(ov->start);
+    regionSec_->setVisible(layer);
+    if (layer) {
+      const bool full = ov->region.shape == RegionShape::Full;
+      shape_->setValue(int(ov->region.shape));
+      feather_->setValue(ov->region.feather);
+      feather_->setEnabled(!full);
+      const QSignalBlocker b(invert_);
+      invert_->setChecked(ov->region.invert);
+      invert_->setEnabled(!full);
+    }
+    chromaSec_->setVisible(!layer);
+    flipBox_->setVisible(!layer);
+    {
+      const QSignalBlocker b1(flipX_);
+      const QSignalBlocker b2(flipY_);
+      flipX_->setChecked(c->flipX);
+      flipY_->setChecked(c->flipY);
+    }
+    fxList_->setTarget(clipId_, layer);
+    fxList_->refresh();
+    cropLabel_->setVisible(!layer);
+    for (SliderRow* s : crop_) s->setVisible(!layer);
     // 重ねるトラックは、いつも全体表示（余白は透明）なので、表示方法は出さない
     fitSec_->setVisible(!ov);
     chromaNote_->setVisible(!ov && c->chroma.enabled);
@@ -565,6 +879,7 @@ class ClipPanel : public QWidget {
       const QSignalBlocker b(mute_);
       mute_->setChecked(c->muted);
     }
+    pan_->setValue(c->pan);
     fit_->setValue(int(c->fit));
     // サイズ・切り抜き
     stretchX_->setValue(c->stretchX);
@@ -587,6 +902,9 @@ class ClipPanel : public QWidget {
     blend_->setValue(c->chroma.blend);
     despill_->setEnabled(c->chroma.enabled);
     showPicking();
+    // オブジェクトマスク（エフェクトレイヤーには無い）
+    maskSec_->setVisible(!layer);
+    showMask();
     // フィルターの見本（素材のサムネイルに色をつけたもの）
     if (thumbAsset_ != c->assetId) {
       thumbAsset_ = c->assetId;
@@ -640,11 +958,21 @@ class ClipPanel : public QWidget {
   PanelHeader* header_;
   Section* timeSec_;
   SecondsField* start_;
+  Section* regionSec_;
+  Segmented* shape_;
+  SliderRow* feather_;
+  QCheckBox* invert_;
+  Section* fxSec_;
+  QWidget* flipBox_;
+  QCheckBox* flipX_;
+  QCheckBox* flipY_;
+  EffectList* fxList_;
   Section* fitSec_;
   Section* sizeSec_;
   QPushButton* sizeReset_;
   SliderRow* stretchX_;
   SliderRow* stretchY_;
+  QLabel* cropLabel_;
   SliderRow* crop_[4];
   Section* chromaSec_;
   QCheckBox* chromaOn_;
@@ -654,6 +982,27 @@ class ClipPanel : public QWidget {
   SliderRow* blend_;
   QCheckBox* despill_;
   QLabel* chromaNote_;
+  // オブジェクトマスク
+  Section* maskSec_;
+  QPushButton* maskDelete_;
+  QPushButton* maskPickBtn_;
+  QLabel* maskIntro_;
+  QLabel* maskStatus_;
+  QWidget* maskProgressRow_;
+  QProgressBar* maskProgress_;
+  QPushButton* maskStop_;
+  QWidget* maskTrackRow_;
+  QPushButton* maskBack_;
+  QPushButton* maskBoth_;
+  QPushButton* maskFwd_;
+  QWidget* maskSettings_;
+  QCheckBox* maskOn_;
+  Segmented* maskMode_;
+  QCheckBox* maskInvert_;
+  SliderRow* maskExpand_;
+  SliderRow* maskFeather_;
+  QLabel* maskNote_;
+  QLabel* maskHint_;
   Section* durationSec_;
   Section* speedSec_;
   Section* audioSec_;
@@ -666,6 +1015,7 @@ class ClipPanel : public QWidget {
   QPushButton* volClear_;
   AnimPanel* anim_;
   QCheckBox* mute_;
+  SliderRow* pan_;
   Segmented* fit_;
   std::vector<QToolButton*> filterButtons_;
   QPushButton* reset_;
@@ -688,6 +1038,7 @@ class TextPanel : public QWidget {
     v->addWidget(header_);
     // 日本語を変換している途中も、案内の文字（プレースホルダー）をすぐに消す入力欄
     edit_ = new PlainTextInput(this);
+    edit_->setObjectName(QStringLiteral("TextEdit"));  // 操作の案内で探す名前（ai/guidecatalog.cpp）
     edit_->setPlaceholderText(QStringLiteral("テキストを入力"));
     edit_->setFixedHeight(76);
     edit_->setAccessibleName(QStringLiteral("テキスト"));
@@ -1144,6 +1495,9 @@ class AudioPanel : public QWidget {
     keyClear_ = new QPushButton(QStringLiteral("キーフレームをすべて削除"), volSec);
     volSec->body()->addWidget(keyNote_);
     volSec->body()->addWidget(keyClear_);
+    pan_ = makePanSlider(volSec);
+    pan_->setObjectName(QStringLiteral("AudioPan"));
+    volSec->body()->addWidget(pan_);
     addSection(v, volSec);
     auto* fadeSec = new Section(QStringLiteral("フェード"), this);
     fadeIn_ = makeFadeSlider(QStringLiteral("イン"), fadeSec);
@@ -1178,6 +1532,8 @@ class AudioPanel : public QWidget {
       if (isVisible()) showVolume();
     });
     connect(volume_, &SliderRow::released, this, [] { editor().endMerge(); });
+    connect(pan_, &SliderRow::changed, this, [upd](double x) { upd([&](AudioItem& a) { a.pan = x; }, QStringLiteral("apan-")); });
+    connect(pan_, &SliderRow::released, this, [] { editor().endMerge(); });
     connect(keyClear_, &QPushButton::clicked, this, [this] { editor().clearVolumePoints(audioId_); });
     // フェードは自由な長さ（0.1 秒刻み）。オーディオの長さに収め、イン・アウトは重ならないようにする
     connect(fadeIn_, &SliderRow::changed, this, [upd](double x) {
@@ -1230,6 +1586,7 @@ class AudioPanel : public QWidget {
                                     .arg(a->volumePoints.size())
                               : QStringLiteral("◆ を押すと、再生位置に音量のキーフレームを置けます。音量ラインのダブルクリックでも追加できます"));
     showVolume();
+    pan_->setValue(a->pan);
     fadeIn_->setValue(a->fadeIn);
     fadeOut_->setValue(a->fadeOut);
     start_->setValue(a->start);
@@ -1242,6 +1599,7 @@ class AudioPanel : public QWidget {
   QString audioId_;
   PanelHeader* header_;
   SliderRow* volume_;
+  SliderRow* pan_;
   VolumeKeyControls* volKeys_;
   QLabel* keyNote_;
   QPushButton* keyClear_;
@@ -1250,6 +1608,155 @@ class AudioPanel : public QWidget {
   SecondsField* start_;
   QLabel* note_;
   QPushButton* fitEnd_;
+};
+
+// ---- トランジション（メインのビデオの切れ目） ------------------------------------------------
+
+class TransitionPanel : public QWidget {
+ public:
+  explicit TransitionPanel(QWidget* parent = nullptr) : QWidget(parent) {
+    auto* v = pageLayout(this);
+    header_ = new PanelHeader(this);
+    v->addWidget(header_);
+
+    auto* typeSec = new Section(QStringLiteral("種類"), this);
+    type_ = new QComboBox(typeSec);
+    type_->setAccessibleName(QStringLiteral("トランジションの種類"));
+    type_->setMaxVisibleItems(30);
+    QString lastGroup;
+    for (const TransitionInfo& info : transitionInfos()) {
+      if (!lastGroup.isEmpty() && info.group != lastGroup) type_->insertSeparator(type_->count());
+      lastGroup = info.group;
+      type_->addItem(theme::icon(transitionIconName(info.type)), QStringLiteral("%1（%2）").arg(info.label, info.group), int(info.type));
+      type_->setItemData(type_->count() - 1, info.hint, Qt::ToolTipRole);
+    }
+    disableWheel(type_);
+    hint_ = makeLabel(QString(), "note", typeSec);
+    hint_->setWordWrap(true);
+    typeSec->body()->addWidget(type_);
+    typeSec->body()->addWidget(hint_);
+    addSection(v, typeSec, false);
+
+    auto* lenSec = new Section(QStringLiteral("長さ"), this);
+    duration_ = new SliderRow(QStringLiteral("長さ"), kMinTransitionDuration, kMaxTransitionDuration, 0.05,
+                              [](double x) { return QStringLiteral("%1秒").arg(x, 0, 'f', 2); }, lenSec);
+    duration_->setLabelVisible(false);
+    duration_->setDefault(kDefaultTransitionDuration);
+    duration_->setUnit(0.1, 0.01);
+    duration_->setValueBubble(true);
+    lenNote_ = makeLabel(QString(), "note", lenSec);
+    lenNote_->setWordWrap(true);
+    lenSec->body()->addWidget(duration_);
+    lenSec->body()->addWidget(lenNote_);
+    addSection(v, lenSec);
+
+    auto* audioSec = new Section(QStringLiteral("音"), this);
+    crossfade_ = new QCheckBox(QStringLiteral("音もクロスフェードする"), audioSec);
+    crossfade_->setObjectName(QStringLiteral("TransitionCrossfade"));
+    crossfade_->setToolTip(QStringLiteral("トランジションの間、前のクリップの音を小さくしながら、次のクリップの音を大きくします"));
+    audioNote_ = makeLabel(QString(), "note", audioSec);
+    audioNote_->setWordWrap(true);
+    audioSec->body()->addWidget(crossfade_);
+    audioSec->body()->addWidget(audioNote_);
+    addSection(v, audioSec);
+
+    auto* moreSec = new Section(QStringLiteral("まとめて"), this);
+    auto* all = new QPushButton(QStringLiteral("すべての切れ目に、同じトランジションを付ける"), moreSec);
+    auto* removeAll = new QPushButton(QStringLiteral("すべての切れ目のトランジションを外す"), moreSec);
+    auto* remove = new QPushButton(QStringLiteral("このトランジションを削除"), moreSec);
+    moreSec->body()->addWidget(all);
+    moreSec->body()->addWidget(removeAll);
+    moreSec->body()->addWidget(remove);
+    auto* about = makeLabel(QStringLiteral("切れ目を真ん中にして、前後のクリップを重ねて切り替えます（動画の長さは変わりません）。"
+                                           "素材の続きが無い所は、端のフレームを止めて使います"),
+                            "note", moreSec);
+    about->setWordWrap(true);
+    moreSec->body()->addWidget(about);
+    addSection(v, moreSec);
+    v->addStretch(1);
+
+    connect(type_, &QComboBox::activated, this, [this](int index) {
+      const QVariant d = type_->itemData(index);
+      if (d.isValid()) editor().setTransition(clipId_, TransitionType(d.toInt()));
+    });
+    connect(duration_, &SliderRow::changed, this, [this](double x) {
+      editor().setTransitionDuration(clipId_, x, QStringLiteral("trdur-") + clipId_);
+    });
+    connect(duration_, &SliderRow::released, this, [this] {
+      editor().rememberTransitionDefault(clipId_);  // 次に付けるトランジションも、この長さにする
+      editor().endMerge();
+    });
+    connect(crossfade_, &QCheckBox::toggled, this, [this](bool on) { editor().setTransitionAudioCrossfade(clipId_, on); });
+    connect(all, &QPushButton::clicked, this, [this] {
+      const VideoClip* c = editor().clip(clipId_);
+      if (!c || c->transIn.type == TransitionType::None) return;
+      const Transition tr = c->transIn;
+      const int n = editor().applyTransitionToAll(tr.type, tr.duration, tr.audioCrossfade);
+      editor().toast(QStringLiteral("%1 か所の切れ目に「%2」を付けました").arg(n).arg(transitionInfo(tr.type).label));
+    });
+    connect(removeAll, &QPushButton::clicked, this, [] {
+      const int n = editor().removeAllTransitions();
+      editor().toast(QStringLiteral("%1 か所のトランジションを外しました").arg(n));
+    });
+    connect(remove, &QPushButton::clicked, this, [this] { editor().removeTransition(clipId_); });
+  }
+
+  void setClip(const QString& clipId) { clipId_ = clipId; }
+
+  void refresh() {
+    const Editor& ed = editor();
+    const TimelineLayout& layout = ed.layout();
+    int index = -1;
+    for (const auto& l : layout.items) {
+      if (l.clip.id == clipId_) index = l.index;
+    }
+    if (index <= 0 || index >= int(layout.items.size())) return;
+    const ClipLayout& next = layout.items[size_t(index)];
+    const Transition& tr = next.clip.transIn;
+    if (tr.type == TransitionType::None) return;
+    const TransitionInfo& info = transitionInfo(tr.type);
+    auto nameOf = [&](const VideoClip& c) {
+      const Asset* a = ed.asset(c.assetId);
+      return a ? a->name : QStringLiteral("ファイルが見つかりません");
+    };
+    header_->set(transitionIconName(tr.type), info.label,
+                 QStringLiteral("%1 → %2（%3）").arg(nameOf(layout.items[size_t(index) - 1].clip), nameOf(next.clip), formatTime(next.start)));
+    {
+      const QSignalBlocker b(type_);
+      type_->setCurrentIndex(type_->findData(int(tr.type)));
+    }
+    hint_->setText(info.hint);
+    duration_->setValue(tr.duration);
+    const int fps = ed.project().settings.fps;
+    const TransitionSpan span = transitionSpanAt(layout, index, fps);
+    if (!span.active()) {
+      lenNote_->setText(QStringLiteral("前後のクリップが短すぎるので、このトランジションは入りません（クリップを長くすると効きます）"));
+    } else {
+      const double eff = double(span.frames()) / fps;
+      QString text = QStringLiteral("切れ目の前 %1 秒・後ろ %2 秒（%3 フレーム）")
+                         .arg(double(span.before) / fps, 0, 'f', 2)
+                         .arg(double(span.after) / fps, 0, 'f', 2)
+                         .arg(span.frames());
+      if (eff < tr.duration - 0.5 / fps) text += QStringLiteral("。前後のクリップが短いので、それぞれの半分までにしています");
+      lenNote_->setText(text);
+    }
+    {
+      const QSignalBlocker b(crossfade_);
+      crossfade_->setChecked(tr.audioCrossfade);
+    }
+    audioNote_->setText(tr.audioCrossfade ? QStringLiteral("トランジションの間、前後のクリップの音を重ねて、なめらかに切り替えます")
+                                          : QStringLiteral("音は切れ目でそのまま切り替わります"));
+  }
+
+ private:
+  QString clipId_;
+  PanelHeader* header_;
+  QComboBox* type_;
+  QLabel* hint_;
+  SliderRow* duration_;
+  QLabel* lenNote_;
+  QCheckBox* crossfade_;
+  QLabel* audioNote_;
 };
 
 // ---- Inspector --------------------------------------------------------------
@@ -1288,7 +1795,8 @@ Inspector::Inspector(QWidget* parent) : QScrollArea(parent) {
   clip_ = new ClipPanel(container);
   text_ = new TextPanel(container);
   audio_ = new AudioPanel(container);
-  for (QWidget* w : std::initializer_list<QWidget*>{project_, clip_, text_, audio_}) v->addWidget(w);
+  transition_ = new TransitionPanel(container);
+  for (QWidget* w : std::initializer_list<QWidget*>{project_, clip_, text_, audio_, transition_}) v->addWidget(w);
   setWidget(container);
   Editor& ed = editor();
   connect(&ed, &Editor::selectionChanged, this, &Inspector::onSelection);
@@ -1322,6 +1830,7 @@ void Inspector::onSelection() {
   clip_->setVisible(s.type == Selection::Clip || s.type == Selection::Overlay);
   text_->setVisible(s.type == Selection::Text);
   audio_->setVisible(s.type == Selection::Audio);
+  transition_->setVisible(s.type == Selection::Transition);
   if (s.type == Selection::Clip || s.type == Selection::Overlay) {
     clip_->setClip(s.id);
     clip_->refresh();
@@ -1331,6 +1840,9 @@ void Inspector::onSelection() {
   } else if (s.type == Selection::Audio) {
     audio_->setAudio(s.id);
     audio_->refresh();
+  } else if (s.type == Selection::Transition) {
+    transition_->setClip(s.id);
+    transition_->refresh();
   } else {
     project_->refresh();
   }
@@ -1343,6 +1855,7 @@ void Inspector::refreshCurrent() {
   if (s.type == Selection::Clip || s.type == Selection::Overlay) clip_->refresh();
   else if (s.type == Selection::Text) text_->refresh();
   else if (s.type == Selection::Audio) audio_->refresh();
+  else if (s.type == Selection::Transition) transition_->refresh();
   else project_->refresh();
 }
 

@@ -60,7 +60,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const port = Number(str('PORT', '8787'));
   if (!Number.isInteger(port) || port < 1 || port > 65535) problems.push(`PORT（${str('PORT')}）は 1〜65535 の数にしてください`);
   const databaseUrl = str('DATABASE_URL');
-  if (!databaseUrl) problems.push('DATABASE_URL（PostgreSQL への接続先）を書いてください。例: postgres://kantan:パスワード@localhost:5432/kantan');
+  if (!databaseUrl) problems.push('DATABASE_URL（PostgreSQL への接続先）を書いてください。例: postgres://e_editor:パスワード@localhost:5432/e_editor');
   const region = str('AWS_REGION', 'ap-northeast-1');
   if (!validRegion(region)) problems.push(`AWS_REGION（${region}）が正しくありません。東京なら ap-northeast-1`);
   const japan = region === 'ap-northeast-1' || region === 'ap-northeast-3';

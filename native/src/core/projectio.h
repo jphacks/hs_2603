@@ -2,6 +2,7 @@
 // プロジェクトファイル (.kvproj) の読み書き（JSON 形式）。
 
 #include <QByteArray>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 #include <optional>
@@ -20,6 +21,9 @@ TextItem textFromJson(const QJsonObject& o, bool* hasTrack = nullptr);
 /** キーフレームアニメーションを o の "anim" に書く（キーフレームが無ければ書かない）/ o の "anim" から読む（範囲・並びをそろえる） */
 void animToJson(QJsonObject& o, const Animation& a);
 Animation animFromJson(const QJsonObject& o);
+/** エフェクトの並び（プロジェクトファイルと同じ形）。読むときは、知らない種類を読み飛ばし、値を範囲に収める */
+QJsonArray effectsToJson(const std::vector<Effect>& effects);
+std::vector<Effect> effectsFromJson(const QJsonArray& list);
 
 /** 今の編集場所 1 つを、プロジェクトファイル (.kvproj) の中身にする */
 QByteArray serializeProject();

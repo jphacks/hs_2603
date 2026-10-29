@@ -52,7 +52,15 @@ struct ColorAdjust {
 struct VolumePoint {
   double t = 0;
   double volume = kMaxVolume;
+  bool operator==(const VolumePoint&) const = default;
 };
+
+/** パン（左右の振り分け）の範囲。-1 が左だけ、0 が真ん中（元のまま）、+1 が右だけ */
+constexpr double kMaxPan = 1.0;
+
+/** パン p（-1〜+1）のときの、左・右の音量の倍率（バランス: 反対側を弱める。真ん中は元のまま） */
+inline double panGainLeft(double p) { return p > 0 ? 1 - p : 1; }
+inline double panGainRight(double p) { return p < 0 ? 1 + p : 1; }
 
 // ---- キーフレームアニメーション（位置・拡大率・回転・不透明度） --------------------------
 // 値は「オブジェクトの先頭からの秒数 t」のキーフレームで持つ。キーフレームが 1 つも無い項目は、
@@ -77,6 +85,7 @@ struct Keyframe {
   double value = 0;
   /** このキーフレームから次のキーフレームまでの変わり方 */
   Easing easing = Easing::Linear;
+  bool operator==(const Keyframe&) const = default;
 };
 
 /** 項目ごとに独立したキーフレーム列（t の順）。空の項目はアニメーションしない */
@@ -90,6 +99,7 @@ struct Animation {
     }
     return true;
   }
+  bool operator==(const Animation&) const = default;
 };
 
 /** 切り抜き（素材の上下左右の端から切り落とす割合）の上限。左右・上下それぞれ、合わせてもこの範囲に収める */
@@ -117,6 +127,129 @@ struct ChromaKey {
   bool operator==(const ChromaKey&) const = default;
 };
 
+// ---- エフェクト（モザイク・ぼかしなど） ----------------------------------------------------------------
+// クリップ（メイン・重ねるトラック）に掛けるものと、エフェクトレイヤー（重ねるトラックの段に置き、下にあるものに掛ける）で使うもの。
+// 値の意味と範囲は種類ごとに決まる（core/effects の effectInfo）。大きさの値は、掛ける画像の高さに対する割合（解像度が違っても同じ見た目）。
+
+enum class EffectType {
+  Mosaic,     // モザイク（amount: ブロックの大きさ）
+  Blur,       // ぼかし（amount: ぼかしの大きさ）
+  Sharpen,    // シャープ（amount: 強さ、size: 半径）
+  Vignette,   // 周辺減光（amount: 暗さ、size: 明るく残す範囲、softness: 境目のなめらかさ）
+  Invert,     // 色の反転（ネガ）
+  Posterize,  // ポスタリゼーション（amount: 色の段階の数）
+  Noise,      // ノイズ・フィルムの粒子（amount: 強さ）
+  RgbShift,   // 色ずれ（amount: ずらす幅）
+  Fill,       // 塗りつぶし（color。エフェクトレイヤーで、範囲を隠すとき）
+};
+constexpr int kEffectTypeCount = 9;
+
+struct Effect {
+  /** クリップの中で、エフェクトを見分ける目印（設定欄で並べ替えるときなど） */
+  QString id;
+  EffectType type = EffectType::Mosaic;
+  bool enabled = true;
+  double amount = 0;
+  double size = 0;
+  double softness = 0;
+  QColor color{0, 0, 0};
+  bool operator==(const Effect&) const = default;
+};
+
+// ---- トランジション（メインのビデオの切れ目） -------------------------------------------------------
+// 値の意味は core/transitions の transitionInfos()。並びは保存に使わない（保存は名前で書く）
+
+enum class TransitionType {
+  None,
+  Dissolve,    // クロスディゾルブ（xfade fade）
+  DipBlack,    // 暗転（fadeblack）
+  DipWhite,    // ホワイトアウト（fadewhite）
+  Grain,       // ノイズディゾルブ（dissolve）
+  WipeLeft,    // ワイプ ←（wipeleft）
+  WipeRight,   // ワイプ →（wiperight）
+  WipeUp,      // ワイプ ↑（wipeup）
+  WipeDown,    // ワイプ ↓（wipedown）
+  SoftLeft,    // ソフトワイプ ←（smoothleft）
+  SoftRight,   // ソフトワイプ →（smoothright）
+  Clock,       // 時計回りワイプ（radial）
+  DoorsOpen,   // 扉（左右に開く。vertopen）
+  BlindsOpen,  // 扉（上下に開く。horzopen）
+  IrisOpen,    // アイリス（開く。circleopen）
+  IrisClose,   // アイリス（閉じる。circleclose）
+  PushLeft,    // プッシュ ←（slideleft）
+  PushRight,   // プッシュ →（slideright）
+  PushUp,      // プッシュ ↑（slideup）
+  PushDown,    // プッシュ ↓（slidedown）
+  SlideLeft,   // スライド ←（coverleft）
+  SlideRight,  // スライド →（coverright）
+  Zoom,        // ズーム（zoomin）
+  Pixelize,    // ピクセル化（pixelize）
+};
+
+/** クリップに入るときのトランジション（前のクリップとの切れ目）。type が None なら無し */
+struct Transition {
+  TransitionType type = TransitionType::None;
+  /** 長さ（秒）。切れ目を真ん中にして、前後のクリップの長さの半分までに収めて使う */
+  double duration = 1.0;
+  /**
+   * 音もクロスフェードする（トランジションの間、前のクリップの音を小さくしながら、次のクリップの音を大きくする）。
+   * オフなら音は切れ目でそのまま切り替わる。新しく付けるトランジションはオン（この項目が無い古いファイルはオフとして読む）
+   */
+  bool audioCrossfade = true;
+  bool operator==(const Transition&) const = default;
+};
+
+// ---- オブジェクトマスク（AI で被写体を囲み、動きを追いかけるマスク） ----------------------------------------
+// プレビューで被写体をクリックすると、AI（EdgeTAM）がそのフレームのマスクを作り、素材のフレームを順に追いかける（トラック）。
+// マスクの中身（素材のフレームごと）は generated フォルダーのファイル（file）。クリックした点（prompts）も覚えておくので、
+// ファイルが無いパソコンでも「トラック」で作り直せる。
+
+/** クリックした点。x・y は素材のフレーム（反転の前）に対する割合（0〜1）。positive が false なら「ここは含めない」 */
+struct MaskPoint {
+  double x = 0.5;
+  double y = 0.5;
+  bool positive = true;
+  bool operator==(const MaskPoint&) const = default;
+};
+
+/** 1 つのフレームでクリックした点（t はそのフレームの素材の時刻。写真は 0） */
+struct MaskPrompt {
+  double t = 0;
+  std::vector<MaskPoint> points;
+  bool operator==(const MaskPrompt&) const = default;
+};
+
+/** マスクの使い方 */
+enum class MaskMode {
+  Cutout,   // 被写体だけを残す（ほかは透明。メインのトラックでは黒）
+  Effects,  // エフェクトを、被写体の中だけに掛ける（反転すると外だけ）
+};
+
+/** 広げる・狭める、境目のぼかしの上限（素材のピクセル） */
+constexpr double kMaxMaskExpand = 60;
+constexpr double kMaxMaskFeather = 60;
+
+struct ObjectMask {
+  /**
+   * マスクの目印（空ならマスクなし）。分割・複製した映像は同じ目印のまま。トラックの結果は、同じ目印の映像すべてに入る
+   * （クリップや素材の ID ではないので、開き直して ID が変わっても使える）
+   */
+  QString id;
+  /** 素材のフレームごとのマスク（generated の objmask-*.kvmask のファイル名）。空なら、まだ作っていない */
+  QString file;
+  /** クリックした点（1 つ目が最初にクリックしたフレーム） */
+  std::vector<MaskPrompt> prompts;
+  bool enabled = true;
+  MaskMode mode = MaskMode::Cutout;
+  /** 被写体の外側をマスクにする（背景を消す: 被写体を消して背景を残す / エフェクト: 外側だけに掛ける） */
+  bool invert = false;
+  /** 広げる（+）・狭める（-）幅と、境目のぼかし（素材のピクセル） */
+  double expand = 0;
+  double feather = 0;
+  bool has() const { return !id.isEmpty() && !prompts.empty(); }
+  bool operator==(const ObjectMask&) const = default;
+};
+
 /** ビデオトラックのクリップ。前から順に隙間なく並ぶ */
 struct VideoClip {
   QString id;
@@ -130,6 +263,8 @@ struct VideoClip {
   /** 音量キーフレーム（クリップの先頭からの、タイムライン上の秒数）。空なら volume のまま */
   std::vector<VolumePoint> volumePoints;
   bool muted = false;
+  /** パン（-1 が左だけ、0 が真ん中、+1 が右だけ） */
+  double pan = 0;
   double fadeIn = 0;
   double fadeOut = 0;
   FitMode fit = FitMode::Contain;
@@ -153,18 +288,63 @@ struct VideoClip {
   double stretchX = 1;
   double stretchY = 1;
   ChromaKey chroma;
+  /** 左右・上下の反転（素材の向きそのものを変える。切り抜きの左右・上下は、反転したあとの見た目の端） */
+  bool flipX = false;
+  bool flipY = false;
+  /** エフェクト（並べた順に掛ける）。素材のフレームに、クロマキー・色の調整の前に掛ける */
+  std::vector<Effect> effects;
+  /** 前のクリップからこのクリップへ切り替えるトランジション（メインのビデオだけ。先頭のクリップ・重ねるトラックでは使わない） */
+  Transition transIn;
+  /**
+   * 逆再生: 空でなければ、このクリップは逆再生していて、assetId は逆向きに作り直した動画、reversedFrom が元の動画。
+   * in・out は逆向きの動画の時間（元の動画の [長さ - out, 長さ - in] にあたる）。逆再生をやめると元の動画に戻す
+   */
+  QString reversedFrom;
+  /** オブジェクトマスク（AI で被写体を囲んで追いかけるマスク）。id が空なら無し */
+  ObjectMask mask;
+  bool operator==(const VideoClip&) const = default;
 };
+
+/** 重ねるトラックに置くものの種類 */
+enum class LayerKind {
+  Media,   // 動画・写真
+  Effect,  // エフェクトレイヤー（素材を使わず、下にあるものに効果を掛ける）
+};
+
+/** エフェクトレイヤーの範囲の形。Full は画面全体（調整レイヤー） */
+enum class RegionShape { Full, Rect, Ellipse };
+
+/** エフェクトレイヤーが効果を掛ける範囲 */
+struct EffectRegion {
+  RegionShape shape = RegionShape::Ellipse;
+  /** 境目のぼかし（範囲の短い辺に対する割合。0 ならくっきり） */
+  double feather = 0.1;
+  /** 範囲の外側に掛ける（範囲の中は、そのまま見せる） */
+  bool invert = false;
+  bool operator==(const EffectRegion&) const = default;
+};
+
+/** エフェクトレイヤーの範囲の境目のぼかしの上限 */
+constexpr double kMaxRegionFeather = 0.5;
 
 /**
  * 重ねるトラックの映像・画像。メインの映像の上に、好きな時間（start）から重ねる。中身はビデオクリップと同じ
  * （素材・切り出し・速度・音量・フェード・位置・拡大・回転・不透明度・アニメーション・色・切り抜き・伸縮・クロマキー）。
- * 表示方法はいつも「全体表示」で、余白は透明。段（track）は 0 がメインのすぐ上で、数字が大きいほど前に重なる。文字はいつも一番前
+ * 表示方法はいつも「全体表示」で、余白は透明。段（track）は 0 がメインのすぐ上で、数字が大きいほど前に重なる。文字はいつも一番前。
+ *
+ * kind が Effect のもの（エフェクトレイヤー）は素材を使わない（assetId は空、isImage で長さは in〜out の自由な長さ）。
+ * 下にあるもの（メインの映像と、下の段のもの）の、範囲（region）の中だけに effects と color を掛ける。範囲は画面いっぱいの四角を、
+ * 位置・拡大率・伸縮・回転（とキーフレーム）で動かしたもの。不透明度とフェードは、効き目の強さになる
  */
 struct OverlayItem : VideoClip {
   double start = 0;
   int track = 0;
   /** グループ（同じ値のもの同士が、一緒に動く・消える・複製される）。空ならグループなし */
   QString group;
+  LayerKind kind = LayerKind::Media;
+  EffectRegion region;
+  bool isEffectLayer() const { return kind == LayerKind::Effect; }
+  bool operator==(const OverlayItem&) const = default;
 };
 
 enum class TextAnimation { None, Fade, SlideUp };
@@ -228,6 +408,7 @@ struct TextItem {
   Animation anim;
   /** グループ（同じ値のもの同士が、一緒に動く・消える・複製される）。空ならグループなし */
   QString group;
+  bool operator==(const TextItem&) const = default;
 };
 
 struct AudioItem {
@@ -245,10 +426,13 @@ struct AudioItem {
   double volume = kMaxVolume;
   /** 音量キーフレーム（t の順）。空ならクリップ全体を volume で鳴らす。あるときは、キーフレームの音量が優先される */
   std::vector<VolumePoint> volumePoints;
+  /** パン（-1 が左だけ、0 が真ん中、+1 が右だけ） */
+  double pan = 0;
   double fadeIn = 0;
   double fadeOut = 0;
   /** グループ（同じ値のもの同士が、一緒に動く・消える・複製される）。空ならグループなし */
   QString group;
+  bool operator==(const AudioItem&) const = default;
 };
 
 enum class Aspect { R16_9, R9_16, R1_1, R4_5 };
@@ -265,11 +449,25 @@ struct ProjectSettings {
    * 映像・文字・音のすべてまとめてこの速さにする（音は音程を変えずに速さだけ変える）
    */
   double speed = 1;
+  bool operator==(const ProjectSettings&) const = default;
+};
+
+/** タイムラインのマーカー（目盛りの上の印。M キーで再生位置に置く。名前・色・メモを付けられる） */
+struct Marker {
+  QString id;
+  /** タイムライン上の時刻（秒。フレームにそろえる） */
+  double t = 0;
+  QString name;
+  QString comment;
+  QColor color{0x3f, 0xb6, 0x7b};
+  bool operator==(const Marker&) const = default;
 };
 
 struct ProjectData {
   QString name;
   ProjectSettings settings;
+  /** マーカー（時間の順） */
+  std::vector<Marker> markers;
   std::vector<VideoClip> clips;
   /** 重ねるトラックの映像・画像（並びは追加した順。重なりの順は track で決める） */
   std::vector<OverlayItem> overlays;
@@ -288,7 +486,29 @@ struct ProjectData {
   std::vector<int> textTrackNos;
   std::vector<AudioItem> audios;
   std::vector<int> audioTrackNos;
+
+  // ---- トラックの非表示・ミュート（タイムラインの見出しの目・スピーカーの印。プレビューと書き出しの両方で効く） ----
+  /** メインのビデオの映像を出さない（その間は黒。音は mainAudioMuted で別に決める） */
+  bool mainVideoHidden = false;
+  /** メインのビデオの音を出さない */
+  bool mainAudioMuted = false;
+  /** 出さないテキストの段（textTrackIds の ID。段を並べ替えても、その段についていく） */
+  std::vector<QString> hiddenTextTracks;
+  /** 映像を出さない重ねるトラックの段（OverlayItem::track の番号） */
+  std::vector<int> hiddenOverlayTracks;
+  /** 音を出さない重ねるトラックの段（OverlayItem::track の番号） */
+  std::vector<int> mutedOverlayTracks;
+  /** 音を出さないオーディオの段（audioTrackNos の番号。段を並べ替えても、その段についていく） */
+  std::vector<int> mutedAudioTracks;
+
+  bool operator==(const ProjectData&) const = default;
 };
+
+/** トラックの非表示・ミュートで、出さないもの（プレビュー・書き出し・音の組み立てで共通に使う） */
+bool isTextHidden(const ProjectData& p, const TextItem& t);
+bool isOverlayHidden(const ProjectData& p, const OverlayItem& o);
+bool isOverlayMuted(const ProjectData& p, const OverlayItem& o);
+bool isAudioMuted(const ProjectData& p, const AudioItem& a);
 
 /** 1 つの編集場所（タブ）の保存・読み込み用データ */
 struct WorkspaceData {

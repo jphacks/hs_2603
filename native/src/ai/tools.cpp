@@ -10,14 +10,17 @@
 #include <memory>
 
 #include "ai/framegrab.h"
+#include "ai/guidecatalog.h"
 #include "ai/imagegen.h"
 #include "ai/workshop.h"
 #include "core/editor.h"
+#include "core/effects.h"
 #include "core/filters.h"
 #include "core/projectio.h"
 #include "core/texttemplates.h"
 #include "core/textstyles.h"
 #include "core/timeline.h"
+#include "core/transitions.h"
 
 namespace kv::ai {
 
@@ -201,8 +204,60 @@ static const char* kToolSpecs = R"json([
     "required": ["time"]}}}}
 ])json";
 
+/** show_guide で 1 回に案内する手順の数の上限 */
+static constexpr int kMaxGuideSteps = 6;
+/** 手順の文の長さの上限（画面の吹き出しに出すので短く） */
+static constexpr int kMaxGuideText = 60;
+
+/**
+ * show_guide（操作の案内）の説明。案内できる場所は guidecatalog の一覧から作る（一覧を変えれば、道具の説明も変わる）。
+ * 一覧は ID の始まりごとにまとめて書く（同じ言葉をくり返さず、AI に送る量を抑える）
+ */
+static QJsonObject guideToolSpec() {
+  QStringList lines;
+  for (const GuideGroup& g : guideGroups()) {
+    QStringList items;
+    for (const GuideTarget& t : guideTargets()) {
+      if (!t.id.startsWith(g.prefix)) continue;
+      const QString rest = t.id.mid(g.prefix.size());
+      if (rest.contains(QLatin1Char('.'))) continue;
+      items << rest + QLatin1Char('=') + t.label;
+    }
+    if (!items.isEmpty()) lines << QStringLiteral("%1（%2）%3").arg(g.prefix, g.label, items.join(QStringLiteral("; ")));
+  }
+  QJsonArray ids;
+  for (const GuideTarget& t : guideTargets()) ids.append(t.id);
+  const QJsonObject target{{QStringLiteral("type"), QStringLiteral("string")},
+                           {QStringLiteral("enum"), ids},
+                           {QStringLiteral("description"), QStringLiteral("案内する場所の ID（始まりごとにまとめて書く）。\n") + lines.join(QLatin1Char('\n'))}};
+  const QJsonObject text{{QStringLiteral("type"), QStringLiteral("string")},
+                         {QStringLiteral("description"), QStringLiteral("その場所ですること（20 文字くらい。例: ここを押して、逆再生にします）")}};
+  const QJsonObject step{{QStringLiteral("type"), QStringLiteral("object")},
+                         {QStringLiteral("properties"), QJsonObject{{QStringLiteral("target"), target}, {QStringLiteral("text"), text}}},
+                         {QStringLiteral("required"), QJsonArray{QStringLiteral("target"), QStringLiteral("text")}}};
+  const QJsonObject steps{{QStringLiteral("type"), QStringLiteral("array")},
+                          {QStringLiteral("minItems"), 1},
+                          {QStringLiteral("maxItems"), kMaxGuideSteps},
+                          {QStringLiteral("items"), step}};
+  const QJsonObject schema{{QStringLiteral("type"), QStringLiteral("object")},
+                           {QStringLiteral("properties"), QJsonObject{{QStringLiteral("steps"), steps}}},
+                           {QStringLiteral("required"), QJsonArray{QStringLiteral("steps")}}};
+  const QString description = QStringLiteral(
+      "アプリの使い方を聞かれたとき（「どうやって〜する？」「〜はどこ？」など）に、画面の上に薄い矢印と短い説明を出して、押す場所を順に案内する。"
+      "編集はしない。映像を選ぶ・タブやメニューやダイアログを開くといった準備は、アプリが自動で案内に足すので、steps には押す場所だけを、操作する順に書く。"
+      "ドラッグして使う場所（説明に「ドラッグ」とあるもの）は、行き先まで運ぶ動きもアプリが見せるので、行き先を別の手順にしない。"
+      "新しく出すと、前の案内は消える。");
+  return {{QStringLiteral("toolSpec"), QJsonObject{{QStringLiteral("name"), QStringLiteral("show_guide")},
+                                                   {QStringLiteral("description"), description},
+                                                   {QStringLiteral("inputSchema"), QJsonObject{{QStringLiteral("json"), schema}}}}}};
+}
+
 const QJsonArray& toolSpecs() {
-  static const QJsonArray specs = QJsonDocument::fromJson(QByteArray(kToolSpecs)).array();
+  static const QJsonArray specs = [] {
+    QJsonArray s = QJsonDocument::fromJson(QByteArray(kToolSpecs)).array();
+    s.append(guideToolSpec());
+    return s;
+  }();
   return specs;
 }
 
@@ -254,8 +309,13 @@ static QJsonObject clipJson(const ClipLayout& l) {
     o.insert(QStringLiteral("volume"), r2(c.volume * 100));
     o.insert(QStringLiteral("muted"), c.muted);
     if (!c.volumePoints.empty()) o.insert(QStringLiteral("volume_keyframes"), int(c.volumePoints.size()));
+    if (std::abs(c.pan) > 1e-9) o.insert(QStringLiteral("pan"), r2(c.pan * 100));
+    if (!c.reversedFrom.isEmpty()) o.insert(QStringLiteral("reversed"), true);
   }
   if (!c.anim.empty()) o.insert(QStringLiteral("has_motion_keyframes"), true);
+  // 前のクリップとの切れ目のトランジション（分割・並べ替え・削除で、どこに付くかが分かるように）
+  if (c.transIn.type != TransitionType::None) o.insert(QStringLiteral("transition_in"), transitionInfo(c.transIn.type).label);
+  if (anyEffectActive(c.effects)) o.insert(QStringLiteral("has_effects"), true);
   return o;
 }
 
@@ -287,6 +347,7 @@ static QJsonObject audioJson(const AudioItem& au) {
                 {QStringLiteral("source_start"), r2(au.in)}};
   if (a) o.insert(QStringLiteral("source_length"), r2(a->duration));
   if (!au.volumePoints.empty()) o.insert(QStringLiteral("volume_keyframes"), int(au.volumePoints.size()));
+  if (std::abs(au.pan) > 1e-9) o.insert(QStringLiteral("pan"), r2(au.pan * 100));
   return o;
 }
 
@@ -326,7 +387,13 @@ QJsonObject describeProject() {
   QJsonValue selected;
   const Selection& s = ed.selection();
   // 重ねるトラックの映像は、AI の操作の対象にしていないので、選んでいるものとしては伝えない
-  if (s && s.type != Selection::Overlay) {
+  if (s.type == Selection::Transition) {
+    // トランジション（切れ目）を選んでいる: clip_id は切れ目の後ろのクリップ
+    const VideoClip* c = ed.clip(s.id);
+    selected = QJsonObject{{QStringLiteral("type"), QStringLiteral("transition")},
+                           {QStringLiteral("clip_id"), s.id},
+                           {QStringLiteral("name"), c ? transitionInfo(c->transIn.type).label : QString()}};
+  } else if (s && s.type != Selection::Overlay) {
     const QString type = s.type == Selection::Clip ? QStringLiteral("clip") : s.type == Selection::Text ? QStringLiteral("text") : QStringLiteral("audio");
     selected = QJsonObject{{QStringLiteral("type"), type}, {QStringLiteral("id"), s.id}};
   }
@@ -883,6 +950,7 @@ ToolResult splitClip(const QJsonObject& in, const QString& merge) {
       second.id = secondId;
       second.in = cut;
       second.fadeIn = 0;
+      second.transIn = Transition{};  // 分けた所はそのままつながる（トランジションは前半の頭に残す）
       p.clips[i].out = cut;
       p.clips[i].fadeOut = 0;
       splitAnimation(c.anim, local, p.clips[i].anim, second.anim);
@@ -1104,6 +1172,53 @@ ToolResult proposeTexts(const QJsonObject& in) {
   r.content.append(textBlock({{QStringLiteral("ok"), true},
                               {QStringLiteral("shown"), int(r.ideas.size())},
                               {QStringLiteral("note"), QStringLiteral("案をボタンで表示しました。ユーザーが選ぶまでタイムラインには追加されません。")}}));
+  return r;
+}
+
+// ---- 操作の案内（show_guide） ------------------------------------------------------
+
+/** 吹き出しに出す手順の文（1 行にして、長すぎれば切る） */
+QString guideText(const QString& text) {
+  QString t = text.simplified();
+  if (t.size() > kMaxGuideText) t = t.left(kMaxGuideText - 1) + QChar(0x2026);
+  return t;
+}
+
+ToolResult showGuide(const QJsonObject& in) {
+  const QJsonArray steps = in.value(QStringLiteral("steps")).toArray();
+  if (steps.isEmpty()) return errorResult(QStringLiteral("steps が必要です"));
+  ToolResult r;
+  QJsonArray shown;
+  QStringList unknown;
+  for (const QJsonValue& v : steps) {
+    const QJsonObject o = v.toObject();
+    const QString id = string(o, "target").trimmed();
+    const GuideTarget* t = guideTarget(id);
+    if (!t) {
+      unknown << (id.isEmpty() ? QStringLiteral("（空）") : id.left(40));
+      continue;
+    }
+    if (int(r.guide.size()) >= kMaxGuideSteps) continue;
+    GuideStep s;
+    s.target = t->id;
+    s.text = guideText(string(o, "text"));
+    r.guide.push_back(s);
+    QJsonObject item{{QStringLiteral("place"), t->place}};
+    const GuideInfo info = guideInfo(t->id);
+    if (!info.keys.isEmpty()) item.insert(QStringLiteral("keys"), info.keys);
+    if (!info.problem.isEmpty()) item.insert(QStringLiteral("problem"), info.problem);
+    shown.append(item);
+  }
+  if (!unknown.isEmpty()) {
+    return errorResult(QStringLiteral("知らない場所の ID です: %1。target の説明の一覧にある ID を使ってください").arg(unknown.join(QStringLiteral(", "))));
+  }
+  r.hasGuide = true;
+  QString note = QStringLiteral(
+      "画面に、薄い矢印で手順を順に案内しています（ユーザーがその場所を押すと、次へ進みます）。"
+      "返事では、同じ手順を「・」で始めて 1 行ずつ短く書いてください（place の言葉を使い、ID は書かない）。"
+      "keys があれば、そのキーでもできると添えてよい。");
+  if (steps.size() > kMaxGuideSteps) note += QStringLiteral("手順は %1 つまでなので、後ろは案内していません。").arg(kMaxGuideSteps);
+  r.content.append(textBlock({{QStringLiteral("ok"), true}, {QStringLiteral("steps"), shown}, {QStringLiteral("note"), note}}));
   return r;
 }
 
@@ -1967,6 +2082,7 @@ void runTool(const QString& name, const QJsonObject& input, const QString& merge
     // AI がそのまま入れたワークショップのテンプレートも、使った人の数に入れる（案の中で試しただけのものは入れない）
     for (const QString& id : r.workshopUsed) workshop().markUsed(id);
   } else if (name == u"propose_texts") r = proposeTexts(input);
+  else if (name == u"show_guide") r = showGuide(input);
   else if (name == u"propose_audio") r = proposeAudio(input);
   else if (name == u"propose_photos") r = proposePhotos(input);
   else if (name == u"seek") {

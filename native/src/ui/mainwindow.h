@@ -21,12 +21,23 @@ class Inspector;
 class PerspectiveManager;
 class ExportDialog;
 class AiPanel;
+class GuideController;
 
 class MainWindow : public QMainWindow {
   Q_OBJECT
  public:
   MainWindow();
   ~MainWindow() override;
+
+  // ---- 操作の案内（ui/guide.cpp）から使う ----
+  /** 操作（keymap の ID）の QAction。無ければ、その objectName の QAction（それも無ければ nullptr） */
+  QAction* commandAction(const QString& id) const;
+  PerspectiveManager* perspective() const { return perspective_; }
+  Inspector* inspector() const { return inspector_; }
+  TimelineWidget* timeline() const { return timeline_; }
+  PreviewPanel* preview() const { return preview_; }
+  AiPanel* aiPanel() const { return aiPanel_; }
+  GuideController* guide() const { return guide_; }
 
   void newProject();
   void openProject();
@@ -49,6 +60,8 @@ class MainWindow : public QMainWindow {
 
  private:
   void buildMenus();
+  /** 「クリップ」「シーケンス」「マーカー」のメニュー（Premiere と同じ分け方）。buildMenus から呼ぶ */
+  void buildEditingMenus();
   void updateTitle();
   void showToast(const QString& message, int kind);
   void setTaskbarProgress(double ratio, bool running);
@@ -70,7 +83,7 @@ class MainWindow : public QMainWindow {
   void closeWorkspace(int index);
   /** AI アシスタントの欄を出す・しまう（ログインしていなければ、欄にログインの案内が出る） */
   void setAiVisible(bool on);
-  /** AI サーバーのアドレス（.env の KANTAN_AI_SERVER か、exe に組み込んだもの）が決まっていなければ、AI アシスタントを隠す */
+  /** AI サーバーのアドレス（.env の E_EDITOR_AI_SERVER か、exe に組み込んだもの）が決まっていなければ、AI アシスタントを隠す */
   void refreshAiAvailability();
   /** 左上のボタンの絵・説明を、左の欄を折りたたんでいるかに合わせる */
   void refreshLeftPanelButton();
@@ -106,6 +119,8 @@ class MainWindow : public QMainWindow {
   /** ブラウザーの画像をドラッグしているときの案内（著作権の注意も） */
   QLabel* dropHint_ = nullptr;
   void* taskbar_ = nullptr;
+  /** AI の操作の案内（画面の上に、薄い矢印で押す場所を示す） */
+  GuideController* guide_ = nullptr;
 };
 
 }  // namespace kv

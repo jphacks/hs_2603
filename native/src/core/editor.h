@@ -12,13 +12,20 @@
 #include <vector>
 
 #include "core/model.h"
+#include "core/subtitles.h"
 #include "core/timeline.h"
 
 namespace kv {
 
+/** ループ再生でくり返す範囲の、一番短い長さ（秒）。これより短い範囲はくり返さない（音が細切れになるので） */
+constexpr double kMinLoopLength = 0.2;
+
 struct Selection {
-  /** Clip はメインのビデオトラックのクリップ、Overlay は重ねるトラックの映像・画像 */
-  enum Type { None, Clip, Text, Audio, Overlay };
+  /**
+   * Clip はメインのビデオトラックのクリップ、Overlay は重ねるトラックの映像・画像。
+   * Transition はメインのビデオの切れ目のトランジション（id は、切れ目の後ろのクリップの ID）
+   */
+  enum Type { None, Clip, Text, Audio, Overlay, Transition };
   Type type = None;
   QString id;
   bool operator==(const Selection&) const = default;
@@ -164,6 +171,30 @@ class Editor : public QObject {
   void setChromaPick(const QString& clipId);
   const QString& chromaPick() const { return chromaPick_; }
 
+  // ---- オブジェクトマスクの被写体をプレビューから選ぶ ----
+  /**
+   * 映像 clipId（メイン・重ねるトラック）の被写体を、プレビューでカーソルを合わせてクリックして選ぶ状態にする。空ならやめる。
+   * 選んでいる間、プレビューはその映像のマスクを外して出す。スポイトと同じく、ほかのものを選ぶ・再生する・
+   * 編集場所を切り替える・その映像が無くなると、やめる（スポイトとは同時に使わない）
+   */
+  void setMaskPick(const QString& clipId);
+  const QString& maskPick() const { return maskPick_; }
+  /**
+   * 同じマスクの目印（ObjectMask::id）の映像すべてに fn を掛ける（分割した映像など。トラックの結果を入れるとき）。
+   * 1 回で元に戻せる。変えた映像の数
+   */
+  int updateMasks(const QString& maskId, const std::function<void(ObjectMask&)>& fn);
+
+  // ---- ループ再生（終わりまで行ったら、始めに戻って続ける。書き出す範囲があれば、その範囲をくり返す。アプリの設定に覚える） ----
+  bool loopPlayback() const { return loop_; }
+  void setLoopPlayback(bool on);
+
+  // ---- プレビューのガイド（セーフマージン・三分割のグリッド。見るためだけで、書き出す動画には出ない。アプリの設定に覚える） ----
+  bool safeMarginsVisible() const { return safeMargins_; }
+  bool gridVisible() const { return grid_; }
+  void setSafeMarginsVisible(bool on);
+  void setGridVisible(bool on);
+
   // ---- 書き出す範囲（タイムラインの一部だけを書き出すとき。編集場所ごとに持ち、プロジェクトには保存しない） ----
   struct TimeRange {
     double start = 0;
@@ -178,6 +209,8 @@ class Editor : public QObject {
   /** a〜b を範囲にする（順番はどちらでもよい） */
   void setRange(double a, double b);
   void clearRange();
+  /** ループ再生でくり返す範囲（書き出す範囲があればその範囲、無ければ 0〜再生の終わり） */
+  TimeRange loopRange() const;
 
   // ---- メディア ------------------------------------------------------------
   const std::map<QString, Asset>& assets() const { return ws().assets; }
@@ -192,6 +225,11 @@ class Editor : public QObject {
   void addAsset(const Asset& a, int workspaceUid = -1);
   /** メディアの ID は全体で重複しないので、どの編集場所にあっても見つけて更新する */
   void updateAsset(const QString& id, const std::function<void(Asset&)>& fn);
+  /**
+   * メディアを別のファイルにつなぎ直す（リンクし直す）。fn でファイルの場所・長さなどを書き換える。
+   * プロジェクトに保存する内容が変わるので、保存していない変更として扱い、画面も出し直す（元に戻す履歴には入れない）
+   */
+  void relinkAsset(const QString& id, const std::function<void(Asset&)>& fn);
   bool removeAsset(const QString& id);
   const std::vector<QImage>* thumbs(const QString& assetId) const;
   void setThumbs(const QString& assetId, std::vector<QImage> images);
@@ -233,6 +271,12 @@ class Editor : public QObject {
    */
   QString addOverlays(const std::vector<QString>& assetIds, std::optional<double> at = std::nullopt, std::optional<int> track = std::nullopt);
   void updateOverlay(const QString& id, const std::function<void(OverlayItem&)>& fn, const QString& merge = QString());
+  /**
+   * エフェクトレイヤー（モザイク・ぼかしなど。core/effects の effectLayerPresets の見本）を、重ねるトラックに追加して選ぶ。
+   * at を省略すると再生位置。track を省略すると、その時間に重ねている映像より上の、空いている段へ入れる（下の映像にも効果が掛かるように）。
+   * 追加したものの ID を返す
+   */
+  QString addEffectLayer(const QString& presetId, std::optional<double> at = std::nullopt, std::optional<int> track = std::nullopt);
   /** 重ねるトラックの段を、上（正 = 前）・下（負 = 後ろ）へ移す。一番上の段のさらに上へ 1 段だけ増やせる */
   void moveOverlayTrack(const QString& id, int delta);
   // ---- メインのビデオと重ねるトラックの間の移動（タイムラインで上下にドラッグしたとき） ----
@@ -336,6 +380,119 @@ class Editor : public QObject {
   /** 写したものにビデオのクリップが入っているか（ドラッグで貼り付けるとき、差し込む位置を見せる） */
   bool clipboardHasClips() const { return !itemClip_.clips.empty(); }
   void splitAtPlayhead();
+  // ---- Premiere と同じ編集の近道 ----
+  /**
+   * 再生位置まで詰める（Q: 前を詰める / W: 後ろを詰める）。選んでいるテキスト・オーディオ・重ねるものに再生位置がかかっていれば、その端を
+   * 再生位置まで詰める（ほかは動かさない）。そうでなければ、再生位置のメインのビデオのクリップを詰め、後ろのクリップ・テキスト・オーディオ・
+   * 重ねるものも、詰めた分だけ前へ詰める（リップル）。詰めたら true
+   */
+  bool rippleTrimToPlayhead(bool start);
+  /** 再生位置にかかっているもの（メインのビデオ・重ねるトラック・テキスト・オーディオ）を、すべて再生位置で分ける。分けた数 */
+  int splitAllAtPlayhead();
+  /**
+   * 選んでいるものを削除して、空いた所を詰める（リップル削除）。メインのビデオのクリップなら、その後ろにあるテキスト・オーディオ・重ねるものも
+   * 一緒に前へ詰める。テキスト・オーディオ・重ねるものなら、同じ段の後ろのものを詰める。削除したら true
+   */
+  bool rippleDeleteSelection();
+  /** その種類（Text / Audio / Overlay）の段 track の、時刻 t の空いた所（隙間）を詰める。詰めたら true */
+  bool closeGap(Selection::Type kind, int track, double t);
+  /** 隙間 [start, end) を返す（t が何かの上なら false）。closeGap と同じ決め方 */
+  bool gapAt(Selection::Type kind, int track, double t, double* start, double* end) const;
+  /**
+   * 字幕（SRT などから読んだもの）を、スタイル presetId のテキストとして並べる（元に戻す 1 回分）。
+   * その時間に何も無い段にまとめて置く（無ければ一番下に新しい段）。字幕どうしが重なるときは、前の字幕を次の字幕の始まりで切る。並べた数
+   */
+  int importSubtitles(const std::vector<SubtitleCue>& cues, const QString& presetId);
+
+  /** 前（forward = false）・次の編集点（クリップ・テキスト・オーディオの端）へ再生位置を動かす。動いたら true */
+  bool seekToEdit(bool forward);
+  /** 選んでいるテキスト・オーディオ・重ねるもの（一緒に選んだものも）を、frames フレームずらす（同じ段のほかのものに当たるなら動かさない） */
+  bool nudgeSelection(int frames);
+  /**
+   * 映像（メイン・重ねるトラック）の音を、同じ時間のオーディオとして切り離す（映像の音は消す。音量・キーフレーム・フェードはそのまま）。
+   * 速度を変えた映像は切り離せない。切り離したオーディオの ID（できなければ空。理由は知らせる）
+   */
+  QString detachAudio(const QString& clipId);
+  /**
+   * フレームの保持: 再生位置でメインのクリップを分け、写真の素材 imageAssetId（そのフレームを画像にしたもの）を seconds 秒、間に入れる。
+   * 入れた写真のクリップは、元のクリップと同じ表示方法・色・エフェクト・位置などにする（キーフレームは、その時間の値にする）。入れたら true
+   */
+  bool insertFrameHold(const QString& clipId, double local, const QString& imageAssetId, double seconds,
+                       const std::optional<ObjectMask>& holdMask = std::nullopt);
+  /**
+   * 逆再生にする / やめる。reversedAssetId は、クリップの素材を逆向きに作り直した動画（やめるときは空）。素材を入れ替えて、
+   * 切り出す所を逆向きの動画の時刻に直す（同じ所を逆向きに映す。タイムラインの長さ・キーフレームはそのまま）。1 回で元に戻せる。変えたら true
+   */
+  bool setClipReversed(const QString& clipId, const QString& reversedAssetId);
+
+  /** 選んでいる映像の、今の設定（色・エフェクト・位置など）を写しておく（属性のペースト用） */
+  bool copyAttributes();
+  bool hasAttributes() const { return attrClip_.has_value(); }
+  /** 写しておいた設定のうち、parts に入っているものを、選んでいる映像（一緒に選んだものも）に貼り付ける。貼り付けた数 */
+  enum AttrPart {
+    AttrColor = 1,
+    AttrEffects = 2,
+    AttrMotion = 4,
+    AttrCrop = 8,
+    AttrChroma = 16,
+    AttrFade = 32,
+    AttrVolume = 64,
+    AttrSpeed = 128,
+    AttrMask = 256,  // オブジェクトマスク（同じ素材ならマスクごと、違う素材なら使い方の設定だけ）
+  };
+  int pasteAttributes(int parts);
+
+  // ---- トランジション（メインのビデオの切れ目。後ろのクリップの transIn に持つ） ----
+  /**
+   * 後ろのクリップ clipId に入るトランジションを付ける・種類を変える（長さは、省略すると今の長さか、はじめの長さ）。
+   * 先頭のクリップには付けられない。付けたら選んで true
+   */
+  bool setTransition(const QString& clipId, TransitionType type, std::optional<double> duration = std::nullopt, const QString& merge = QString());
+  /** トランジションの長さを変える（変えたら true）。次に付けるトランジションの長さは、rememberTransitionDefault で覚える */
+  bool setTransitionDuration(const QString& clipId, double seconds, const QString& merge = QString());
+  /** トランジションの間、音もクロスフェードするか（変えたら true） */
+  bool setTransitionAudioCrossfade(const QString& clipId, bool on);
+  /** そのクリップのトランジションの種類・長さを、次に付けるトランジションの既定として覚える（ドラッグ・スライダーを離したとき） */
+  void rememberTransitionDefault(const QString& clipId);
+  bool removeTransition(const QString& clipId);
+  /** すべての切れ目に、同じトランジションを付ける（付けた数） */
+  int applyTransitionToAll(TransitionType type, double duration, bool audioCrossfade = true);
+  /** すべての切れ目のトランジションを外す（外した数） */
+  int removeAllTransitions();
+  /** 時刻 t に一番近い切れ目の、後ろのクリップの ID（maxDistance 秒より遠ければ空） */
+  QString nearestCut(double t, double maxDistance) const;
+  /** トランジションを付けたときの、はじめの種類・長さ（最後に選んだもの。アプリの設定に覚える） */
+  static TransitionType defaultTransitionType();
+  static double defaultTransitionDuration();
+  static void setDefaultTransition(TransitionType type, double duration);
+
+  // ---- マーカー（目盛りの上の印。名前・色・メモ） ----
+  /** 時刻 t にマーカーを置く（1 フレーム以内にあれば増やさず、それを返す）。置いたマーカーの ID */
+  // ---- トラックの非表示・ミュート（タイムラインの見出しの目・スピーカーの印。元に戻せる。保存もする） ----
+  enum class TrackFlag {
+    MainVideoHidden,  // メインのビデオの映像を出さない（lane は使わない）
+    MainAudioMuted,   // メインのビデオの音を出さない（lane は使わない）
+    TextHidden,       // テキストの段 lane（0 が一番上）を出さない
+    OverlayHidden,    // 重ねるトラックの段 lane（0 がメインのすぐ上）の映像を出さない
+    OverlayMuted,     // 重ねるトラックの段 lane の音を出さない
+    AudioMuted,       // オーディオの段 lane（0 が一番上）の音を出さない
+  };
+  bool trackFlag(TrackFlag flag, int lane = 0) const;
+  /** 変えたら true */
+  bool setTrackFlag(TrackFlag flag, int lane, bool on);
+  /** 非表示・ミュートにしている段があるか */
+  bool anyTrackFlag() const;
+  /** すべての段を表示して、ミュートも外す */
+  void clearTrackFlags();
+
+  QString addMarker(double t);
+  const Marker* marker(const QString& id) const;
+  void updateMarker(const QString& id, const std::function<void(Marker&)>& fn, const QString& merge = QString());
+  void removeMarker(const QString& id);
+  void clearMarkers();
+  /** 再生位置より後ろ（forward）・前の、一番近いマーカーへ動く。動いたら true */
+  bool seekToMarker(bool forward);
+
   void setAspect(Aspect a);
   void setFps(int fps);
   /** 動画全体の再生速度（kMinProjectSpeed〜kMaxProjectSpeed）。プレビューの再生と書き出しに効く */
@@ -374,6 +531,14 @@ class Editor : public QObject {
   void rangeChanged();
   /** スポイト（クロマキーの色をプレビューから選ぶ）を始めた / やめた */
   void chromaPickChanged();
+  /** オブジェクトマスクの被写体を選び始めた / やめた */
+  void maskPickChanged();
+  /** ループ再生のオン・オフが変わった */
+  void loopChanged();
+  /** プレビューのガイド（セーフマージン・グリッド）の表示が変わった */
+  void guidesChanged();
+  /** 属性のコピー（copyAttributes）で、貼り付けられる設定ができた */
+  void attributesChanged();
   /** 今の編集場所が変わった。このあと projectChanged などで中身の更新も通知される */
   void workspaceChanged(int index);
   /** タブの一覧が変わった（追加・削除・名前・保存状態） */
@@ -450,9 +615,20 @@ class Editor : public QObject {
   ItemClipboard itemClip_;
 
   int seekToken_ = 0;
+  /** 最後に 1 フレームずつ動かしたときの seekToken_（間に再生位置を動かしたら、続けて押しても別の操作にする） */
+  int nudgeSeekToken_ = -1;
   bool playing_ = false;
   /** スポイトで色を選んでいる映像（選んでいなければ空） */
   QString chromaPick_;
+  /** オブジェクトマスクの被写体を選んでいる映像（選んでいなければ空） */
+  QString maskPick_;
+  bool loop_ = false;
+  bool safeMargins_ = false;
+  bool grid_ = false;
+  /** copyAttributes で写した映像の設定 */
+  std::optional<VideoClip> attrClip_;
+  /** 写した設定が、エフェクトレイヤーのものか */
+  bool attrFromLayer_ = false;
 
   /** 取り消せる作業を始めたときの状態（キャンセルで戻す） */
   struct EditSession {

@@ -95,7 +95,7 @@ void saveEffort(const QString& choice) {
 /** リポジトリの中で動かしているとき（開発中）は、その一番上のフォルダー。そうでなければ空 */
 static QString repoRoot() {
   QDir d(QCoreApplication::applicationDirPath());
-  // native\dist\kantan-video-editor の 3 つ上がリポジトリの一番上
+  // native\dist\e-editor の 3 つ上がリポジトリの一番上
   for (int i = 0; i < 4; ++i) {
     if (QFileInfo::exists(d.filePath(QStringLiteral(".env.example"))) || QFileInfo::exists(d.filePath(QStringLiteral(".git")))) {
       return d.absolutePath();
@@ -146,7 +146,7 @@ static std::map<QString, QString> parseEnv(const QByteArray& bytes) {
 }
 
 static const QString& serverKey() {
-  static const QString key = QStringLiteral("KANTAN_AI_SERVER");
+  static const QString key = QStringLiteral("E_EDITOR_AI_SERVER");
   return key;
 }
 
@@ -159,7 +159,7 @@ static QStringList envPaths() {
 
 /**
  * key に値が書いてある最初の .env（場所と値）。どこにも無ければ、場所は空。
- * 「KANTAN_AI_SERVER=」のように値が空なら、書いていないのと同じに扱う（.env.example を写しただけの .env など）
+ * 「E_EDITOR_AI_SERVER=」のように値が空なら、書いていないのと同じに扱う（.env.example を写しただけの .env など）
  */
 static std::pair<QString, QString> findEnv(const QString& key) {
   for (const QString& path : envPaths()) {
@@ -258,25 +258,25 @@ QString wrongServerText() {
   if (serverSource() == ServerSource::BuiltIn) {
     return QStringLiteral("AI サーバーではないところにつながりました。アプリを配った人（管理者）に知らせてください");
   }
-  return QStringLiteral(".env の KANTAN_AI_SERVER が、AI サーバーではないところを指しているようです。アドレスとポート番号を確かめてください");
+  return QStringLiteral(".env の E_EDITOR_AI_SERVER が、AI サーバーではないところを指しているようです。アドレスとポート番号を確かめてください");
 }
 
 QString serverProblem(const QString& url) {
   // 画面に出す文なので、アドレスそのものは入れない（直す人は .env を開けば分かる）
-  if (url.isEmpty()) return QStringLiteral("AI サーバーのアドレスが決まっていません。.env に KANTAN_AI_SERVER=（アドレス）を書いてください");
+  if (url.isEmpty()) return QStringLiteral("AI サーバーのアドレスが決まっていません。.env に E_EDITOR_AI_SERVER=（アドレス）を書いてください");
   // 組み込んだアドレスは build.ps1 が確かめているので、ふつうは問題にならない。なっても、使う人には直せない
   const bool builtIn = serverSource() == ServerSource::BuiltIn;
   const QString builtInProblem = QStringLiteral("アプリに組み込まれた AI サーバーのアドレスが正しくありません。アプリを配った人（管理者）に知らせてください");
   const QUrl u(url, QUrl::StrictMode);
   if (!u.isValid() || u.host().isEmpty() || (u.scheme() != u"http" && u.scheme() != u"https")) {
-    return builtIn ? builtInProblem : QStringLiteral(".env の KANTAN_AI_SERVER の書き方が正しくありません（例: https://ai.example.com）");
+    return builtIn ? builtInProblem : QStringLiteral(".env の E_EDITOR_AI_SERVER の書き方が正しくありません（例: https://ai.example.com）");
   }
   if (!u.userInfo().isEmpty() || u.hasQuery() || u.hasFragment()) {
-    return builtIn ? builtInProblem : QStringLiteral(".env の KANTAN_AI_SERVER には、サーバーのアドレスだけを書いてください（例: https://ai.example.com）");
+    return builtIn ? builtInProblem : QStringLiteral(".env の E_EDITOR_AI_SERVER には、サーバーのアドレスだけを書いてください（例: https://ai.example.com）");
   }
   if (u.scheme() == u"http" && !privateHost(u.host())) {
     return builtIn ? builtInProblem
-                   : QStringLiteral(".env の KANTAN_AI_SERVER が、HTTP で家の外のアドレスになっています。パスワードが読まれないよう、https:// にしてください");
+                   : QStringLiteral(".env の E_EDITOR_AI_SERVER が、HTTP で家の外のアドレスになっています。パスワードが読まれないよう、https:// にしてください");
   }
   return {};
 }

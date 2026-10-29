@@ -10,6 +10,7 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
@@ -28,9 +29,14 @@
 #include "core/textstyles.h"
 #include "core/timeline.h"
 #include "media/mediamanager.h"
+#include "mask/maskcontroller.h"
+#include "mask/masktrack.h"
 #include "render/imageops.h"
+#include "render/maskframes.h"
 #include "render/previewengine.h"
 #include "render/textrender.h"
+#include "ui/clipdialogs.h"
+#include "ui/keymap.h"
 #include "ui/librarypanel.h"
 #include "ui/objectmenu.h"
 #include "ui/theme.h"
@@ -80,8 +86,9 @@ PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(par
     if (editor().playing()) endTextEdit(true);
   });
   connect(&ed, &Editor::workspaceAboutToChange, this, [this] { endTextEdit(true); });
+  connect(&ed, &Editor::guidesChanged, this, qOverload<>(&QWidget::update));
   // スポイト: 始めたら、Esc を受け取れるようにこの部品へ入力を向け、カーソルを十字にする
-  connect(&ed, &Editor::chromaPickChanged, this, [this] {
+  auto pickChanged = [this] {
     if (picking()) {
       endTextEdit(true);
       grab_ = Grab::None;
@@ -91,8 +98,22 @@ PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(par
     } else {
       unsetCursor();
     }
+    // 被写体を選ぶ: 今のフレームの AI の準備を先に始める（カーソルを合わせたときに、すぐマスクが出るように）
+    maskCursorIn_ = false;
+    mask::maskController().clearHover();
+    if (maskPicking()) {
+      double pts = 0;
+      const QString id = editor().maskPick();
+      const QImage frame = engine_->rawFrame(id, &pts);
+      if (!frame.isNull()) mask::maskController().prepare(id, frame, pts);
+    }
     update();
-  });
+  };
+  connect(&ed, &Editor::chromaPickChanged, this, pickChanged);
+  connect(&ed, &Editor::maskPickChanged, this, pickChanged);
+  connect(&mask::maskController(), &mask::MaskController::hoverChanged, this, qOverload<>(&QWidget::update));
+  connect(&mask::maskController(), &mask::MaskController::preparingChanged, this, qOverload<>(&QWidget::update));
+  connect(&mask::maskController(), &mask::MaskController::trackingChanged, this, qOverload<>(&QWidget::update));
   connect(&ed, &Editor::timeChanged, this, [this] {
     if (!isEditingText()) return;
     const TextItem* t = editor().text(editId_);
@@ -124,7 +145,7 @@ PreviewStage::PreviewStage(PreviewEngine* engine, QWidget* parent) : QWidget(par
 void PreviewStage::setFullScreenMode(bool on) {
   if (fullScreen_ == on) return;
   if (on) endTextEdit(true);  // 全画面では、編集用の表示も操作も出さない
-  if (on) editor().setChromaPick({});
+  if (on) stopPicking();
   fullScreen_ = on;
   // 全画面では、編集用の操作（枠・ハンドル・ガイド・ドロップ・案内）はすべて止める。映像の描画は通常のままで、同じ処理を使う
   grab_ = Grab::None;
@@ -181,6 +202,33 @@ void PreviewStage::paintEvent(QPaintEvent*) {
   if (fullScreen_) return;  // 全画面では、選択枠・ハンドル・ガイド線などの編集用の表示は出さない
   const Editor& ed = editor();
   if (empty_->isVisible()) p.fillRect(r, QColor(0x16, 0x16, 0x16));
+  // ガイド（見るためだけ。書き出す動画には出ない）: 三分割のグリッドと、セーフマージン（アクション 90%・タイトル 80%）
+  if (!empty_->isVisible() && (ed.gridVisible() || ed.safeMarginsVisible())) {
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, false);
+    p.setBrush(Qt::NoBrush);
+    if (ed.gridVisible()) {
+      p.setPen(QPen(QColor(255, 255, 255, 95), 1, Qt::DashLine));
+      for (int i = 1; i <= 2; ++i) {
+        const double x = std::round(r.left() + r.width() * i / 3.0) + 0.5;
+        const double y = std::round(r.top() + r.height() * i / 3.0) + 0.5;
+        p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()));
+        p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y));
+      }
+    }
+    if (ed.safeMarginsVisible()) {
+      p.setPen(QPen(QColor(255, 255, 255, 140), 1));
+      p.drawRect(r.adjusted(r.width() * 0.05, r.height() * 0.05, -r.width() * 0.05, -r.height() * 0.05));
+      p.setPen(QPen(QColor(255, 255, 255, 110), 1, Qt::DashLine));
+      p.drawRect(r.adjusted(r.width() * 0.1, r.height() * 0.1, -r.width() * 0.1, -r.height() * 0.1));
+      // 画面の真ん中の十字
+      const QPointF m = r.center();
+      p.setPen(QPen(QColor(255, 255, 255, 140), 1));
+      p.drawLine(m - QPointF(7, 0), m + QPointF(7, 0));
+      p.drawLine(m - QPointF(0, 7), m + QPointF(0, 7));
+    }
+    p.restore();
+  }
   // 選んでいる映像・テキストの操作用の枠（ドラッグで移動、四隅で拡大・縮小、上の丸で回転）
   QPolygonF quad;
   if (isEditingText()) {
@@ -217,7 +265,9 @@ void PreviewStage::paintEvent(QPaintEvent*) {
       }
     }
   }
-  if (picking()) {
+  if (maskPicking()) {
+    paintMaskPick(p, r);
+  } else if (picking()) {
     // スポイトの案内（映像の上の端）
     const QString msg = QStringLiteral("スポイト: 透明にしたい色（背景など）をクリックしてください　Esc・右クリックでやめる");
     const QFontMetricsF fm(p.font());
@@ -293,9 +343,17 @@ static QSizeF mediaSizeOf(const VideoClip& c) {
 bool PreviewStage::overlayQuad(const OverlayItem& o, double t, QPolygonF* quad) const {
   const Editor& ed = editor();
   const int fps = ed.project().settings.fps;
-  if (!isOverlayVisible(o, t, fps)) return false;
+  // 非表示の段のものは、映っていないので枠も出さない（プレビューで押しても選ばない）
+  if (!isOverlayVisible(o, t, fps) || isOverlayHidden(ed.project(), o)) return false;
   const QSize d = designSize(ed.project().settings.aspect);
   const double local = std::clamp(t - o.start, 0.0, overlayDuration(o, fps));
+  if (o.isEffectLayer()) {
+    // エフェクトレイヤー: 効果を掛ける範囲（画面いっぱいの形を、位置・拡大率・伸縮・回転で動かしたもの。合成と同じ）。
+    // 「画面全体」は動かしても範囲が変わらないので、枠を出さない
+    if (o.region.shape == RegionShape::Full) return false;
+    *quad = clipQuad(o, local, d);
+    return quad->size() == 4;
+  }
   *quad = clipMediaQuad(mediaSizeOf(o), cropSourceRect(o, QSizeF(1, 1)), layerStateAt(o, local), d);
   return quad->size() == 4;
 }
@@ -332,10 +390,12 @@ bool PreviewStage::selectedQuad(QPolygonF* quad) const {
   if (s.type == Selection::Text) {
     const TextItem* item = ed.text(s.id);
     if (!item || !isTextVisible(*item, t)) return false;
+    if (isTextHidden(ed.project(), *item) && !(isEditingText() && s.id == editId_)) return false;  // 非表示の段の文字
     *quad = textQuad(isEditingText() && s.id == editId_ ? editedItem() : *item, t, d, s.id, 4 / k);
     return true;
   }
   if (s.type == Selection::Clip) {
+    if (ed.project().mainVideoHidden) return false;  // メインのビデオを非表示にしている
     const ClipLayout* cur = findClipAt(ed.layout(), t);
     if (!cur || cur->clip.id != s.id) return false;
     *quad = clipQuad(cur->clip, std::clamp(t - cur->start, 0.0, cur->duration), d);
@@ -384,7 +444,16 @@ PreviewStage::Grab PreviewStage::grabAt(QPointF pos, const QPolygonF& quad) cons
 }
 
 bool PreviewStage::picking() const {
-  return !fullScreen_ && !editor().chromaPick().isEmpty();
+  return !fullScreen_ && (!editor().chromaPick().isEmpty() || !editor().maskPick().isEmpty());
+}
+
+bool PreviewStage::maskPicking() const {
+  return !fullScreen_ && !editor().maskPick().isEmpty();
+}
+
+void PreviewStage::stopPicking() {
+  editor().setChromaPick({});
+  editor().setMaskPick({});
 }
 
 QString PreviewStage::hitText(QPointF pos) const {
@@ -398,7 +467,7 @@ QString PreviewStage::hitText(QPointF pos) const {
   const std::vector<size_t> order = textPaintOrder(texts);
   for (auto it = order.rbegin(); it != order.rend(); ++it) {
     const TextItem& item = texts[*it];
-    if (!isTextVisible(item, t) || item.text.isEmpty()) continue;
+    if (!isTextVisible(item, t) || item.text.isEmpty() || isTextHidden(ed.project(), item)) continue;  // 非表示の段の文字は押せない
     if (textQuad(item, t, d, editing, 0).containsPoint(dp, Qt::WindingFill)) return item.id;
   }
   return {};
@@ -410,6 +479,10 @@ void PreviewStage::mousePressEvent(QMouseEvent* e) {
     return;
   }
   if (e->button() != Qt::LeftButton) return;
+  if (maskPicking()) {
+    maskClickAt(e->position(), e->modifiers());  // 被写体を選ぶ（選択や移動はしない）
+    return;
+  }
   if (picking()) {
     pickChromaAt(e->position());  // スポイト: クリックした所の色を、透明にする色にする（選択や移動はしない）
     return;
@@ -511,6 +584,7 @@ void PreviewStage::mouseMoveEvent(QMouseEvent* e) {
   }
   if (picking()) {
     setCursor(Qt::CrossCursor);
+    if (maskPicking()) maskHoverAt(e->position(), e->modifiers());
     return;
   }
   if (isEditingText()) {
@@ -627,9 +701,9 @@ void PreviewStage::mouseDoubleClickEvent(QMouseEvent* e) {
 }
 
 void PreviewStage::contextMenuEvent(QContextMenuEvent* e) {
-  // スポイトの間の右クリックは、スポイトをやめる
+  // スポイト・被写体を選んでいる間の右クリックは、やめる
   if (picking()) {
-    editor().setChromaPick({});
+    stopPicking();
     return;
   }
   // 全画面と、文字を直接編集している間は出さない（編集中の右クリックは、編集の操作と紛らわしい）
@@ -1049,7 +1123,13 @@ void PreviewStage::focusOutEvent(QFocusEvent* e) {
 
 void PreviewStage::keyPressEvent(QKeyEvent* e) {
   if (picking() && e->key() == Qt::Key_Escape) {
-    editor().setChromaPick({});  // スポイトをやめる
+    stopPicking();  // スポイト・被写体を選ぶのをやめる
+    e->accept();
+    return;
+  }
+  if (maskPicking() && (e->key() == Qt::Key_Shift || e->key() == Qt::Key_Alt || e->key() == Qt::Key_Control)) {
+    // 足す・外すの案内を出し直す（カーソルを動かさなくても）
+    maskHoverAt(maskCursor_, e->modifiers());
     e->accept();
     return;
   }
@@ -1076,6 +1156,209 @@ void PreviewStage::pickChromaAt(QPointF pos) {
     c.chroma.enabled = true;
   });
   ed.setChromaPick({});
+}
+
+// ---- オブジェクトマスクの被写体を選ぶ ---------------------------------------------------------------
+// 素材のフレーム（0〜1 の割合）→ 反転 → 表示方法で収めた四角 → 位置・拡大率・回転 → ウィジェット。合成（composeClipLayer・drawClipMedia）と同じ並び
+
+bool PreviewStage::sourceToWidget(const QString& clipId, QTransform* m, QPainterPath* visible) const {
+  const Editor& ed = editor();
+  const double t = ed.currentTime();
+  const int fps = ed.project().settings.fps;
+  const QSize d = designSize(ed.project().settings.aspect);
+  const QRectF r = stageRect();
+  if (r.isEmpty()) return false;
+  const VideoClip* c = nullptr;
+  LayerState ls;
+  bool main = false;
+  if (const OverlayItem* o = ed.overlay(clipId)) {
+    if (o->isEffectLayer() || !isOverlayVisible(*o, t, fps) || isOverlayHidden(ed.project(), *o)) return false;
+    c = o;
+    ls = layerStateAt(*o, std::clamp(t - o->start, 0.0, overlayDuration(*o, fps)));
+  } else {
+    if (ed.project().mainVideoHidden) return false;
+    const ClipLayout* cur = findClipAt(ed.layout(), t);
+    if (!cur || cur->clip.id != clipId) return false;
+    c = &cur->clip;
+    ls = layerStateAt(cur->clip, std::clamp(t - cur->start, 0.0, cur->duration));
+    main = true;
+  }
+  const QSizeF src = mediaSizeOf(*c);
+  // メインの「拡大」は画面いっぱいに広げた四角、ほか（全体表示・ぼかし背景の手前・重ねるトラック）は収めた四角
+  const QRectF fitted = main && c->fit == FitMode::Cover ? coverRect(src, QSizeF(d)) : containRect(src, QSizeF(d));
+  if (fitted.isEmpty()) return false;
+  const QTransform flip = QTransform::fromScale(c->flipX ? -1 : 1, c->flipY ? -1 : 1) * QTransform::fromTranslate(c->flipX ? 1 : 0, c->flipY ? 1 : 0);
+  const QTransform fit = QTransform::fromScale(fitted.width(), fitted.height()) * QTransform::fromTranslate(fitted.x(), fitted.y());
+  const QTransform layer = layerMatrix(ls, QSizeF(d));
+  const double k = r.width() / d.width();
+  const QTransform widget = QTransform::fromScale(k, k) * QTransform::fromTranslate(r.x(), r.y());
+  *m = flip * fit * layer * widget;
+  if (visible) {
+    // 切り抜いて残した部分（反転したあとの向き）。メインの映像は画面いっぱいの 1 枚にしてから動かすので、その外は見えない
+    QPainterPath path;
+    path.addPolygon((fit * layer * widget).map(QPolygonF(cropSourceRect(*c, QSizeF(1, 1)))));
+    if (main) {
+      QPainterPath canvas;
+      canvas.addPolygon((layer * widget).map(QPolygonF(QRectF(QPointF(0, 0), QSizeF(d)))));
+      path = path.intersected(canvas);
+    }
+    QPainterPath stage;
+    stage.addRect(r);
+    *visible = path.intersected(stage);
+  }
+  return true;
+}
+
+bool PreviewStage::widgetToSource(const QString& clipId, QPointF pos, QPointF* src) const {
+  QTransform m;
+  QPainterPath visible;
+  if (!sourceToWidget(clipId, &m, &visible) || !visible.contains(pos)) return false;
+  bool invertible = false;
+  const QTransform inv = m.inverted(&invertible);
+  if (!invertible) return false;
+  const QPointF u = inv.map(pos);
+  if (u.x() < 0 || u.y() < 0 || u.x() > 1 || u.y() > 1) return false;
+  *src = u;
+  return true;
+}
+
+void PreviewStage::maskHoverAt(QPointF pos, Qt::KeyboardModifiers mods) {
+  maskCursor_ = pos;
+  maskMods_ = mods;
+  const QString id = editor().maskPick();
+  QPointF src;
+  maskCursorIn_ = widgetToSource(id, pos, &src);
+  // 足す・外す（Shift / Alt / Ctrl）の間は、今のマスクを出したまま（新しく選ぶ候補は探さない）
+  const bool refine = mods & (Qt::ShiftModifier | Qt::AltModifier | Qt::ControlModifier);
+  double pts = 0;
+  const QImage frame = maskCursorIn_ ? engine_->rawFrame(id, &pts) : QImage();
+  if (maskCursorIn_ && !refine && !frame.isNull()) mask::maskController().hover(id, frame, pts, src);
+  else mask::maskController().clearHover();
+  update();
+}
+
+void PreviewStage::maskClickAt(QPointF pos, Qt::KeyboardModifiers mods) {
+  Editor& ed = editor();
+  const QString id = ed.maskPick();
+  QPointF src;
+  double pts = 0;
+  const QImage frame = engine_->rawFrame(id, &pts);
+  if (frame.isNull() || !widgetToSource(id, pos, &src)) {
+    ed.toast(QStringLiteral("マスクする被写体を、選んだ映像の上でクリックしてください（今の再生位置に出ている所）"));
+    return;
+  }
+  const mask::PickClick kind = (mods & (Qt::AltModifier | Qt::ControlModifier)) ? mask::PickClick::Remove
+                               : (mods & Qt::ShiftModifier)                     ? mask::PickClick::Add
+                                                                                : mask::PickClick::Replace;
+  mask::maskController().click(id, pts, src, kind);
+  // 新しく選んだら、選ぶのをやめる（トラックが始まる）。足す・外すときは続けて直せるように、そのまま
+  if (kind == mask::PickClick::Replace) {
+    ed.setMaskPick({});
+    ed.toast(QStringLiteral("被写体を選びました。AI がトラックしています（右の「オブジェクトマスク」で進み具合が見られます）"));
+  }
+}
+
+QImage PreviewStage::tintMask(const QImage& mask, const QColor& color) {
+  QImage out(mask.size(), QImage::Format_ARGB32_Premultiplied);
+  const int w = mask.width(), h = mask.height();
+  for (int y = 0; y < h; ++y) {
+    const uchar* m = mask.constScanLine(y);
+    const uchar* up = mask.constScanLine(std::max(0, y - 1));
+    const uchar* down = mask.constScanLine(std::min(h - 1, y + 1));
+    QRgb* o = reinterpret_cast<QRgb*>(out.scanLine(y));
+    for (int x = 0; x < w; ++x) {
+      const bool in = m[x] >= 128;
+      // 縁（隣が外側）は、はっきりした線にする
+      const bool edge = in && (up[x] < 128 || down[x] < 128 || m[std::max(0, x - 1)] < 128 || m[std::min(w - 1, x + 1)] < 128);
+      if (edge) {
+        o[x] = qRgba(255, 255, 255, 255);
+      } else {
+        const int a = m[x] * 105 / 255;
+        o[x] = qRgba(color.red() * a / 255, color.green() * a / 255, color.blue() * a / 255, a);
+      }
+    }
+  }
+  return out;
+}
+
+void PreviewStage::paintMaskPick(QPainter& p, const QRectF& r) {
+  const Editor& ed = editor();
+  const QString id = ed.maskPick();
+  mask::MaskController& mc = mask::maskController();
+  double pts = 0;
+  const QImage frame = engine_->rawFrame(id, &pts);
+  QTransform m;
+  QPainterPath visible;
+  const bool shown = !frame.isNull() && sourceToWidget(id, &m, &visible);
+  const bool refine = maskMods_ & (Qt::ShiftModifier | Qt::AltModifier | Qt::ControlModifier);
+  // 重ねるマスク: カーソルを合わせた所の候補。足す・外すの間は、今のマスク（このフレームの結果）
+  std::vector<int8_t> logits;
+  QString key;
+  QColor tint = theme::accent;
+  if (shown && refine) {
+    const VideoClip* c = ed.clip(id);
+    if (c && c->mask.has()) {
+      const FrameMask fm = frameMaskFor(*c, ed.asset(c->assetId), pts);
+      if (fm.logits) {
+        logits = *fm.logits;
+        key = fm.key;
+        tint = (maskMods_ & Qt::ShiftModifier) ? QColor(0x3d, 0xd6, 0x8c) : QColor(0xff, 0x6b, 0x6b);
+      }
+    }
+  } else if (shown && maskCursorIn_ && mc.hoverClip() == id && std::abs(mc.hoverPts() - pts) < 1e-3 && !mc.hoverLogits().empty()) {
+    logits = mc.hoverLogits();
+    key = QStringLiteral("hover|%1").arg(mc.hoverSerial());
+  }
+  if (!logits.empty()) {
+    const QString tintKey = key + QStringLiteral("|%1").arg(tint.name());
+    if (tintKey != maskTintKey_) {
+      // 素材の縦横比で、程よい大きさに描く（縁の線が細くなりすぎないように）
+      const QSizeF src = mediaSizeOf(*ed.clip(id));
+      const int w = 640;
+      const int h = std::max(16, int(std::lround(w * src.height() / std::max(1.0, src.width()))));
+      maskTint_ = tintMask(mask::renderMask(logits, QSize(w, std::min(h, 1280)), mask::MaskLook{}), tint);
+      maskTintKey_ = tintKey;
+    }
+    p.save();
+    p.setClipPath(visible);
+    p.setRenderHint(QPainter::SmoothPixmapTransform);
+    p.setTransform(m, true);
+    p.drawImage(QRectF(0, 0, 1, 1), maskTint_);
+    p.restore();
+  }
+  // 案内（映像の上の端）
+  QString msg;
+  if (frame.isNull() || !shown) {
+    msg = QStringLiteral("オブジェクトマスク: 選んだ映像が、今の再生位置に出ていません　Esc・右クリックでやめる");
+  } else if (mc.preparing()) {
+    msg = QStringLiteral("オブジェクトマスク: AI を準備しています…");
+  } else if (refine) {
+    msg = (maskMods_ & Qt::ShiftModifier) ? QStringLiteral("クリックした所を、マスクに足します")
+                                          : QStringLiteral("クリックした所を、マスクから外します");
+  } else {
+    msg = QStringLiteral("オブジェクトマスク: 被写体にカーソルを合わせてクリック（Shift+クリックで足す・Alt+クリックで外す）　Esc・右クリックでやめる");
+  }
+  const QFontMetricsF fm(p.font());
+  const double bw = std::min(r.width() - 16, fm.horizontalAdvance(msg) + 28);
+  const QRectF box(r.center().x() - bw / 2, r.top() + 10, bw, fm.height() + 14);
+  p.save();
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0, 0, 0, 200));
+  p.drawRoundedRect(box, 7, 7);
+  p.setPen(QColor(255, 255, 255));
+  p.drawText(box.adjusted(10, 0, -10, 0), Qt::AlignCenter, fm.elidedText(msg, Qt::ElideRight, bw - 20));
+  // 足す・外すの印（カーソルの右下）
+  if (refine && maskCursorIn_) {
+    const QPointF c = maskCursor_ + QPointF(14, 14);
+    p.setPen(Qt::NoPen);
+    p.setBrush(tint);
+    p.drawEllipse(c, 8, 8);
+    p.setPen(QPen(Qt::white, 2));
+    p.drawLine(c - QPointF(4, 0), c + QPointF(4, 0));
+    if (maskMods_ & Qt::ShiftModifier) p.drawLine(c - QPointF(0, 4), c + QPointF(0, 4));
+  }
+  p.restore();
 }
 
 void PreviewStage::handleEditKey(QKeyEvent* e) {
@@ -1342,9 +1625,43 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
                            {QVariant(int(Aspect::R4_5)), QStringLiteral("4:5")}},
                           0, this);
   aspect_->setAccessibleName(QStringLiteral("比率"));
+  // 操作の案内（ai/guidecatalog.cpp）で探す名前。Segmented の objectName は見た目に使うので、名前は別に持たせる
+  aspect_->setProperty("kvGuide", QStringLiteral("TransportAspect"));
+  // ループ再生（終わりまで行ったら始めに戻る。書き出す範囲があれば、その範囲をくり返す）と、ガイド（セーフマージン・グリッド）
+  loop_ = makeToolButton(QStringLiteral("repeat"), QString(), this);
+  loop_->setCheckable(true);
+  loop_->setAccessibleName(QStringLiteral("ループ再生"));
+  loop_->setObjectName(QStringLiteral("TransportLoop"));
+  guides_ = makeToolButton(QStringLiteral("scan"), QStringLiteral("ガイド（セーフマージン・三分割のグリッド。書き出す動画には出ません）"), this);
+  guides_->setAccessibleName(QStringLiteral("ガイド"));
+  guides_->setObjectName(QStringLiteral("TransportGuides"));
+  guides_->setPopupMode(QToolButton::InstantPopup);
+  guides_->setStyleSheet(QStringLiteral("QToolButton::menu-indicator{image:none;width:0px}"));
+  auto* guideMenu = new QMenu(guides_);
+  safe_ = guideMenu->addAction(QStringLiteral("セーフマージン（アクション 90%・タイトル 80%）"));
+  safe_->setCheckable(true);
+  grid_ = guideMenu->addAction(QStringLiteral("三分割のグリッド"));
+  grid_->setCheckable(true);
+  guides_->setMenu(guideMenu);
+  connect(safe_, &QAction::toggled, this, [](bool on) { editor().setSafeMarginsVisible(on); });
+  connect(grid_, &QAction::toggled, this, [](bool on) { editor().setGridVisible(on); });
+  connect(loop_, &QToolButton::toggled, this, [](bool on) { editor().setLoopPlayback(on); });
+  // オブジェクトマスク: 押すと、プレビューで被写体をクリックして選べる（AI がマスクして、動きを追いかける）
+  objMask_ = makeToolButton(QStringLiteral("scan-face"), QString(), this);
+  objMask_->setCheckable(true);
+  objMask_->setAccessibleName(QStringLiteral("オブジェクトマスク"));
+  objMask_->setObjectName(QStringLiteral("TransportObjectMask"));
+  connect(objMask_, &QToolButton::clicked, this, [this] {
+    toggleObjectMaskPick();
+    refresh();  // 始められなかったときは、押した印を戻す
+  });
   auto* right = new QWidget(this);
   auto* rh = new QHBoxLayout(right);
   rh->setContentsMargins(0, 0, 0, 0);
+  rh->setSpacing(2);
+  rh->addWidget(loop_);
+  rh->addWidget(guides_);
+  rh->addWidget(objMask_);
   rh->addStretch(1);
   rh->addWidget(aspect_);
   rh->addSpacing(8);
@@ -1372,6 +1689,9 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
   connect(&ed, &Editor::timeChanged, this, &TransportBar::refresh);
   connect(&ed, &Editor::projectChanged, this, &TransportBar::refresh);
   connect(&ed, &Editor::playingChanged, this, &TransportBar::refresh);
+  connect(&ed, &Editor::loopChanged, this, &TransportBar::refresh);
+  connect(&ed, &Editor::guidesChanged, this, &TransportBar::refresh);
+  connect(&ed, &Editor::maskPickChanged, this, &TransportBar::refresh);
   refresh();
 }
 
@@ -1380,11 +1700,54 @@ void TransportBar::refresh() {
   time_->setText(QStringLiteral("<span style='color:#e6e6e6'>%1</span><span style='color:#6b6b6b'>&nbsp;&nbsp;/&nbsp;&nbsp;</span>"
                                 "<span style='color:#9b9b9b'>%2</span>")
                      .arg(formatTime(ed.currentTime()), formatTime(ed.layout().total)));
-  play_->setIcon(theme::icon(ed.playing() ? QStringLiteral("pause") : QStringLiteral("play"), QColor(0x11, 0x11, 0x11)));
-  play_->setToolTip(ed.playing() ? QStringLiteral("一時停止 (Space)") : QStringLiteral("再生 (Space)"));
-  play_->setAccessibleName(ed.playing() ? QStringLiteral("一時停止") : QStringLiteral("再生"));
+  // アイコン・ツールチップは、状態が変わったときだけ作り直す（再生中は、時間が進むたびにここへ来る）
+  if (const int playing = ed.playing() ? 1 : 0; playing != playIcon_) {
+    playIcon_ = playing;
+    play_->setIcon(theme::icon(playing ? QStringLiteral("pause") : QStringLiteral("play"), QColor(0x11, 0x11, 0x11)));
+    play_->setToolTip(playing ? QStringLiteral("一時停止 (Space)") : QStringLiteral("再生 (Space)"));
+    play_->setAccessibleName(playing ? QStringLiteral("一時停止") : QStringLiteral("再生"));
+  }
   play_->setEnabled(ed.playEnd() > 0);
   aspect_->setValue(int(ed.project().settings.aspect));
+  const bool loop = ed.loopPlayback();
+  if (int(loop) != loopIcon_) {
+    loopIcon_ = int(loop);
+    {
+      const QSignalBlocker b(loop_);
+      loop_->setChecked(loop);
+    }
+    loop_->setIcon(theme::icon(QStringLiteral("repeat"), loop ? theme::accent : theme::text));
+  }
+  const QString keys = keymap::text(keymap::keys(QStringLiteral("play.loop")));
+  const QString tip = loop ? QStringLiteral("ループ再生: オン（終わりまで行ったら始めに戻ります。書き出す範囲があれば、その範囲をくり返します）")
+                           : QStringLiteral("ループ再生: オフ");
+  const QString loopTip = keys.isEmpty() ? tip : QStringLiteral("%1 (%2)").arg(tip, keys);
+  if (loop_->toolTip() != loopTip) loop_->setToolTip(loopTip);
+  const int guides = (ed.safeMarginsVisible() ? 1 : 0) | (ed.gridVisible() ? 2 : 0);
+  if (guides != guidesIcon_) {
+    guidesIcon_ = guides;
+    {
+      const QSignalBlocker a(safe_);
+      const QSignalBlocker b(grid_);
+      safe_->setChecked(guides & 1);
+      grid_->setChecked(guides & 2);
+    }
+    guides_->setIcon(theme::icon(QStringLiteral("scan"), guides ? theme::accent : theme::text));
+  }
+  const bool picking = !ed.maskPick().isEmpty();
+  if (objMask_->isChecked() != picking) {
+    const QSignalBlocker b(objMask_);
+    objMask_->setChecked(picking);
+  }
+  if (int(picking) != objMaskIcon_) {
+    objMaskIcon_ = int(picking);
+    objMask_->setIcon(theme::icon(QStringLiteral("scan-face"), picking ? theme::accent : theme::text));
+  }
+  const QString maskKeys = keymap::text(keymap::keys(QStringLiteral("edit.objectMask")));
+  const QString maskTip = picking ? QStringLiteral("オブジェクトマスク: 被写体を選んでいます（プレビューで被写体をクリック。もう一度押すとやめます）")
+                                  : QStringLiteral("オブジェクトマスク（AI）: 被写体をクリックするだけで、マスクして動きを追いかけます");
+  const QString maskFull = maskKeys.isEmpty() ? maskTip : QStringLiteral("%1 (%2)").arg(maskTip, maskKeys);
+  if (objMask_->toolTip() != maskFull) objMask_->setToolTip(maskFull);
 }
 
 // ---- 全画面表示 --------------------------------------------------------------
@@ -1618,6 +1981,7 @@ PreviewPanel::PreviewPanel(PreviewEngine* engine, QWidget* parent) : QWidget(par
   layout_->setContentsMargins(0, 0, 0, 0);
   layout_->setSpacing(0);
   stage_ = new PreviewStage(engine, this);
+  stage_->setObjectName(QStringLiteral("PreviewStage"));  // 操作の案内で探す名前
   layout_->addWidget(stage_, 1);
   auto* bar = new TransportBar(this);
   layout_->addWidget(bar);

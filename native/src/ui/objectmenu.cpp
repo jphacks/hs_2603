@@ -8,12 +8,18 @@
 #include <cmath>
 
 #include "core/animtemplates.h"
+#include "core/effects.h"
 #include "core/filters.h"
 #include "core/textstyles.h"
 #include "core/texttemplates.h"
 #include "core/timeline.h"
+#include "core/transitions.h"
+#include "mask/maskcontroller.h"
 #include "media/mediamanager.h"
+#include "ui/clipdialogs.h"
+#include "ui/effectlist.h"
 #include "ui/keymap.h"
+#include "ui/theme.h"
 #include "ui/widgets.h"
 
 namespace kv {
@@ -72,13 +78,12 @@ void copyItemsToTab(int index) {
   pasteItems();
 }
 
-namespace {
-
-/** メニューの項目名に、その操作のキー（キーボードショートカットの設定どおり）を添える */
 QString withKeys(const QString& label, const QString& commandId) {
   const QString k = keymap::text(keymap::keys(commandId));
   return k.isEmpty() ? label : label + QLatin1Char('\t') + k;
 }
+
+namespace {
 
 /** オブジェクトのタイムライン上の開始と長さ。見つからなければ false */
 bool timeSpan(const Selection& sel, double* start, double* duration) {
@@ -133,9 +138,95 @@ QAction* addChoice(QMenu* menu, QActionGroup* group, const QString& label, bool 
   return a;
 }
 
-/** 映像・写真: 背景を透過（クロマキー）と、プリセット（フィルター・表示方法） */
+/**
+ * 映像の操作: エフェクトを追加・反転・速度・音声の切り離し・フレームの保持（メインのビデオ）・トランジション（メインのビデオの切れ目）・
+ * 属性のコピー / ペースト。start / duration は、その映像のタイムライン上の範囲
+ */
+void addClipActions(QMenu* menu, QWidget* parent, const VideoClip& c, bool mainTrack, bool timeline, double start, double duration) {
+  Editor& ed = editor();
+  const QString id = c.id;
+  const OverlayItem* ov = ed.overlay(id);
+  const bool layer = ov && ov->isEffectLayer();
+  menu->addSeparator();
+  QMenu* fx = menu->addMenu(theme::icon(QStringLiteral("sparkles")), QStringLiteral("エフェクトを追加"));
+  fillAddEffectMenu(fx, id, layer);
+  if (!layer) {
+    QAction* fh = menu->addAction(QStringLiteral("左右反転"));
+    fh->setCheckable(true);
+    fh->setChecked(c.flipX);
+    QObject::connect(fh, &QAction::toggled, parent, [id](bool on) { editor().updateClip(id, [&](VideoClip& x) { x.flipX = on; }); });
+    QAction* fv = menu->addAction(QStringLiteral("上下反転"));
+    fv->setCheckable(true);
+    fv->setChecked(c.flipY);
+    QObject::connect(fv, &QAction::toggled, parent, [id](bool on) { editor().updateClip(id, [&](VideoClip& x) { x.flipY = on; }); });
+    menu->addAction(withKeys(QStringLiteral("速度・デュレーション..."), QStringLiteral("edit.speed")), parent, [parent, id] { execSpeedDialog(parent, id); });
+    const Asset* a = ed.asset(c.assetId);
+    if (!c.isImage && a && a->hasAudio) {
+      menu->addAction(withKeys(QStringLiteral("音声を切り離す"), QStringLiteral("edit.detachAudio")), parent, [id] { editor().detachAudio(id); });
+    }
+    if (!c.isImage) {
+      // 逆再生（逆向きの動画を作って入れ替える。もう一度選ぶと元に戻す）
+      QAction* rev = menu->addAction(withKeys(QStringLiteral("逆再生"), QStringLiteral("edit.reverse")));
+      rev->setCheckable(true);
+      rev->setChecked(!c.reversedFrom.isEmpty());
+      QObject::connect(rev, &QAction::triggered, parent, [parent, id] { toggleReverseClip(parent, id); });
+    }
+  }
+  if (mainTrack && timeline && !c.isImage) {
+    // 再生位置がそのクリップの中にあるときだけ（その時間のフレームで止める）
+    const double t = ed.currentTime();
+    QAction* hold = menu->addAction(withKeys(QStringLiteral("フレームを保持（再生位置で 2 秒止める）"), QStringLiteral("edit.frameHold")), parent,
+                                    [parent] { frameHoldAtPlayhead(parent); });
+    hold->setEnabled(t >= start - 1e-6 && t < start + duration - 1e-6);
+  }
+  // メインのビデオの切れ目: 頭（前のクリップとの間）・お尻（次のクリップとの間）に、既定のトランジションを付ける・外す
+  if (mainTrack) {
+    const auto& items = ed.layout().items;
+    int index = -1;
+    for (const auto& l : items) {
+      if (l.clip.id == id) index = l.index;
+    }
+    if (index >= 0 && items.size() > 1) {
+      QMenu* tr = menu->addMenu(theme::icon(QStringLiteral("blend")), QStringLiteral("トランジション"));
+      const TransitionType def = Editor::defaultTransitionType();
+      const QString defLabel = transitionInfo(def).label;
+      const QString nextId = index + 1 < int(items.size()) ? items[size_t(index) + 1].clip.id : QString();
+      QAction* head = tr->addAction(QStringLiteral("頭に「%1」を付ける（前のクリップとの切れ目）").arg(defLabel), parent, [id, def] { editor().setTransition(id, def); });
+      head->setEnabled(index > 0);
+      QAction* tail = tr->addAction(QStringLiteral("お尻に「%1」を付ける（次のクリップとの切れ目）").arg(defLabel), parent,
+                                    [nextId, def] { editor().setTransition(nextId, def); });
+      tail->setEnabled(!nextId.isEmpty());
+      const bool hasHead = index > 0 && c.transIn.type != TransitionType::None;
+      const bool hasTail = !nextId.isEmpty() && items[size_t(index) + 1].clip.transIn.type != TransitionType::None;
+      if (hasHead || hasTail) tr->addSeparator();
+      if (hasHead) tr->addAction(QStringLiteral("頭のトランジションを外す"), parent, [id] { editor().removeTransition(id); });
+      if (hasTail) tr->addAction(QStringLiteral("お尻のトランジションを外す"), parent, [nextId] { editor().removeTransition(nextId); });
+      tr->addSeparator();
+      tr->addAction(QStringLiteral("ほかの種類は、左の「エフェクト」タブから切れ目へドラッグします"))->setEnabled(false);
+    }
+  }
+  menu->addAction(withKeys(QStringLiteral("属性をコピー"), QStringLiteral("edit.copyAttributes")), parent, [] { copySelectedAttributes(); });
+  QAction* paste = menu->addAction(withKeys(QStringLiteral("属性をペースト..."), QStringLiteral("edit.pasteAttributes")), parent,
+                                   [parent] { execPasteAttributesDialog(parent); });
+  paste->setEnabled(ed.hasAttributes());
+}
+
+/** 映像・写真: 背景を透過（クロマキー）と、プリセット（フィルター・表示方法）。エフェクトレイヤーはフィルターだけ */
 void addVisualMenus(QMenu* menu, QWidget* parent, const VideoClip& c, bool overlay) {
   const QString id = c.id;
+  const OverlayItem* ov = editor().overlay(id);
+  if (ov && ov->isEffectLayer()) {
+    // エフェクトレイヤー: 下にある映像の色を、まとめて調整する（クロマキー・表示方法は使わない）
+    menu->addSeparator();
+    QMenu* filters = menu->addMenu(QStringLiteral("色の調整（フィルター）"));
+    auto* fg = new QActionGroup(filters);
+    for (const auto& p : filterPresets()) {
+      const FilterPreset pid = p.id;
+      addChoice(filters, fg, p.label, p.id == c.color.preset, parent,
+                [id, pid] { editor().updateClip(id, [&](VideoClip& x) { x.color = colorFromPreset(pid); }); });
+    }
+    return;
+  }
   menu->addSeparator();
   QMenu* bg = menu->addMenu(QStringLiteral("背景を透過（クロマキー）"));
   QAction* on = bg->addAction(QStringLiteral("背景の色を透明にする"));
@@ -176,6 +267,46 @@ void addVisualMenus(QMenu* menu, QWidget* parent, const VideoClip& c, bool overl
       double start = 0, dur = 0;
       if (!e.clipSpan(id, &start, &dur)) return;
       e.moveClipToOverlay(id, start, freeOverlayTrack(e.project().overlays, start, dur, e.project().settings.fps));
+    });
+  }
+
+  // オブジェクトマスク（AI）: 被写体をクリックして選ぶと、マスクして動きを追いかける（右の設定欄と同じ操作）
+  QMenu* om = menu->addMenu(theme::icon(QStringLiteral("scan-face")), QStringLiteral("オブジェクトマスク（AI）"));
+  const ObjectMask& m = c.mask;
+  const bool picking = editor().maskPick() == id;
+  om->addAction(withKeys(picking ? QStringLiteral("被写体を選ぶのをやめる")
+                                 : m.has() ? QStringLiteral("被写体を選び直す・直す…") : QStringLiteral("被写体をクリックして選ぶ…"),
+                         QStringLiteral("edit.objectMask")),
+                parent, [id] { toggleObjectMaskPick(id); });
+  if (m.has()) {
+    const int state = mask::maskController().state(m.id);
+    if (state != 0) {
+      om->addAction(QStringLiteral("トラックを止める"), parent, [mid = m.id] { mask::maskController().stop(mid); });
+    } else if (c.isImage) {
+      om->addAction(QStringLiteral("マスクを作り直す"), parent, [id] { mask::maskController().track(id, mask::TrackDirection::Both); });
+    } else {
+      om->addAction(QStringLiteral("前後をトラック"), parent, [id] { mask::maskController().track(id, mask::TrackDirection::Both); });
+      om->addAction(QStringLiteral("前へトラック"), parent, [id] { mask::maskController().track(id, mask::TrackDirection::Backward); });
+      om->addAction(QStringLiteral("後ろへトラック"), parent, [id] { mask::maskController().track(id, mask::TrackDirection::Forward); });
+    }
+    om->addSeparator();
+    QAction* use = om->addAction(QStringLiteral("マスクを使う"));
+    use->setCheckable(true);
+    use->setChecked(m.enabled);
+    QObject::connect(use, &QAction::toggled, parent, [id](bool v) { editor().updateClip(id, [&](VideoClip& x) { x.mask.enabled = v; }); });
+    auto* mg = new QActionGroup(om);
+    addChoice(om, mg, QStringLiteral("背景を消す（被写体だけを残す）"), m.mode == MaskMode::Cutout, parent,
+              [id] { editor().updateClip(id, [](VideoClip& x) { x.mask.mode = MaskMode::Cutout; }); });
+    addChoice(om, mg, QStringLiteral("エフェクトを被写体の中だけに"), m.mode == MaskMode::Effects, parent,
+              [id] { editor().updateClip(id, [](VideoClip& x) { x.mask.mode = MaskMode::Effects; }); });
+    QAction* inv = om->addAction(QStringLiteral("反転（被写体の外側にする）"));
+    inv->setCheckable(true);
+    inv->setChecked(m.invert);
+    QObject::connect(inv, &QAction::toggled, parent, [id](bool v) { editor().updateClip(id, [&](VideoClip& x) { x.mask.invert = v; }); });
+    om->addSeparator();
+    om->addAction(theme::icon(QStringLiteral("trash")), QStringLiteral("マスクを削除"), parent, [id] {
+      if (editor().maskPick() == id) editor().setMaskPick({});
+      mask::maskController().remove(id);
     });
   }
 
@@ -300,6 +431,11 @@ void execObjectMenu(QWidget* parent, const Selection& sel, const QPoint& globalP
     }
   }
   menu.addAction(withKeys(QStringLiteral("削除") + suffix, QStringLiteral("edit.delete")), parent, [] { editor().deleteSelection(); });
+  if (timeline) {
+    // 消して、空いた所を詰める（メインのビデオなら、後ろのテキスト・オーディオ・重ねるものも一緒に詰める）
+    menu.addAction(withKeys(QStringLiteral("リップル削除（削除して詰める）") + suffix, QStringLiteral("edit.rippleDelete")), parent,
+                   [] { editor().rippleDeleteSelection(); });
+  }
 
   // ---- グループ（テキスト・オーディオ・重ねるトラック。Ctrl+クリックで一緒に選んでから） ----
   if (Editor::groupable(sel.type)) {
@@ -369,6 +505,11 @@ void execObjectMenu(QWidget* parent, const Selection& sel, const QPoint& globalP
         menu.addAction(QStringLiteral("音量キーフレームをすべて削除"), parent, [id] { editor().clearVolumePoints(id); });
       }
     }
+  }
+
+  // ---- 映像の操作（エフェクト・反転・速度・音声の切り離し・フレームの保持・トランジション・属性） ----
+  if (sel.type == Selection::Clip || sel.type == Selection::Overlay) {
+    if (const VideoClip* c = ed.clip(id)) addClipActions(&menu, parent, *c, sel.type == Selection::Clip, timeline, start, duration);
   }
 
   // ---- 背景を透過・プリセット（映像・写真と文字。右の設定欄と同じ変更） ----

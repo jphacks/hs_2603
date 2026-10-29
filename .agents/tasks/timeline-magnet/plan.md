@@ -5,7 +5,7 @@
 - 案は `.agents/tasks/timeline-magnet/proposal.md`（案B のオン/オフを Alt だけにしたもの。7 章の答えは 1イ 2ア 3ア 4イ）。
 - 変更するのは `native/src/ui/timelinewidget.cpp` と `native/src/ui/timelinewidget.h` の 2 つだけ（C++ / Qt 6.8.3）。ほかのファイル（editor.cpp/.h、mainwindow.cpp、README.md、アイコン、app.qrc など）は触らない。どうしても必要だと判断したら、編集せずに止めて報告する。
 - `c:\git\JPHACK\e-editor` で直接作業する（worktree なし）。コミット・push・stash・配置（deploy）はしない。
-- 一時ファイルとハーネスは `C:\kantan-dev\tmp\kv-magnet\` に作る。リポジトリにテストやビルドのターゲットを足さない。
+- 一時ファイルとハーネスは `C:\e-editor-dev\tmp\kv-magnet\` に作る。リポジトリにテストやビルドのターゲットを足さない。
 - 計画・検証・レビューのファイルは `.agents/tasks/timeline-magnet/` に置く。proposal.md は消さない。
 
 ## 0. 始める前の状態（計画のときに確かめた結果）
@@ -14,8 +14,8 @@
 - `git log -1 --oneline`: `eaac4b6 (HEAD -> feat/ikumu1) feat(timeline): make playhead visible over header column`（proposal.md と同じ）。
 - `origin/feat/ikumu1` が 2 コミット先にある（`c3c5436` マージ、`0059f30` テキストのプリセット表示。変えたのは textstyles・textrender・inspector・librarypanel・widgets で、timelinewidget.cpp/.h には触れていない）。頼まれていないので pull はしない。今回の変更とはぶつからない。
 - `timelinewidget.cpp` は UTF-8（BOM なし）・CRLF・937 行、`timelinewidget.h` は UTF-8（BOM なし）・CRLF・121 行（インデックスは LF、`core.autocrlf=true`）。編集後もこのままにする。
-- ユーザーのアプリ `native\dist\kantan-video-editor\kantan-video-editor.exe` が起動している（計画のとき PID 13748）。終了させない。`build.ps1 -NoDeploy` は `native\build\` にだけ書くので、起動中のアプリには触れない。
-- `C:\kantan-dev\tmp\` はあり、`kv-magnet\` はまだない。ツール（`C:\kantan-dev\Qt\6.8.3\mingw_64`、`Qt\Tools\mingw1310_64`、`cmake\bin\cmake.exe`、`bin\ninja.exe`、`ffmpeg`）はそろっている。
+- ユーザーのアプリ `native\dist\e-editor\e-editor.exe` が起動している（計画のとき PID 13748）。終了させない。`build.ps1 -NoDeploy` は `native\build\` にだけ書くので、起動中のアプリには触れない。
+- `C:\e-editor-dev\tmp\` はあり、`kv-magnet\` はまだない。ツール（`C:\e-editor-dev\Qt\6.8.3\mingw_64`、`Qt\Tools\mingw1310_64`、`cmake\bin\cmake.exe`、`bin\ninja.exe`、`ffmpeg`）はそろっている。
 - 実装を始める前に、もう一度 `git -C c:\git\JPHACK\e-editor status --porcelain` を見る。`?? .agents/tasks/timeline-magnet/` 以外が出たら、何も触らずに止めて報告する。
 
 ## 1. 今のコード（HEAD eaac4b6 の行番号）
@@ -72,12 +72,12 @@ execute_pwsh の画面はコマンドを何度も表示して出力が切れる�
 
 - アプリのビルド（コンパイルだけ。配置しない。`<n>` は 1, 2, …）:
   ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy 2>&1 | Out-File -Encoding utf8 C:\kantan-dev\tmp\kv-magnet\build-<n>.log; "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\kantan-dev\tmp\kv-magnet\build-<n>.log
+  powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy 2>&1 | Out-File -Encoding utf8 C:\e-editor-dev\tmp\kv-magnet\build-<n>.log; "BUILD-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\e-editor-dev\tmp\kv-magnet\build-<n>.log
   ```
   成功の条件: 最後の行が `BUILD-EXIT=0`、`error:` がなく、`warning:` もない（`-Wall -Wno-unused-parameter`）。ヘッダーを変えると mainwindow.cpp もコンパイルし直される。もし変えていないファイルの警告が出たら、`git diff --stat` でそのファイルが変わっていないことを確かめ、「前からある警告」として記録する（今回の変更による警告は 0 にする）。GCC が `std::optional` について `-Wmaybe-uninitialized` を出したら、動きを変えずに書き方を変えて消す（例: optional の代わりに double と bool の組にする）。
 - ハーネス（`<phase>` は `baseline`・`step`・`fixed`）:
   ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File C:\kantan-dev\tmp\kv-magnet\run.ps1 2>&1 | Out-File -Encoding utf8 C:\kantan-dev\tmp\kv-magnet\run-<phase>.log; "RUN-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\kantan-dev\tmp\kv-magnet\run-<phase>.log
+  powershell -NoProfile -ExecutionPolicy Bypass -File C:\e-editor-dev\tmp\kv-magnet\run.ps1 2>&1 | Out-File -Encoding utf8 C:\e-editor-dev\tmp\kv-magnet\run-<phase>.log; "RUN-EXIT=$LASTEXITCODE" | Out-File -Append -Encoding utf8 C:\e-editor-dev\tmp\kv-magnet\run-<phase>.log
   ```
   1 回目はアプリのソースを全部コンパイルするので、タイムアウトは 1800000 ms にする。ハーネスは小さなウィンドウ（900x約350）を数秒出す。その間、本物のマウスをそのウィンドウの上で動かさない（ウィンドウは今のカーソルの位置を避けて出す）。
 - ファイルの形の確認（編集のあと）:
@@ -89,11 +89,11 @@ execute_pwsh の画面はコマンドを何度も表示して出力が切れる�
 ## 5. 計画
 
 - [ ] 1. ハーネスを作り、修正前のコードで基準をとる（アプリのファイルにはまだ触らない）。
-      `C:\kantan-dev\tmp\kv-magnet\` に付録 A の 3 ファイル（`CMakeLists.txt`、`magnetcheck.cpp`（UTF-8 BOM なし）、`run.ps1`（ASCII だけ））を作る。作業の前に 0 章の最後の git status を確かめる。
-      Files: C:\kantan-dev\tmp\kv-magnet\CMakeLists.txt, magnetcheck.cpp, run.ps1（一時ファイル）
-      Verify: 4 章のハーネスのコマンドを `baseline` で実行し `run-baseline.log` を読む。期待: 6 章の 6.3 の 36 行だけが FAIL、ほかはすべて OK、最後が `RESULT: 36 check(s) FAILED` と `RUN-EXIT=1`。`note: saved C:/kantan-dev/tmp/kv-magnet/baseline/ref-*.png` が 7 つ、`note: device pixel ratio 1.25` が出て、`setup:` の 4 行が OK（`note: mouse arrived at ...` は 1 回も出ない）。`j: control: ...` も OK。
+      `C:\e-editor-dev\tmp\kv-magnet\` に付録 A の 3 ファイル（`CMakeLists.txt`、`magnetcheck.cpp`（UTF-8 BOM なし）、`run.ps1`（ASCII だけ））を作る。作業の前に 0 章の最後の git status を確かめる。
+      Files: C:\e-editor-dev\tmp\kv-magnet\CMakeLists.txt, magnetcheck.cpp, run.ps1（一時ファイル）
+      Verify: 4 章のハーネスのコマンドを `baseline` で実行し `run-baseline.log` を読む。期待: 6 章の 6.3 の 36 行だけが FAIL、ほかはすべて OK、最後が `RESULT: 36 check(s) FAILED` と `RUN-EXIT=1`。`note: saved C:/e-editor-dev/tmp/kv-magnet/baseline/ref-*.png` が 7 つ、`note: device pixel ratio 1.25` が出て、`setup:` の 4 行が OK（`note: mouse arrived at ...` は 1 回も出ない）。`j: control: ...` も OK。
       - 違う結果になったら、アプリではなくハーネスを直す（チェックの意味と数値は変えない。原因がハーネスにあると示せるときだけ）。`baseline\ref-*.png` を消してから、基準が合うまで繰り返す。`j: control` だけがどうしても OK にならない場合は 7 章の扱いにする。
-      - 合ったら修正前の画像を残す: `New-Item -ItemType Directory -Force C:\kantan-dev\tmp\kv-magnet\baseline\shots-before | Out-Null; Copy-Item C:\kantan-dev\tmp\kv-magnet\shots\*.png C:\kantan-dev\tmp\kv-magnet\baseline\shots-before\`
+      - 合ったら修正前の画像を残す: `New-Item -ItemType Directory -Force C:\e-editor-dev\tmp\kv-magnet\baseline\shots-before | Out-Null; Copy-Item C:\e-editor-dev\tmp\kv-magnet\shots\*.png C:\e-editor-dev\tmp\kv-magnet\baseline\shots-before\`
 
 - [ ] 2. 目盛りの間隔を `rulerStep()` に切り出す（見た目は変えない）。手順 1 のあとに行う。
       付録 B の B-1（cpp: kSteps の直後に `rulerStep()` を定義し、paintRuler の 301-307 を `const double step = rulerStep();` にする）と B-2（h: 宣言を 1 行足す）だけを入れる。str_replace で編集し、CRLF と UTF-8（BOM なし）を保つ。
@@ -111,7 +111,7 @@ execute_pwsh の画面はコマンドを何度も表示して出力が切れる�
       Verify: `run-fixed.log` がすべて OK（`RESULT: ALL OK`）。対策を入れた場合は、`j: control: ...`（Alt だけでメニューバーが選ばれる）と、ウィンドウが前面のときの `j: Alt+V still opens the View menu` も OK のまま。
 
 - [ ] 5. 画像を目で見て確かめる。手順 3（と 4）のあとに行う。
-      `C:\kantan-dev\tmp\kv-magnet\shots\` の PNG を読み取りツールで開く（DPR 1.25 の実ピクセル）。
+      `C:\e-editor-dev\tmp\kv-magnet\shots\` の PNG を読み取りツールで開く（DPR 1.25 の実ピクセル）。
       - `a-snap-2s.png`: 赤い線とつまみが 0:02（左から 228）にあり、「0:02」の数字（つまみの右側）が黄色。ほかの数字は灰色。トラックに黄色の線はない。
       - `a-alt.png`・`a-released.png`・`c-content.png`: 数字はすべて灰色。
       - `e-guide-left.png`: 黄色の縦線が 6.0（左から 468）に、テキストの箱の左端を通ってトラックの一番下まで出ている。見出しの列には出ていない。`e-guide-right.png`: 線が 10.5（738、テキストの右端・クリップの終わり）。`f-trim-right.png`: 708。`f-audio-move.png`: 228。
@@ -127,7 +127,7 @@ execute_pwsh の画面はコマンドを何度も表示して出力が切れる�
       - `git -C c:\git\JPHACK\e-editor diff` に付録 B（と、入れた場合だけ付録 C）の変更だけがある。printf・qDebug・ハーネスのコードがない。`git diff --check` が何も出さない。README.md・mainwindow.cpp などは変わっていない。何もコミットしない。
       - ユーザーのアプリは起動したまま。配置していないので `native\dist` の exe は古いまま。
       - `.agents/tasks/timeline-magnet/verification.md` に書く: 始める前の git の状態、変更の内容（diff）、ビルドのログ（全文）、ハーネスのログ（baseline・step・fixed の全文と、FAIL の行が 6.3 と同じであること）、DPR と座標の確認、画像を見た結果、(j) の結果と `note:` の行、8 章の手順、9 章の確かめられないこと、最後の git の状態。
-      - 一時フォルダー `C:\kantan-dev\tmp\kv-magnet\` は、レビューで直すことになったときにハーネスと修正前の基準（baseline）をそのまま使えるように残す。verification.md に「残してあること」と消し方 `Remove-Item -Recurse -Force -LiteralPath 'C:\kantan-dev\tmp\kv-magnet'` を書く。消すのは、レビューで承認されたあとの最後のステップ（このフォルダーだけ。`C:\kantan-dev\tmp` のほかのものには触らない）。
+      - 一時フォルダー `C:\e-editor-dev\tmp\kv-magnet\` は、レビューで直すことになったときにハーネスと修正前の基準（baseline）をそのまま使えるように残す。verification.md に「残してあること」と消し方 `Remove-Item -Recurse -Force -LiteralPath 'C:\e-editor-dev\tmp\kv-magnet'` を書く。消すのは、レビューで承認されたあとの最後のステップ（このフォルダーだけ。`C:\e-editor-dev\tmp` のほかのものには触らない）。
 
 ## 6. ハーネスの設計と期待値
 
@@ -139,8 +139,8 @@ execute_pwsh の画面はコマンドを何度も表示して出力が切れる�
 - 押すたびにタイムスタンプを 6 秒進め、意図しないダブルクリックを防ぐ。
 - Alt のキーは `QTest::simulateEvent(QWindow*, ...)` で Windows と同じ形にする（押す: 保存する修飾キーなし → `QKeyEvent::modifiers()` は AltModifier。離す: AltModifier を保存 → NoModifier）。
 - 画像は `viewport()->grab()`（DPR 1.25 の実ピクセル）。ガイド線は `#ffd44a` の塗りつぶしなので色で探す（論理座標 ±1.2）。数字の黄色さは、文字の画素の（赤−青）の平均で見る（灰色なら 0 付近、黄色なら 100 前後。ClearType の色のにじみは左右で打ち消し合う。赤い線のつまみ ±7.5 は数えない）。黄色は 50 以上、灰色は 25 未満とする。
-- 修正前の画像との比較: 1 回目（修正前）は `C:\kantan-dev\tmp\kv-magnet\baseline\ref-*.png` に保存し（数に入れない）、2 回目からは全画素を比べる。比べる画像は、ほかの確認より前に、決まった状態（時間・スクロール・拡大率・選択）でとる（あとの確認では修正の前と後で状態が違うため）。画像は毎回 `shots\` に保存する。
-- 修正を始めたあとに基準をとり直す必要が出たら: `git show HEAD:native/src/ui/timelinewidget.cpp` と `.h` を `C:\kantan-dev\tmp\kv-magnet\orig\` に書き出し、それをコンパイルする別のビルドで基準をとる（作業ツリーは戻さない。stash しない）。
+- 修正前の画像との比較: 1 回目（修正前）は `C:\e-editor-dev\tmp\kv-magnet\baseline\ref-*.png` に保存し（数に入れない）、2 回目からは全画素を比べる。比べる画像は、ほかの確認より前に、決まった状態（時間・スクロール・拡大率・選択）でとる（あとの確認では修正の前と後で状態が違うため）。画像は毎回 `shots\` に保存する。
+- 修正を始めたあとに基準をとり直す必要が出たら: `git show HEAD:native/src/ui/timelinewidget.cpp` と `.h` を `C:\e-editor-dev\tmp\kv-magnet\orig\` に書き出し、それをコンパイルする別のビルドで基準をとる（作業ツリーは戻さない。stash しない）。
 
 ### 6.2 配置と数値（proposal 3 章の表と同じ計算）
 
@@ -281,11 +281,11 @@ FAIL f: trimming the audio's left edge snaps to 2.0 (end stays 2.6)
 
 ---
 
-## 付録 A: 一時的なハーネス（リポジトリの外。`C:\kantan-dev\tmp\kv-magnet\`）
+## 付録 A: 一時的なハーネス（リポジトリの外。`C:\e-editor-dev\tmp\kv-magnet\`）
 
 パスは ASCII にする（ユーザーの %TEMP% には日本語が入っていて MinGW が動かないため、run.ps1 で TEMP を差し替える）。コンパイルが通らないとき（include の不足など）はハーネスだけを直す。チェックの意味と数値は変えない。
 
-`C:\kantan-dev\tmp\kv-magnet\CMakeLists.txt`:
+`C:\e-editor-dev\tmp\kv-magnet\CMakeLists.txt`:
 ```cmake
 # Temporary harness for the timeline magnet (snap). Delete this folder when done.
 cmake_minimum_required(VERSION 3.21)
@@ -297,7 +297,7 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Svg Network Test)
 
 set(KV "C:/git/JPHACK/e-editor/native")
-set(FFMPEG_DIR "C:/kantan-dev/ffmpeg")
+set(FFMPEG_DIR "C:/e-editor-dev/ffmpeg")
 add_library(ffmpeg INTERFACE)
 target_include_directories(ffmpeg INTERFACE "${FFMPEG_DIR}/include")
 foreach(lib avformat avcodec avutil swscale swresample avfilter)
@@ -316,11 +316,11 @@ target_compile_definitions(kv-magnet PRIVATE UNICODE _UNICODE NOMINMAX KV_VERSIO
 target_link_libraries(kv-magnet PRIVATE Qt6::Widgets Qt6::Svg Qt6::Network Qt6::Test ffmpeg miniaudio ole32 shell32 uuid)
 ```
 
-`C:\kantan-dev\tmp\kv-magnet\run.ps1`（ASCII だけ。子の powershell で動くので、環境変数の変更は残らない）:
+`C:\e-editor-dev\tmp\kv-magnet\run.ps1`（ASCII だけ。子の powershell で動くので、環境変数の変更は残らない）:
 ```powershell
 # Temporary: build and run the magnet check harness. Delete this folder when done.
 $ErrorActionPreference = 'Continue'
-$d = 'C:\kantan-dev'
+$d = 'C:\e-editor-dev'
 $h = Join-Path $d 'tmp\kv-magnet'
 $env:PATH = "$d\Qt\Tools\mingw1310_64\bin;$d\Qt\6.8.3\mingw_64\bin;$d\ffmpeg\bin;$env:PATH"
 $env:TEMP = $env:TMP = Join-Path $d 'tmp'
@@ -338,7 +338,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "build failed ($LASTEXITCODE)"; exit 3 }
 exit $LASTEXITCODE
 ```
 
-`C:\kantan-dev\tmp\kv-magnet\magnetcheck.cpp`（UTF-8 BOM なし。表示する文字は ASCII だけ）。前半（道具）:
+`C:\e-editor-dev\tmp\kv-magnet\magnetcheck.cpp`（UTF-8 BOM なし。表示する文字は ASCII だけ）。前半（道具）:
 ```cpp
 // 一時的な確認用（タイムラインのマグネット＝吸着）。確認が終わったらフォルダーごと消す
 #include <QApplication>
@@ -375,8 +375,8 @@ static constexpr int kTextMid = 42;    // テキストの行 26..58（箱は 28.
 static constexpr int kVideoMid = 91;   // ビデオの行 58..124
 static constexpr int kAudioMid = 147;  // オーディオの行 124..170（箱は 126..164）
 static constexpr int kTracksEnd = 170;
-static const char* const kShots = "C:/kantan-dev/tmp/kv-magnet/shots";
-static const char* const kRefs = "C:/kantan-dev/tmp/kv-magnet/baseline";
+static const char* const kShots = "C:/e-editor-dev/tmp/kv-magnet/shots";
+static const char* const kRefs = "C:/e-editor-dev/tmp/kv-magnet/baseline";
 
 static int failures = 0;
 static int mismatches = 0;

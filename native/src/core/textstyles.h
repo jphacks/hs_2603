@@ -42,7 +42,7 @@ FontSpan fontAt(const TextItem& t, int index, bool* spanned = nullptr);
 bool sameFont(FontId a, const QString& familyA, FontId b, const QString& familyB);
 
 /** スタイル一覧のカードをタイムラインへドラッグするときの MIME 形式（中身はスタイルの ID） */
-inline constexpr const char* kTextPresetMime = "application/x-kantan-text-preset";
+inline constexpr const char* kTextPresetMime = "application/x-e-editor-text-preset";
 
 /** 追加したときの文字 */
 QString defaultText();

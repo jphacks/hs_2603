@@ -44,8 +44,30 @@ class TimelineView : public QAbstractScrollArea {
   /** その最中のドラッグをやめて、元の位置・長さに戻す（履歴には残さない）。ドラッグ中でなければ false */
   bool cancelDrag();
 
+  // ---- 吸着（マグネット）のオン・オフ。オフのときは、Alt を押さなくても吸着しない。アプリの設定に覚える ----
+  bool snapEnabled() const { return snapEnabled_; }
+  void setSnapEnabled(bool on);
+  /** 選んでいるマーカー（目盛りの上の印。無ければ空）。Delete キーで消すときに使う */
+  const QString& selectedMarker() const { return markerSel_; }
+  /** マーカーを選ぶ（空なら外す）。クリップなどの選択とは別に持つ */
+  void selectMarker(const QString& id);
+  void clearMarkerSelection() { selectMarker(QString()); }
+
+  // ---- 操作の案内（ui/guide.cpp）から使う ----
+  /**
+   * 案内で指す場所（ビューポートの座標。見えていなければ空）。part は ai/guidecatalog.cpp で使う名前
+   * （ruler・playhead・video・overlay・text・audio・clip・videoClip・photoClip・textItem・audioItem・edge・fade・cut・transition・
+   * videoEye・videoMute・audioMute・textEye・empty）
+   */
+  QRect guideRect(const QString& part) const;
+  /** 案内で指す場所が見えるように、横・縦にスクロールする */
+  void revealGuidePart(const QString& part);
+
  signals:
   void requestTextFocus();
+  void snapChanged(bool on);
+  /** 選んでいるマーカーが変わった */
+  void markerSelectionChanged();
 
  protected:
   void paintEvent(QPaintEvent*) override;
@@ -66,7 +88,7 @@ class TimelineView : public QAbstractScrollArea {
  private:
   /** Overlay は重ねるトラックの段（テキストの段とビデオの段の間。下の段ほどメインに近く、上の段ほど前に重なる） */
   enum class Row { None, Ruler, Text, Overlay, Video, Audio };
-  enum class Drag { None, Scrub, ClipMove, ClipTrim, ItemMove, ItemTrim, KeyMove, Fade, Range, RangeEdge, TrackResize, LaneSwap };
+  enum class Drag { None, Scrub, ClipMove, ClipTrim, ItemMove, ItemTrim, KeyMove, Fade, Range, RangeEdge, TrackResize, LaneSwap, MarkerMove, TransitionTrim };
   struct Hit {
     Row row = Row::None;
     Selection::Type type = Selection::None;
@@ -196,12 +218,55 @@ class TimelineView : public QAbstractScrollArea {
 
   void paintRuler(QPainter& p, const QRect& area);
   void paintVideo(QPainter& p);
+  /** メインのビデオのクリップの名前・長さ・印（トランジションの帯より上に描く） */
+  void paintVideoLabels(QPainter& p);
   void paintItems(QPainter& p, Selection::Type type);
   void paintVolume(QPainter& p, const AudioItem& a, const QRectF& r);
   void paintDropGhost(QPainter& p);
 
   /** 映像・文字のバーに、アニメーションのキーフレームがある時間の小さな ◆ を並べる（表示だけ。編集は右の設定パネル） */
   void paintKeyMarkers(QPainter& p);
+
+  // ---- トランジション（ビデオの切れ目の帯。クリックで選ぶ、両端のドラッグで長さを変える） ----
+  /** 後ろのクリップ index のトランジションの帯（無ければ空の四角） */
+  QRectF transitionRect(int index) const;
+  /** その位置にあるトランジションの、後ろのクリップの ID（無ければ空）。edge には、帯の左端・右端なら -1 / 1 */
+  QString transitionHit(QPointF pos, int* edge = nullptr) const;
+  /** 押した・右クリックした所のトランジション（大きい帯の切れ目のすぐそばは、クリップの端を優先して空を返す） */
+  QString transitionHitForPress(QPointF pos, int* edge = nullptr) const;
+  void paintTransitions(QPainter& p);
+  void execTransitionMenu(const QString& clipId, const QPoint& globalPos);
+  double transCut_ = 0;  // 長さを変えているトランジションの切れ目の時刻
+  double transOrigLen_ = 0;  // 押したときのトランジションの長さ
+  int transSide_ = 0;        // 掴んだ帯の端（-1 左 / 1 右）
+
+  // ---- マーカー（目盛りの上の印） ----
+  /** その位置（目盛りの上）にあるマーカーの ID（無ければ空） */
+  QString markerAt(QPointF pos) const;
+  void paintMarkers(QPainter& p, const QRect& area);
+  void execMarkerMenu(const QString& markerId, const QPoint& globalPos);
+  QString markerSel_;
+  double markerOrigT_ = 0;
+
+  // ---- 左の「エフェクト」タブからのドラッグ（トランジション → 切れ目、エフェクト → 映像、エフェクトレイヤー → 時間） ----
+  struct FxDrop {
+    QString payload;
+    bool valid = false;
+    /** トランジション: 後ろのクリップの ID。エフェクト: 掛ける映像の ID */
+    QString target;
+    Selection::Type targetType = Selection::None;
+    /** エフェクトレイヤー: 置く時間と段（-1 は空いている段） */
+    double time = 0;
+    int lane = -1;
+  };
+  std::optional<FxDrop> fxDrop_;
+  void updateFxDrop(QPointF pos);
+  void paintFxDrop(QPainter& p);
+
+  // ---- 隙間（テキスト・オーディオ・重ねるトラックの段の、何も無い所） ----
+  /** その位置の段（種類と番号）。段の外なら kind が None */
+  void laneUnder(QPointF pos, Selection::Type* kind, int* track) const;
+  bool snapEnabled_ = true;
 
   // ---- フェードのつまみ（映像・オーディオのバーの上の角。左右にドラッグして、フェードの長さを変える） ----
   struct FadeHit {
@@ -340,6 +405,21 @@ class TimelineView : public QAbstractScrollArea {
   int laneCount(Selection::Type kind) const;
   /** 見出しに出す段の名前（「テキスト 1」「オーディオ 2」。段の番号は中身と一緒に動く） */
   QString laneName(Selection::Type kind, int index) const;
+
+  // ---- トラックの非表示・ミュート（見出しの列の右の、目・スピーカーの印。押すと切り替える） ----
+  struct TrackToggle {
+    Editor::TrackFlag flag = Editor::TrackFlag::MainVideoHidden;
+    int lane = 0;
+    QRectF rect;
+  };
+  std::vector<TrackToggle> trackToggles() const;
+  std::optional<TrackToggle> trackToggleAt(QPointF pos) const;
+  /** 案内で指す場所（見えているかは問わない）。header には、見出しの列の中のものなら true */
+  std::optional<QRectF> guidePart(const QString& part, bool* header) const;
+  QString trackToggleTip(const TrackToggle& t) const;
+  void paintTrackToggles(QPainter& p);
+  /** カーソルの下の印（明るく描く） */
+  std::optional<TrackToggle> toggleHover_;
   /** 見出しの列の、段ごとの名前（段が 2 つ以上のとき） */
   void paintLaneHeads(QPainter& p, Selection::Type kind, int sectionY, int sectionH, const QString& icon, const QString& label);
   /** 入れ替えのドラッグ中の、元の段・行き先の段の印と、札 */
@@ -425,12 +505,18 @@ class TimelineWidget : public QWidget {
  signals:
   void requestTextFocus();
 
- private:
+ public:
+  /** ボタンのツールチップ（キーの割り当てを変えたときにも呼ぶ） */
   void refreshButtons();
+
+ private:
+  void refreshSnap();
   TimelineView* view_;
   QToolButton* split_;
   QToolButton* dup_;
   QToolButton* del_;
+  QToolButton* snap_;
+  QToolButton* marker_;
   QSlider* zoom_;
 };
 

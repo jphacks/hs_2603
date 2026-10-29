@@ -1,4 +1,4 @@
-﻿# インストーラーを作る。先に native\build.ps1 でビルドしてから、NSIS で native\dist\kantan-video-editor-cpp-<バージョン>-setup.exe にまとめる。
+﻿# インストーラーを作る。先に native\build.ps1 でビルドしてから、NSIS で native\dist\e-editor-cpp-<バージョン>-setup.exe にまとめる。
 #   powershell -ExecutionPolicy Bypass -File native\installer\build-installer.ps1
 # makensis.exe は開発用ツールのフォルダー（tools\setup.ps1 が入れる）のものを使う。-MakeNsis で別のものも指定できる。
 param([string]$MakeNsis = '')
@@ -9,17 +9,17 @@ $native = Split-Path -Parent $here
 
 & (Join-Path $native 'build.ps1')
 # 配る exe に AI サーバーのアドレスが入っていないと、使う人は .env を書かないと AI を使えない
-if (-not (Read-KantanReleaseServer (Join-Path $native 'release.env'))) {
-  Write-Warning 'native\release.env に KANTAN_AI_SERVER が無いので、AI サーバーのアドレスを組み込まずに作ります（使う人は .env を書かないと AI を使えません）'
+if (-not (Read-EEditorReleaseServer (Join-Path $native 'release.env'))) {
+  Write-Warning 'native\release.env に E_EDITOR_AI_SERVER が無いので、AI サーバーのアドレスを組み込まずに作ります（使う人は .env を書かないと AI を使えません）'
 }
 if (-not $MakeNsis) {
-  if (-not (Test-KantanTool 'NSIS')) { & (Join-Path $native 'tools\setup.ps1') }
-  $MakeNsis = $KantanTools.NSIS
+  if (-not (Test-EEditorTool 'NSIS')) { & (Join-Path $native 'tools\setup.ps1') }
+  $MakeNsis = $EEditorTools.NSIS
 }
-$src = Join-Path $native 'dist\kantan-video-editor'
+$src = Join-Path $native 'dist\e-editor'
 
 $cmakeLists = [System.IO.File]::ReadAllText((Join-Path $native 'CMakeLists.txt'))
-$version = [regex]::Match($cmakeLists, 'project\(\w+ VERSION (\d+\.\d+\.\d+)').Groups[1].Value
+$version = [regex]::Match($cmakeLists, 'project\([\w-]+ VERSION (\d+\.\d+\.\d+)').Groups[1].Value
 if (-not $version) { throw 'CMakeLists.txt からバージョンを読めません' }
 
 # インストールするファイルと、アンインストールで消すファイルの一覧（アンインストールではこの一覧のファイルだけを消す）
@@ -46,8 +46,10 @@ $uninstallFile = Join-Path $work 'uninstall-files.nsh'
 [System.IO.File]::WriteAllLines($installFile, $install, $utf8)
 [System.IO.File]::WriteAllLines($uninstallFile, $uninstall, $utf8)
 
-$out = Join-Path $native "dist\kantan-video-editor-cpp-$version-setup.exe"
+$out = Join-Path $native "dist\e-editor-cpp-$version-setup.exe"
 Write-Host 'インストーラーを作っています（圧縮に数分かかります）'
+# vcredist.ps1: インストールのときに、Microsoft Visual C++ ランタイム（オブジェクトマスクの AI が使う）が無ければ、Microsoft から入れる
 Invoke-Tool $MakeNsis @('/V2', '/INPUTCHARSET', 'UTF8', "/DVERSION=$version", "/DOUTFILE=$out", "/DICON=$(Join-Path $native 'resources\app.ico')",
-  "/DINSTALL_FILES=$installFile", "/DUNINSTALL_FILES=$uninstallFile", (Join-Path $here 'installer.nsi')) 'インストーラーの作成'
+  "/DINSTALL_FILES=$installFile", "/DUNINSTALL_FILES=$uninstallFile", "/DVCREDIST_PS1=$(Join-Path $here 'vcredist.ps1')",
+  (Join-Path $here 'installer.nsi')) 'インストーラーの作成'
 Write-Host "インストーラー: $out"

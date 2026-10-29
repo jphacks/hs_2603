@@ -43,15 +43,15 @@ Line numbers are for the modified files.
 
 ## Build
 1. `powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1 -NoDeploy`: exit 0.
-   - Ninja rebuilt widgets.cpp, inspector.cpp, the other files that include widgets.h (exportdialog, previewwidget, timelinewidget, mainwindow) and mocs, then linked `native\build\kantan-video-editor.exe`.
+   - Ninja rebuilt widgets.cpp, inspector.cpp, the other files that include widgets.h (exportdialog, previewwidget, timelinewidget, mainwindow) and mocs, then linked `native\build\e-editor.exe`.
    - The output had no warnings or errors. The app target builds with `-Wall`.
 2. `powershell -NoProfile -ExecutionPolicy Bypass -File c:\git\JPHACK\e-editor\native\build.ps1`: compile printed `ninja: no work to do`, then deploy stopped with exit 1:
-   `アプリが起動したままなので上書きできません。閉じてからもう一度実行してください: C:\git\JPHACK\e-editor\native\dist\kantan-video-editor\kantan-video-editor.exe`.
+   `アプリが起動したままなので上書きできません。閉じてからもう一度実行してください: C:\git\JPHACK\e-editor\native\dist\e-editor\e-editor.exe`.
    - The app was already running (PID 23992, started 2026-10-21 11:14:36, before this step). Per the plan it was not killed.
-   - So `native\dist` still has the old exe. The fixed exe is `native\build\kantan-video-editor.exe`. The user needs to close the app and run `build.cmd`.
+   - So `native\dist` still has the old exe. The fixed exe is `native\build\e-editor.exe`. The user needs to close the app and run `build.cmd`.
 
 ## Harness (temporary, outside the repo, now deleted)
-Location: `C:\kantan-dev\tmp\kv-wheelcheck\`, built from Appendix A of plan.md. It compiles every app source except main.cpp straight from the repo, with Qt6::Test. It shows an `Inspector` with a text item selected, then sends:
+Location: `C:\e-editor-dev\tmp\kv-wheelcheck\`, built from Appendix A of plan.md. It compiles every app source except main.cpp straight from the repo, with Qt6::Test. It shows an `Inspector` with a text item selected, then sends:
 - direct `QWheelEvent`s through `sendEvent`, checking accepted/ignored and the values;
 - OS-path (spontaneous) wheel events through `qt_handleWheelEvent`, which go through `QGuiApplication` → `QWidgetWindow` → `QApplication::notify` propagation;
 - mouse press → move → release, groove clicks, double-clicks and keys.
@@ -122,7 +122,7 @@ RESULT: ALL OK
 ```
 
 Cleanup:
-- `Remove-Item -Recurse -Force -LiteralPath 'C:\kantan-dev\tmp\kv-wheelcheck'`; afterwards `Test-Path` returns False.
+- `Remove-Item -Recurse -Force -LiteralPath 'C:\e-editor-dev\tmp\kv-wheelcheck'`; afterwards `Test-Path` returns False.
 - No harness leftovers in `%LOCALAPPDATA%`, `%APPDATA%` or `HKCU\Software`. The harness never creates a MainWindow, so it never writes an autosave.
 - No throwaway target was added to the repo's CMake, and no repo file was touched by the harness.
 

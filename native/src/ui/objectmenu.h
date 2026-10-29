@@ -10,6 +10,9 @@ class QWidget;
 
 namespace kv {
 
+/** メニューの項目名に、その操作のキー（キーボードショートカットの設定どおり）を添える */
+QString withKeys(const QString& label, const QString& commandId);
+
 /** 右クリックメニューを出した場所（場所ごとに、出す項目が少し違う） */
 enum class ObjectMenuPlace { Timeline, Preview };
 
@@ -30,6 +33,6 @@ void copyItemsToTab(int index);
 void pasteItemsAt(double t, std::optional<int> clipIndex);
 
 /** タイムラインで選んだものを、ほかのタブへドラッグで持っていくときの MIME 形式（中身は写し元のタブの ID。物はアプリのクリップボード） */
-inline constexpr const char* kTimelineItemsMime = "application/x-kantan-timeline-items";
+inline constexpr const char* kTimelineItemsMime = "application/x-e-editor-timeline-items";
 
 }  // namespace kv

@@ -1,6 +1,6 @@
 #pragma once
 // AI サーバーのアカウント（メールアドレスとパスワードでログインする）と、AI サーバーとのつながり。
-// ログイン中の印は、Windows の DPAPI で暗号化して %LOCALAPPDATA%\JPHACKS\kantan-video-editor\session.dat に置く
+// ログイン中の印は、Windows の DPAPI で暗号化して %LOCALAPPDATA%\JPHACKS\e-editor\session.dat に置く
 // （この PC のこのユーザーだけが読める）。印は、ログインしたサーバーにしか送らない。
 // つながっているかは、AI サーバーの /api/health を 30 秒ごと（とアプリに戻ってきたとき）に見て確かめる。
 // 通信は ServerCall を通す（つないだ直後に切られたときは、自動でつなぎ直す）。
@@ -70,7 +70,7 @@ class Account : public QObject {
   bool hasToken() const { return !token_.isEmpty(); }
   QString token() const { return token_; }
   const AccountInfo& info() const { return info_; }
-  /** 今の AI サーバーのアドレス（.env の KANTAN_AI_SERVER か、exe に組み込んだもの。末尾の / なし。決まっていなければ空） */
+  /** 今の AI サーバーのアドレス（.env の E_EDITOR_AI_SERVER か、exe に組み込んだもの。末尾の / なし。決まっていなければ空） */
   QString server() const { return server_; }
   /**
    * .env を読み直す（アプリに戻ってきたときにも自動で行う）。アドレスが変わっていたら、そのサーバーを使う

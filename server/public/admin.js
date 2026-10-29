@@ -98,7 +98,7 @@ async function api(method, url, body) {
   const res = await fetch(url, {
     method,
     credentials: 'same-origin',
-    headers: { 'X-Kantan-Admin': '1', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { 'X-E-Editor-Admin': '1', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   let data = {};

@@ -16,8 +16,8 @@ BEGIN
       VALUE "CompanyName", "JPHACKS Team"
       VALUE "FileDescription", "e-editor"
       VALUE "FileVersion", "0.1.0"
-      VALUE "InternalName", "kantan-video-editor"
-      VALUE "OriginalFilename", "kantan-video-editor.exe"
+      VALUE "InternalName", "e-editor"
+      VALUE "OriginalFilename", "e-editor.exe"
       VALUE "ProductName", "e-editor"
       VALUE "ProductVersion", "0.1.0"
     END

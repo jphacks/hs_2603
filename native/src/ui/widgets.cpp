@@ -386,10 +386,12 @@ bool isNumericWidget(const QWidget* w) {
 }
 
 qint64 g_lastScrollWheel = 0;  // 数値の部品の外（パネルのスクロールなど）で、ホイールが使われた最後の時刻
+qint64 g_lastTabKey = 0;       // Tab / Shift+Tab が押された最後の時刻（スライダーを Tab で選んだのかを見分ける）
 
 /**
  * パネルをホイールでスクロールしているとき、通り道にある数値欄の値が勝手に変わらないようにする。
- * スクロールが止まって少したってから回したとき（または、その欄を回している最中）だけ、値を変える
+ * スクロールが止まって少したってから回したとき（または、その欄を回している最中）だけ、値を変える。
+ * Tab キーも覚えておく（Qt が自動で移したフォーカスと、Tab で選んだのを見分けるため）
  */
 class WheelScrollWatcher : public QObject {
  protected:
@@ -397,6 +399,9 @@ class WheelScrollWatcher : public QObject {
     if (e->type() == QEvent::Wheel) {
       const auto* w = qobject_cast<QWidget*>(obj);
       if (w && !isNumericWidget(w)) g_lastScrollWheel = nowMs();
+    } else if (e->type() == QEvent::KeyPress) {
+      const int k = static_cast<QKeyEvent*>(e)->key();
+      if (k == Qt::Key_Tab || k == Qt::Key_Backtab) g_lastTabKey = nowMs();
     }
     return false;
   }
@@ -550,6 +555,17 @@ bool LineSlider::hitsLine(const QPoint& pos) const {
   return pos.y() >= groove.top() && pos.y() <= groove.bottom() && std::abs(pos.x() - groove.center().x()) <= half;
 }
 
+bool LineSlider::hitsBody(const QPoint& pos) const {
+  const QRect handle = handleRect();
+  if (handle.contains(pos)) return true;  // つまみ（外側へは広げない）
+  const QRect groove = grooveRect();
+  // 線: 線の長さの範囲で、つまみと同じ太さの帯（線の中心から、つまみの上の端〜下の端まで）
+  if (orientation() == Qt::Horizontal) {
+    return pos.x() >= groove.left() && pos.x() <= groove.right() && pos.y() >= handle.top() && pos.y() <= handle.bottom();
+  }
+  return pos.y() >= groove.top() && pos.y() <= groove.bottom() && pos.x() >= handle.left() && pos.x() <= handle.right();
+}
+
 void LineSlider::mousePressEvent(QMouseEvent* e) {
   const QPoint pos = e->position().toPoint();
   // 線とつまみの周りの余白: 何もしない（値は変えない）
@@ -606,6 +622,12 @@ class NumberSlider : public LineSlider {
   }
 
  protected:
+  void mousePressEvent(QMouseEvent* e) override {
+    // 線・つまみを押すと、このスライダーを選ぶ（選んでいる間だけ、ホイールと矢印キーで値を変えられる）。
+    // 周りの余白を押したときは選ばない
+    if (row && e->button() == Qt::LeftButton && isEnabled() && hitsLine(e->position().toPoint())) row->selectByMouse();
+    LineSlider::mousePressEvent(e);
+  }
   void mouseDoubleClickEvent(QMouseEvent* e) override {
     // 線・つまみの周りの余白のダブルクリックでは、元の値に戻さない
     if (!hitsLine(e->position().toPoint())) {
@@ -616,8 +638,17 @@ class NumberSlider : public LineSlider {
     e->accept();
   }
   void wheelEvent(QWheelEvent* e) override {
-    if (row) row->handleWheel(e);
-    else QSlider::wheelEvent(e);
+    if (!row) {
+      QSlider::wheelEvent(e);
+      return;
+    }
+    // 選んでいるスライダーの中（つまみ・線の帯）にカーソルがあるときだけ値を変える。選んでいないとき・少し外れて
+    // いるときは、値を変えずにパネルのスクロールに任せる（上下へ移動したいだけのときに、値が変わらないように）
+    if (!row->active() || !hitsBody(e->position().toPoint())) {
+      e->ignore();
+      return;
+    }
+    row->handleWheel(e);
   }
   void keyPressEvent(QKeyEvent* e) override {
     if (row && !(e->modifiers() & (Qt::ControlModifier | Qt::MetaModifier))) {
@@ -626,12 +657,15 @@ class NumberSlider : public LineSlider {
         case Qt::Key_Down:
         case Qt::Key_Left:
         case Qt::Key_Right:
-          row->handleArrow(e);
+          if (row->active()) row->handleArrow(e);
+          else e->ignore();  // 選んでいない（Qt が自動でフォーカスを移した直後など）ときは、値を変えない
           return;
         case Qt::Key_Escape:
         case Qt::Key_Return:
         case Qt::Key_Enter:
-          clearFocus();  // 選択をやめる（矢印キーは、タイムラインなどのショートカットに戻る）
+          // 選択をやめる（矢印キーは、タイムラインなどのショートカットに戻る）
+          row->setSelected(false);
+          clearFocus();
           e->accept();
           return;
         default: break;
@@ -654,7 +688,7 @@ SliderRow::SliderRow(const QString& label, double min, double max, double step, 
   valueLabel_ = makeLabel(QString(), "muted", this);
   valueLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   valueLabel_->setCursor(Qt::IBeamCursor);
-  valueLabel_->setToolTip(QStringLiteral("クリックして選ぶと、矢印キーで調整できます（Shift で10倍、Alt で細かく）。ホイールでも調整できます"));
+  valueLabel_->setToolTip(QStringLiteral("クリックして選ぶと、ホイールと矢印キーで調整できます（Shift で10倍、Alt で細かく）"));
   valueLabel_->installEventFilter(this);
   refreshValueStyle();
   head->addWidget(label_);
@@ -665,10 +699,11 @@ SliderRow::SliderRow(const QString& label, double min, double max, double step, 
   s->row = this;
   slider_ = s;
   slider_->setRange(0, int(std::lround((max - min) / step)));
-  // クリックでは選ばない（ドラッグのあとに矢印キーがタイムラインの操作でなくなるのを防ぐ）。数値をクリックするか Tab で選ぶ
+  // 選ぶのは、線・つまみを押したとき（NumberSlider）・数値をクリックしたとき・Tab のとき。周りの余白のクリックや
+  // ホイールでは選ばない
   slider_->setFocusPolicy(Qt::TabFocus);
   slider_->setAccessibleName(label);
-  slider_->setToolTip(QStringLiteral("ドラッグ / ホイールで調整（Shift で10倍、Alt で細かく）。ダブルクリックで元の値"));
+  slider_->setToolTip(QStringLiteral("ドラッグで調整。押して選ぶと、ホイールと矢印キーでも調整できます（Shift で10倍、Alt で細かく）。ダブルクリックで元の値"));
   slider_->installEventFilter(this);
   v->addWidget(slider_);
   settle_ = new QTimer(this);
@@ -744,6 +779,12 @@ void SliderRow::updateText() {
 // ---- SliderRow: ホイール・矢印キー ------------------------------------------------------
 
 void SliderRow::wheelEvent(QWheelEvent* e) {
+  // ここに届くのは、スライダーの中以外（見出し・数値・余白、スライダーの線の外）と、選んでいないスライダーの上。
+  // 選んでいるときの数値の上だけで値を変え、ほかは値を変えずにパネルのスクロールに任せる
+  if (!(active() && valueLabel_->isVisible() && valueLabel_->geometry().contains(e->position().toPoint()))) {
+    e->ignore();
+    return;
+  }
   handleWheel(e);
 }
 
@@ -796,37 +837,92 @@ void SliderRow::setHot(bool on) {
   refreshValueStyle();
 }
 
-/** 数値の見た目: カーソルを合わせると青、選んでいる（矢印キーで調整できる）ときは枠も付く。枠の幅は常に同じなので、大きさは変わらない */
+/**
+ * 数値の見た目: カーソルを合わせると青（クリックで選べる合図）、選んでいる（ホイール・矢印キーで調整できる）ときは枠も付く。
+ * 枠の幅は常に同じなので、大きさは変わらない。選んでいる間は、スライダーのつまみにも青い縁を付ける
+ * （数値を隠しているスライダーでも、選んでいるのがわかるように。縁のぶん中を小さくして、つまみの大きさは 13px のまま）
+ */
 void SliderRow::refreshValueStyle() {
   QString css = QStringLiteral("border:1px solid %1;border-radius:3px;padding:0 3px;").arg(focused_ ? QStringLiteral("#2680eb") : QStringLiteral("transparent"));
   if (hot_ || focused_) css += QStringLiteral("color:#4da3ff;");
   valueLabel_->setStyleSheet(css);
+  const QString handle = focused_ ? QStringLiteral("QSlider::handle:horizontal{width:9px;height:9px;border:2px solid #4da3ff;background:#ffffff;}") : QString();
+  if (slider_ && slider_->styleSheet() != handle) slider_->setStyleSheet(handle);
+}
+
+void SliderRow::setSelected(bool on) {
+  if (focused_ == on) return;
+  focused_ = on;
+  // 選んでいる間だけ、アプリ全体のクリックを見る（この欄の外を押したら、選んだ状態を終えるため）
+  if (on) qApp->installEventFilter(this);
+  else qApp->removeEventFilter(this);
+  refreshValueStyle();
+  if (!on && settle_->isActive()) {
+    settle_->stop();
+    settle();
+  }
+}
+
+void SliderRow::selectByMouse() {
+  if (!slider_->isEnabled()) return;
+  setSelected(true);
+  slider_->setFocus(Qt::MouseFocusReason);
 }
 
 bool SliderRow::eventFilter(QObject* obj, QEvent* e) {
+  // 選んでいる間の Esc・Enter は、スライダーの選択を終えるだけにする（Esc の「選択を解除」などのショートカットより先に
+  // 受け取る。アプリ全体のフィルターは、あとから入れたものが先に呼ばれる）
+  if (focused_ && obj == slider_ && (e->type() == QEvent::ShortcutOverride || e->type() == QEvent::KeyPress)) {
+    auto* ke = static_cast<QKeyEvent*>(e);
+    const int k = ke->key();
+    if ((k == Qt::Key_Escape || k == Qt::Key_Return || k == Qt::Key_Enter) &&
+        !(ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))) {
+      e->accept();
+      if (e->type() == QEvent::KeyPress) {
+        setSelected(false);
+        slider_->clearFocus();
+      }
+      return true;
+    }
+  }
+  // 選んでいる間（アプリ全体を見ている）: この欄の外を押したら、選んだ状態を終える（矢印キーはコマ送りなどに戻る）
+  if (focused_ && e->type() == QEvent::MouseButtonPress && obj->isWidgetType()) {
+    auto* w = static_cast<QWidget*>(obj);
+    if (w != this && !isAncestorOf(w)) {
+      setSelected(false);
+      if (slider_->hasFocus()) slider_->clearFocus();
+    }
+  }
   if (obj == slider_) {
     switch (e->type()) {
-      case QEvent::Enter: setHot(true); break;
-      case QEvent::Leave: setHot(false); break;
-      case QEvent::FocusIn:
-        focused_ = true;
-        refreshValueStyle();
-        break;
-      case QEvent::FocusOut:
-        focused_ = false;
-        refreshValueStyle();
-        if (settle_->isActive()) {
-          settle_->stop();
-          settle();
+      case QEvent::FocusIn: {
+        // 選ぶのは、線・つまみ・数値を押したとき（selectByMouse）と、Tab キーで来たときだけ。ほかの部品が隠れたときや
+        // ウィンドウが開いたときに Qt が自動でフォーカスを移してきたときは選ばず、フォーカスも手放す
+        // （矢印キーがタイムラインのコマ送りなどに使えるように）
+        const Qt::FocusReason r = static_cast<QFocusEvent*>(e)->reason();
+        const bool tab = (r == Qt::TabFocusReason || r == Qt::BacktabFocusReason) && nowMs() - g_lastTabKey < 500;
+        if (r == Qt::MouseFocusReason || tab) {
+          setSelected(true);
+        } else if (!focused_) {
+          QTimer::singleShot(0, slider_, [this] {
+            if (slider_->hasFocus() && !focused_) slider_->clearFocus();
+          });
         }
         break;
+      }
+      case QEvent::FocusOut: {
+        // ウィンドウを切り替えた・メニューが開いたときは、選んだまま（戻ってきたら、そのまま続けられる）
+        const Qt::FocusReason r = static_cast<QFocusEvent*>(e)->reason();
+        if (r != Qt::ActiveWindowFocusReason && r != Qt::PopupFocusReason) setSelected(false);
+        break;
+      }
       default: break;
     }
   } else if (obj == valueLabel_) {
     if (e->type() == QEvent::Enter) setHot(true);
     else if (e->type() == QEvent::Leave) setHot(false);
-    // 数値をクリックすると選ばれて、矢印キーで調整できる
-    else if (e->type() == QEvent::MouseButtonPress && slider_->isEnabled()) slider_->setFocus(Qt::MouseFocusReason);
+    // 数値をクリックすると選ばれて、ホイールと矢印キーで調整できる
+    else if (e->type() == QEvent::MouseButtonPress) selectByMouse();
   }
   return QWidget::eventFilter(obj, e);
 }
@@ -941,7 +1037,7 @@ void SecondsField::setValue(double v) {
 
 // ---- Section ----------------------------------------------------------------
 
-Section::Section(const QString& title, QWidget* parent) : QWidget(parent) {
+Section::Section(const QString& title, QWidget* parent) : QWidget(parent), title_(title) {
   auto* v = new QVBoxLayout(this);
   v->setContentsMargins(0, 12, 0, 12);
   v->setSpacing(8);

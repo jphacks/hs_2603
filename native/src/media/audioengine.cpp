@@ -115,25 +115,45 @@ AudioEngine::Reader* AudioEngine::reader(const MixSource& s) {
   return slot->opened ? slot.get() : nullptr;
 }
 
+double mixSourceGain(const MixSource& s, double local) {
+  // 音量・キーフレーム・フェードは、クリップの中の時刻で決める（クロスフェードで前後に足した所は、端の値のまま。書き出しと同じ）
+  const double inner = std::clamp(local, 0.0, std::max(0.0, s.duration));
+  double g = volumeAt(s.points, s.volume, inner) * fadeFactor(inner, s.duration, s.fadeIn, s.fadeOut);
+  constexpr double kHalfPi = 1.5707963267948966;
+  // 前のクリップからのクロスフェード: 大きくしていく（qsin: sin(x·π/2)）
+  if (s.headXf > 0) {
+    const double x = (local + s.headExt) / s.headXf;
+    if (x < 1) g *= std::sin(std::clamp(x, 0.0, 1.0) * kHalfPi);
+  }
+  // 次のクリップへのクロスフェード: 小さくしていく（acrossfade の 1 つ目と同じく、1 サンプル先の位置の qsin を逆向きに）
+  if (s.tailXf > 0) {
+    const double x = (local - (s.duration + s.tailExt - s.tailXf)) / s.tailXf;
+    if (x > 0 - 1.0 / (s.tailXf * kAudioRate)) g *= std::sin(std::clamp(1 - x - 1.0 / (s.tailXf * kAudioRate), 0.0, 1.0) * kHalfPi);
+  }
+  return g;
+}
+
 void AudioEngine::mixBlock(float* out, int frames, double t, const MixSnapshot& snap) {
   std::memset(out, 0, size_t(frames) * 2 * sizeof(float));
   const double t1 = t + double(frames) / kAudioRate;
   std::vector<float> tmp;
   for (const auto& s : snap.sources) {
-    const double end = s.start + s.duration;
+    // 鳴らす範囲（クロスフェードで前後に足した所も含む）。素材の最初より前は無音（読み始めは素材の 0 秒の所から）
+    const double from = std::max(s.start - s.headExt, s.start - s.in / std::max(1e-6, s.speed));
+    const double end = s.start + s.duration + s.tailExt;
     // 少し先に始まる音は、開いてシークしておく
-    if (s.start >= t1 && s.start < t1 + 1.5) {
+    if (from >= t1 && from < t1 + 1.5) {
       if (Reader* rd = reader(s)) {
-        if (std::abs(rd->nextTimeline - s.start) > 1e-4 || rd->tempo != s.speed) {
-          rd->dec.seek(s.in, s.speed);
-          rd->nextTimeline = s.start;
+        if (std::abs(rd->nextTimeline - from) > 1e-4 || rd->tempo != s.speed) {
+          rd->dec.seek(std::max(0.0, s.in + (from - s.start) * s.speed), s.speed);
+          rd->nextTimeline = from;
           rd->tempo = s.speed;
         }
       }
       continue;
     }
-    if (end <= t || s.start >= t1) continue;
-    const double a = std::max(t, s.start);
+    if (end <= t || from >= t1) continue;
+    const double a = std::max(t, from);
     const double b = std::min(t1, end);
     const int offset = std::clamp(int(std::lround((a - t) * kAudioRate)), 0, frames);
     const int count = std::clamp(int(std::lround((b - a) * kAudioRate)), 0, frames - offset);
@@ -141,19 +161,22 @@ void AudioEngine::mixBlock(float* out, int frames, double t, const MixSnapshot& 
     Reader* rd = reader(s);
     if (!rd) continue;
     if (std::abs(rd->nextTimeline - a) > 2.0 / kAudioRate || rd->tempo != s.speed) {
-      rd->dec.seek(s.in + (a - s.start) * s.speed, s.speed);
+      rd->dec.seek(std::max(0.0, s.in + (a - s.start) * s.speed), s.speed);
       rd->tempo = s.speed;
     }
     tmp.resize(size_t(count) * 2);
     rd->dec.read(tmp.data(), count);
     rd->nextTimeline = a + double(count) / kAudioRate;
     const double local0 = a - s.start;
+    // パン（反対側を弱める）
+    const float gl = float(panGainLeft(s.pan));
+    const float gr = float(panGainRight(s.pan));
     for (int i = 0; i < count; ++i) {
       // 1 サンプルごとに音量を決める（キーフレームの間は直線。段差が無いのでクリックノイズが出ない）
       const double local = local0 + double(i) / kAudioRate;
-      const double g = volumeAt(s.points, s.volume, local) * fadeFactor(local, s.duration, s.fadeIn, s.fadeOut);
-      out[size_t(offset + i) * 2] += float(tmp[size_t(i) * 2] * g);
-      out[size_t(offset + i) * 2 + 1] += float(tmp[size_t(i) * 2 + 1] * g);
+      const float g = float(mixSourceGain(s, local));
+      out[size_t(offset + i) * 2] += tmp[size_t(i) * 2] * g * gl;
+      out[size_t(offset + i) * 2 + 1] += tmp[size_t(i) * 2 + 1] * g * gr;
     }
   }
   // 音割れ防止（0.97 を超えた分をなだらかに抑える）

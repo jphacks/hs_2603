@@ -1,8 +1,8 @@
 #pragma once
 // AI 機能の設定。AI は、いつも AI サーバー（リポジトリの server フォルダー）を通して使う（アプリに Bedrock のキーは要らない）。
 // AI サーバーのアドレスは、次の順に決める（画面には出さない。どれも無ければ、AI アシスタントは出さない）。
-//   1. .env の KANTAN_AI_SERVER（管理者が、別のサーバーで試すとき）。.env は、アプリの exe のフォルダー → リポジトリの一番上（開発中だけ）→
-//      アプリのデータフォルダー（%LOCALAPPDATA%\JPHACKS\kantan-video-editor）の順に探し、値が書いてある最初の 1 つを使う（環境変数は使わない）
+//   1. .env の E_EDITOR_AI_SERVER（管理者が、別のサーバーで試すとき）。.env は、アプリの exe のフォルダー → リポジトリの一番上（開発中だけ）→
+//      アプリのデータフォルダー（%LOCALAPPDATA%\JPHACKS\e-editor）の順に探し、値が書いてある最初の 1 つを使う（環境変数は使わない）
 //   2. 配る exe に組み込んだアドレス（build.ps1 が native\release.env から、そのままの文字では見えない形で埋め込む）
 // .env を書き換えたら、アプリに戻ってくるだけで読み直す（起動し直さなくてよい）。
 // 考える深さは AI の欄で選び、データフォルダーの settings.ini に覚えておく（レジストリは使わない）。
@@ -37,14 +37,14 @@ Config loadConfig();
 enum class ServerSource {
   /** どこにも無い（AI は使わない） */
   None,
-  /** .env の KANTAN_AI_SERVER */
+  /** .env の E_EDITOR_AI_SERVER */
   EnvFile,
   /** exe に組み込んだアドレス */
   BuiltIn,
 };
 
 /**
- * 使う AI サーバーのアドレス（整えたもの）。.env の KANTAN_AI_SERVER があればそれ、無ければ exe に組み込んだもの、
+ * 使う AI サーバーのアドレス（整えたもの）。.env の E_EDITOR_AI_SERVER があればそれ、無ければ exe に組み込んだもの、
  * どちらも無ければ空。呼ぶたびに .env を読み直す
  */
 QString configuredServer();
@@ -52,12 +52,12 @@ QString configuredServer();
 ServerSource serverSource();
 /** exe にアドレスを組み込んであるか */
 bool hasBuiltInServer();
-/** KANTAN_AI_SERVER を読んだ .env の場所（どの .env にも書いていなければ空） */
+/** E_EDITOR_AI_SERVER を読んだ .env の場所（どの .env にも書いていなければ空） */
 QString envFile();
 /** .env を探すフォルダー（探す順） */
 QStringList envSearchDirs();
 /**
- * KANTAN_AI_SERVER を書いてもらう .env の場所（案内用）。すでに .env があれば最初に読むもの、
+ * E_EDITOR_AI_SERVER を書いてもらう .env の場所（案内用）。すでに .env があれば最初に読むもの、
  * 無ければ、リポジトリの中で動かしていればその一番上、そうでなければデータフォルダー
  */
 QString suggestedEnvPath();

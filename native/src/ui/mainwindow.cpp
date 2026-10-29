@@ -38,6 +38,7 @@
 
 #include "ai/account.h"
 #include "ai/assistant.h"
+#include "ai/guidecatalog.h"
 #include "core/editor.h"
 #include "core/projectio.h"
 #include "core/timeline.h"
@@ -45,12 +46,18 @@
 #include "media/mediamanager.h"
 #include "media/webimage.h"
 #include "render/previewengine.h"
+#include "core/transitions.h"
 #include "ui/accountdialog.h"
 #include "ui/aipanel.h"
+#include "ui/clipdialogs.h"
+#include "ui/effectlist.h"
+#include "ui/effectsview.h"
 #include "ui/exportdialog.h"
+#include "ui/guide.h"
 #include "ui/inspector.h"
 #include "ui/keymap.h"
 #include "ui/librarypanel.h"
+#include "ui/markerdialog.h"
 #include "ui/objectmenu.h"
 #include "ui/perspective.h"
 #include "ui/previewwidget.h"
@@ -78,12 +85,14 @@ MainWindow::MainWindow() {
   // AI アシスタントは右端の欄。はじめはしまっておき、右上の「AI」で出す
   aiPanel_ = new AiPanel(this);
 
-  // 左右の欄のビュー（メディア・オーディオ・テキスト・プロパティ）。パースペクティブで、置く欄・順番・開くかを変えられる
+  // 左右の欄のビュー（メディア・オーディオ・テキスト・エフェクト・プロパティ）。パースペクティブで、置く欄・順番・開くかを変えられる
   using Side = PerspectiveManager::Side;
   perspective_ = new PerspectiveManager(this);
   perspective_->addView(QStringLiteral("media"), QStringLiteral("メディア"), LibraryPanel::createMediaView(this), Side::Left);
   perspective_->addView(QStringLiteral("audio"), QStringLiteral("オーディオ"), LibraryPanel::createAudioView(this), Side::Left);
   perspective_->addView(QStringLiteral("text"), QStringLiteral("テキスト"), LibraryPanel::createTextView(this), Side::Left);
+  // トランジション・エフェクト・エフェクトレイヤー（タイムラインへドラッグして付ける）
+  perspective_->addView(QStringLiteral("effects"), QStringLiteral("エフェクト"), createEffectsView(this), Side::Left);
   perspective_->addView(QStringLiteral("properties"), QStringLiteral("プロパティ"), inspector_, Side::Right);
 
   auto* top = new QSplitter(Qt::Horizontal, this);
@@ -124,7 +133,7 @@ MainWindow::MainWindow() {
   setCentralWidget(central);
 
   buildMenus();
-  // AI サーバーのアドレス（.env の KANTAN_AI_SERVER か、exe に組み込んだもの）が無ければ、AI アシスタントは出さない。
+  // AI サーバーのアドレス（.env の E_EDITOR_AI_SERVER か、exe に組み込んだもの）が無ければ、AI アシスタントは出さない。
   // .env を書き換えてアプリに戻ってきたら、Account が読み直して changed を出す（起動し直さなくてよい）
   refreshAiAvailability();
   connect(&ai::account(), &ai::Account::changed, this, &MainWindow::refreshAiAvailability);
@@ -190,6 +199,18 @@ MainWindow::MainWindow() {
   connect(preview_->stage(), &PreviewStage::requestTextFocus, this, focusText);
 
   qApp->installEventFilter(this);
+  // AI の操作の案内（AI が show_guide を使うと、画面の上に薄い矢印で、押す場所を順に示す）
+  guide_ = new GuideController(this);
+  aiPanel_->setGuide(guide_);
+  // AI に案内を知らせるときに、ショートカットキーと、今は使えない理由を添える
+  ai::setGuideInfoProvider([this](const QString& id) {
+    ai::GuideInfo info;
+    const ai::GuideTarget* t = ai::guideTarget(id);
+    if (!t) return info;
+    if (t->kind == ai::GuideKind::Action && keymap::find(t->ref)) info.keys = keymap::text(keymap::keys(t->ref));
+    info.problem = guide_->unavailable(id);
+    return info;
+  });
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   ITaskbarList3* tb = nullptr;
   if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_ITaskbarList3, reinterpret_cast<void**>(&tb)))) {
@@ -201,6 +222,8 @@ MainWindow::MainWindow() {
 }
 
 MainWindow::~MainWindow() {
+  ai::setGuideInfoProvider({});
+  if (guide_) guide_->stop();
   qApp->removeEventFilter(this);
   if (taskbar_) static_cast<ITaskbarList3*>(taskbar_)->Release();
 }
@@ -223,7 +246,19 @@ void MainWindow::buildMenus() {
     perspective_->showView(QStringLiteral("media"));
     LibraryPanel::pickFolderAndImport(this, false);
   }));
+  // 単色の画像（背景・場面のつなぎに使う）を作って、メインのビデオに入れる
+  bindCommand(QStringLiteral("edit.colorMatte"), file->addAction(QStringLiteral("カラーマットを追加..."), this, [this] { execColorMatteDialog(this); }));
+  file->addSeparator();
   bindCommand(QStringLiteral("file.export"), file->addAction(QStringLiteral("書き出し..."), this, &MainWindow::openExport));
+  // 再生位置の画面を、静止画（PNG / JPEG）にする
+  bindCommand(QStringLiteral("file.exportFrame"),
+              file->addAction(QStringLiteral("フレームを書き出し（静止画）..."), this, [this] { exportFrameAtPlayhead(this); }));
+  // 字幕ファイル（SRT・WebVTT）: 読み込むと「字幕」のスタイルのテキストとして並べる。書き出すと、テキストを時間の順に書く
+  file->addSeparator();
+  bindCommand(QStringLiteral("file.importSubtitles"),
+              file->addAction(QStringLiteral("字幕を読み込む（SRT・WebVTT）..."), this, [this] { importSubtitlesFile(this); }));
+  bindCommand(QStringLiteral("file.exportSubtitles"),
+              file->addAction(QStringLiteral("字幕を書き出す（SRT・WebVTT）..."), this, [this] { exportSubtitlesFile(this); }));
   // 書き出す範囲（タイムラインの一部だけを書き出す）。目盛りを Shift+ドラッグ、または右クリックでも決められる
   QMenu* rangeMenu = file->addMenu(QStringLiteral("書き出す範囲"));
   auto rangeToast = [] {
@@ -262,9 +297,30 @@ void MainWindow::buildMenus() {
   // コピー・貼り付け（タブをまたいで使える。編集2 で写して、編集1 に貼り付けるなど）
   bindCommand(QStringLiteral("edit.copy"), edit->addAction(QStringLiteral("コピー"), this, [] { copyItems(); }));
   bindCommand(QStringLiteral("edit.paste"), edit->addAction(QStringLiteral("貼り付け（再生位置に）"), this, [] { pasteItems(); }));
-  QAction* del = edit->addAction(QStringLiteral("削除"), this, [] { editor().deleteSelection(); });
+  // 目盛りの上のマーカーを選んでいるとき（ほかに何も選んでいないとき）は、そのマーカーを消す
+  QAction* del = edit->addAction(QStringLiteral("削除"), this, [this] {
+    TimelineView* tv = timeline_->view();
+    if (!editor().selection() && !tv->selectedMarker().isEmpty()) {
+      editor().removeMarker(tv->selectedMarker());
+      tv->clearMarkerSelection();
+      return;
+    }
+    editor().deleteSelection();
+  });
   bindCommand(QStringLiteral("edit.delete"), del);
-  addHiddenCommand(QStringLiteral("edit.deselect"), [] { editor().select({}); }, [] { return bool(editor().selection()); });
+  // リップル削除: 消して、空いた所を詰める（メインのビデオなら、後ろのテキスト・オーディオ・重ねるものも一緒に詰める）
+  QAction* rippleDel = edit->addAction(QStringLiteral("リップル削除（削除して詰める）"), this, [] { editor().rippleDeleteSelection(); });
+  bindCommand(QStringLiteral("edit.rippleDelete"), rippleDel);
+  addHiddenCommand(QStringLiteral("edit.deselect"), [this] {
+    editor().select({});
+    timeline_->view()->clearMarkerSelection();
+  }, [this] { return bool(editor().selection()) || !timeline_->view()->selectedMarker().isEmpty(); });
+  edit->addSeparator();
+  // 属性のコピー・ペースト（映像の色・エフェクト・動き・切り抜きなどを、ほかの映像にまとめて写す）
+  QAction* copyAttrs = edit->addAction(QStringLiteral("属性をコピー"), this, [] { copySelectedAttributes(); });
+  QAction* pasteAttrs = edit->addAction(QStringLiteral("属性をペースト..."), this, [this] { execPasteAttributesDialog(this); });
+  bindCommand(QStringLiteral("edit.copyAttributes"), copyAttrs);
+  bindCommand(QStringLiteral("edit.pasteAttributes"), pasteAttrs);
   edit->addSeparator();
   // キーフレームのコピー・貼り付け（選んでいるキーフレームを、再生位置へ。値と補間方式は保たれる）
   QAction* copyKeys = edit->addAction(QStringLiteral("キーフレームをコピー"), this, [] {
@@ -342,20 +398,30 @@ void MainWindow::buildMenus() {
   };
   addHiddenCommand(QStringLiteral("edit.prevObject"), [this] { selectAdjacentObject(-1); }, arrowsFree);
   addHiddenCommand(QStringLiteral("edit.nextObject"), [this] { selectAdjacentObject(1); }, arrowsFree);
-  auto refreshEdit = [undo, redo, dup, del, trackUp, trackDown, group, ungroup] {
-    undo->setEnabled(editor().canUndo());
-    redo->setEnabled(editor().canRedo());
-    dup->setEnabled(bool(editor().selection()));
-    del->setEnabled(bool(editor().selection()));
-    const Selection::Type t = editor().selection().type;
+  auto refreshEdit = [this, undo, redo, dup, del, rippleDel, copyAttrs, pasteAttrs, trackUp, trackDown, group, ungroup] {
+    const Editor& e = editor();
+    undo->setEnabled(e.canUndo());
+    redo->setEnabled(e.canRedo());
+    dup->setEnabled(bool(e.selection()) && e.selection().type != Selection::Transition);
+    del->setEnabled(bool(e.selection()) || !timeline_->view()->selectedMarker().isEmpty());
+    rippleDel->setEnabled(bool(e.selection()));
+    const Selection::Type t = e.selection().type;
+    const bool visual = t == Selection::Clip || t == Selection::Overlay;
+    copyAttrs->setEnabled(visual);
+    pasteAttrs->setEnabled(visual && e.hasAttributes());
     trackUp->setEnabled(t == Selection::Text || t == Selection::Overlay);
     trackDown->setEnabled(t == Selection::Text || t == Selection::Overlay);
-    group->setEnabled(editor().canGroup());
-    ungroup->setEnabled(editor().canUngroup());
+    group->setEnabled(e.canGroup());
+    ungroup->setEnabled(e.canUngroup());
   };
   connect(&ed, &Editor::projectChanged, this, refreshEdit);
   connect(&ed, &Editor::selectionChanged, this, refreshEdit);
+  connect(timeline_->view(), &TimelineView::markerSelectionChanged, this, refreshEdit);
+  // 属性をコピーしたあと（メニュー・右クリックのどこからでも）、ペーストを押せるようにする（コピーは編集データを変えないので、ここで出し直す）
+  connect(&ed, &Editor::attributesChanged, this, refreshEdit);
   refreshEdit();
+
+  buildEditingMenus();
 
   auto* view = menuBar()->addMenu(QStringLiteral("表示(&V)"));
   bindCommand(QStringLiteral("view.zoomIn"),
@@ -373,6 +439,20 @@ void MainWindow::buildMenus() {
   view->addSeparator();
   bindCommand(QStringLiteral("view.fullScreen"),
               view->addAction(QStringLiteral("プレビューを全画面表示"), this, [this] { preview_->toggleFullScreen(); }));
+  // プレビューのガイド（見るためだけ。書き出す動画には出ない）。プレビューの下のボタンでも切り替えられる
+  QAction* safeMargins = view->addAction(QStringLiteral("セーフマージン（プレビュー）"));
+  QAction* gridGuide = view->addAction(QStringLiteral("三分割のグリッド（プレビュー）"));
+  for (QAction* a : {safeMargins, gridGuide}) a->setCheckable(true);
+  safeMargins->setChecked(ed.safeMarginsVisible());
+  gridGuide->setChecked(ed.gridVisible());
+  connect(safeMargins, &QAction::triggered, this, [](bool on) { editor().setSafeMarginsVisible(on); });
+  connect(gridGuide, &QAction::triggered, this, [](bool on) { editor().setGridVisible(on); });
+  connect(&ed, &Editor::guidesChanged, this, [safeMargins, gridGuide] {
+    safeMargins->setChecked(editor().safeMarginsVisible());
+    gridGuide->setChecked(editor().gridVisible());
+  });
+  bindCommand(QStringLiteral("view.safeMargins"), safeMargins);
+  bindCommand(QStringLiteral("view.grid"), gridGuide);
   // 左の欄（メディア・オーディオ・テキスト）を折りたたむ。一番上のメニューの「ファイル」の左隣のボタンでも折りたたむ・開くができ、
   // 折りたたんだときに左端に残る細い帯を押しても開く
   QAction* leftPanel = view->addAction(QStringLiteral("左の欄を折りたたむ"));
@@ -389,9 +469,11 @@ void MainWindow::buildMenus() {
   view->addSeparator();
   // 左右の欄の並び（Eclipse のパースペクティブのように、名前を付けて保存・切り替え・リセットができる）
   QMenu* perspectiveMenu = view->addMenu(QStringLiteral("パースペクティブ"));
+  perspectiveMenu->menuAction()->setObjectName(QStringLiteral("view.perspective"));  // 操作の案内で指す名前（メニューの項目も同じ）
   connect(perspectiveMenu, &QMenu::aboutToShow, this, [this, perspectiveMenu] { perspective_->fillPerspectiveMenu(perspectiveMenu); });
   perspective_->fillPerspectiveMenu(perspectiveMenu);
   QMenu* viewsMenu = view->addMenu(QStringLiteral("ビュー"));
+  viewsMenu->menuAction()->setObjectName(QStringLiteral("view.views"));
   connect(viewsMenu, &QMenu::aboutToShow, this, [this, viewsMenu] { perspective_->fillViewMenu(viewsMenu); });
   perspective_->fillViewMenu(viewsMenu);
   view->addSeparator();
@@ -406,10 +488,14 @@ void MainWindow::buildMenus() {
 
   // ワークショップ（みんなが公開したテキストのテンプレート・オーディオを探して追加する窓）。AI サーバーで使えるときだけ出す
   auto* workshop = menuBar()->addMenu(QStringLiteral("ワークショップ(&W)"));
-  workshop->addAction(QStringLiteral("テキストのテンプレートを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Text); });
-  workshop->addAction(QStringLiteral("オーディオを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Audio); });
-  workshop->addAction(QStringLiteral("写真を探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Image); });
-  workshop->addAction(QStringLiteral("動画・GIF を探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Video); });
+  workshop->addAction(QStringLiteral("テキストのテンプレートを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Text); })
+      ->setObjectName(QStringLiteral("workshop.text"));
+  workshop->addAction(QStringLiteral("オーディオを探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Audio); })
+      ->setObjectName(QStringLiteral("workshop.audio"));
+  workshop->addAction(QStringLiteral("写真を探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Image); })
+      ->setObjectName(QStringLiteral("workshop.image"));
+  workshop->addAction(QStringLiteral("動画・GIF を探す..."), this, [this] { openWorkshop(this, ai::WorkshopKind::Video); })
+      ->setObjectName(QStringLiteral("workshop.video"));
   auto syncWorkshop = [workshop] { workshop->menuAction()->setVisible(ai::workshopVisible()); };
   syncWorkshop();
   connect(&ai::account(), &ai::Account::changed, workshop, syncWorkshop);
@@ -429,6 +515,7 @@ void MainWindow::buildMenus() {
   lh->setContentsMargins(6, 0, 0, 6);  // メニューの文字の高さにそろえる（下に余白を寄せて、少し上げる）
   lh->setSpacing(0);
   leftPanelButton_ = makeToolButton(QStringLiteral("panel-left-close"), QStringLiteral("左の欄を折りたたむ"), leftCorner);
+  leftPanelButton_->setObjectName(QStringLiteral("TopLeftPanel"));  // 操作の案内（ai/guidecatalog.cpp）で探す名前
   lh->addWidget(leftPanelButton_);
   menuBar()->setCornerWidget(leftCorner, Qt::TopLeftCorner);
   connect(leftPanelButton_, &QToolButton::clicked, this, [this] { perspective_->setLeftCollapsed(!perspective_->leftCollapsed()); });
@@ -450,6 +537,11 @@ void MainWindow::buildMenus() {
   exportButton_->setFocusPolicy(Qt::NoFocus);
   aiButton_ = makeToolButton(QStringLiteral("message-square"), QStringLiteral("AI アシスタント (Ctrl+Shift+A)"), corner, QStringLiteral("AI"));
   aiButton_->setCheckable(true);
+  // 操作の案内（ai/guidecatalog.cpp）で探す名前
+  undoBtn->setObjectName(QStringLiteral("TopUndo"));
+  redoBtn->setObjectName(QStringLiteral("TopRedo"));
+  aiButton_->setObjectName(QStringLiteral("TopAi"));
+  exportButton_->setObjectName(QStringLiteral("TopExport"));
   ch->addWidget(undoBtn);
   ch->addWidget(redoBtn);
   ch->addSpacing(8);
@@ -470,8 +562,236 @@ void MainWindow::buildMenus() {
   applyShortcuts();
 }
 
+/** 一覧やプルダウンを選んでいるときは、矢印・PgUp・PgDn はそちらの操作に使う（タイムラインの操作にしない） */
+static bool navigationKeysFree() {
+  for (QWidget* w = QApplication::focusWidget(); w; w = w->parentWidget()) {
+    if (qobject_cast<QAbstractItemView*>(w) || qobject_cast<QComboBox*>(w)) return false;
+  }
+  return true;
+}
+
+void MainWindow::buildEditingMenus() {
+  Editor& ed = editor();
+  TimelineView* tv = timeline_->view();
+  // 選んでいる映像（メイン・重ねるトラック）の ID。映像でなければ空
+  auto selectedVisual = [] {
+    const Selection s = editor().selection();
+    return (s.type == Selection::Clip || s.type == Selection::Overlay) ? s.id : QString();
+  };
+
+  // ---- クリップ（選んでいる映像の操作。Premiere の「クリップ」メニューにあたる） ----
+  auto* clip = menuBar()->addMenu(QStringLiteral("クリップ(&C)"));
+  QAction* speed = clip->addAction(QStringLiteral("速度・デュレーション..."), this, [this, selectedVisual] {
+    const QString id = selectedVisual();
+    if (id.isEmpty()) {
+      editor().toast(QStringLiteral("速度・長さを変える映像を、タイムラインで選んでください"));
+      return;
+    }
+    execSpeedDialog(this, id);
+  });
+  bindCommand(QStringLiteral("edit.speed"), speed);
+  QAction* detach = clip->addAction(QStringLiteral("音声を切り離す"), this, [] { detachSelectedAudio(); });
+  bindCommand(QStringLiteral("edit.detachAudio"), detach);
+  QAction* hold = clip->addAction(QStringLiteral("フレームを保持（再生位置で 2 秒止める）"), this, [this] { frameHoldAtPlayhead(this); });
+  bindCommand(QStringLiteral("edit.frameHold"), hold);
+  // 逆再生（逆向きの動画を作って入れ替える。もう一度選ぶと元に戻す）
+  QAction* reverse = clip->addAction(QStringLiteral("逆再生"));
+  reverse->setCheckable(true);
+  connect(reverse, &QAction::triggered, this, [this, selectedVisual, reverse] {
+    const QString id = selectedVisual();
+    if (id.isEmpty()) {
+      editor().toast(QStringLiteral("逆再生にする動画を、タイムラインで選んでください"));
+    } else {
+      toggleReverseClip(this, id);
+    }
+    // 印は、今の状態に合わせ直す（逆向きの動画を作り終えて入れ替えたときは、そのときにまた合わせる）
+    const VideoClip* c = id.isEmpty() ? nullptr : editor().clip(id);
+    reverse->setChecked(c && !c->reversedFrom.isEmpty());
+  });
+  bindCommand(QStringLiteral("edit.reverse"), reverse);
+  // オブジェクトマスク（AI）: プレビューで被写体をクリックして選ぶと、マスクして動きを追いかける（もう一度選ぶとやめる）
+  QAction* objMask = clip->addAction(theme::icon(QStringLiteral("scan-face")), QStringLiteral("オブジェクトマスク（AI。被写体をクリックして選ぶ）"));
+  objMask->setObjectName(QStringLiteral("clip.objectMask"));  // 操作の案内（ai/guidecatalog.cpp）で指す名前
+  objMask->setCheckable(true);
+  connect(objMask, &QAction::triggered, this, [objMask] {
+    toggleObjectMaskPick();
+    objMask->setChecked(!editor().maskPick().isEmpty());  // 始められなかったときは、印を戻す
+  });
+  connect(&ed, &Editor::maskPickChanged, objMask, [objMask] { objMask->setChecked(!editor().maskPick().isEmpty()); });
+  bindCommand(QStringLiteral("edit.objectMask"), objMask);
+  clip->addSeparator();
+  QMenu* addFx = clip->addMenu(theme::icon(QStringLiteral("sparkles")), QStringLiteral("エフェクトを追加"));
+  addFx->menuAction()->setObjectName(QStringLiteral("clip.addEffect"));  // 操作の案内（ai/guidecatalog.cpp）で指す名前
+  connect(addFx, &QMenu::aboutToShow, this, [addFx, selectedVisual] {
+    addFx->clear();
+    const QString id = selectedVisual();
+    if (id.isEmpty()) {
+      addFx->addAction(QStringLiteral("映像を選んでください"))->setEnabled(false);
+      return;
+    }
+    const OverlayItem* o = editor().overlay(id);
+    fillAddEffectMenu(addFx, id, o && o->isEffectLayer());
+  });
+  QAction* flipX = clip->addAction(QStringLiteral("左右反転"));
+  QAction* flipY = clip->addAction(QStringLiteral("上下反転"));
+  for (QAction* a : {flipX, flipY}) a->setCheckable(true);
+  connect(flipX, &QAction::triggered, this, [selectedVisual](bool on) {
+    const QString id = selectedVisual();
+    if (!id.isEmpty()) editor().updateClip(id, [&](VideoClip& c) { c.flipX = on; });
+  });
+  connect(flipY, &QAction::triggered, this, [selectedVisual](bool on) {
+    const QString id = selectedVisual();
+    if (!id.isEmpty()) editor().updateClip(id, [&](VideoClip& c) { c.flipY = on; });
+  });
+  clip->addSeparator();
+  QAction* nudgeL = clip->addAction(QStringLiteral("1 フレーム左へ（テキスト・オーディオ・重ねるもの）"), this, [] { editor().nudgeSelection(-1); });
+  QAction* nudgeR = clip->addAction(QStringLiteral("1 フレーム右へ（テキスト・オーディオ・重ねるもの）"), this, [] { editor().nudgeSelection(1); });
+  bindCommand(QStringLiteral("edit.nudgeLeft"), nudgeL);
+  bindCommand(QStringLiteral("edit.nudgeRight"), nudgeR);
+  auto refreshClip = [selectedVisual, speed, detach, hold, reverse, objMask, addFx, flipX, flipY, nudgeL, nudgeR] {
+    const Editor& e = editor();
+    const QString id = selectedVisual();
+    const VideoClip* c = id.isEmpty() ? nullptr : e.clip(id);
+    const OverlayItem* o = id.isEmpty() ? nullptr : e.overlay(id);
+    const bool layer = o && o->isEffectLayer();
+    speed->setEnabled(c && !layer);
+    detach->setEnabled(c && !layer && !c->isImage);
+    reverse->setEnabled(c && !layer && !c->isImage);
+    reverse->setChecked(c && !c->reversedFrom.isEmpty());
+    // 選んでいなくても、再生位置のメインの映像で選べる（エフェクトレイヤーには使えない）
+    objMask->setEnabled(!layer && (c || !e.project().clips.empty() || !e.maskPick().isEmpty()));
+    // フレームの保持は、メインのビデオ（再生位置のクリップ）だけ。重ねるトラックのものを選んでいるときは使えない
+    hold->setEnabled(!e.project().clips.empty() && e.selection().type != Selection::Overlay);
+    addFx->setEnabled(c != nullptr);
+    for (QAction* a : {flipX, flipY}) a->setEnabled(c && !layer);
+    flipX->setChecked(c && c->flipX);
+    flipY->setChecked(c && c->flipY);
+    const bool any = bool(e.selection()) && e.selection().type != Selection::Transition;
+    nudgeL->setEnabled(any);
+    nudgeR->setEnabled(any);
+  };
+  connect(&ed, &Editor::projectChanged, this, refreshClip);
+  connect(&ed, &Editor::selectionChanged, this, refreshClip);
+  refreshClip();
+
+  // ---- シーケンス（タイムライン全体の操作。Premiere の「シーケンス」メニューにあたる） ----
+  auto* seq = menuBar()->addMenu(QStringLiteral("シーケンス(&S)"));
+  bindCommand(QStringLiteral("edit.addTransition"), seq->addAction(QStringLiteral("既定のトランジションを付ける（再生位置に近い切れ目）"), this, [] {
+    applyTransitionNearPlayhead(Editor::defaultTransitionType());
+  }));
+  QMenu* allTr = seq->addMenu(QStringLiteral("すべての切れ目にトランジションを付ける"));
+  allTr->menuAction()->setObjectName(QStringLiteral("seq.transitionAll"));
+  connect(allTr, &QMenu::aboutToShow, this, [allTr] {
+    allTr->clear();
+    QString lastGroup;
+    for (const TransitionInfo& info : transitionInfos()) {
+      if (info.group != lastGroup) {
+        allTr->addSection(info.group);
+        lastGroup = info.group;
+      }
+      const TransitionType type = info.type;
+      allTr->addAction(theme::icon(transitionIconName(type)), info.label, allTr, [type] {
+        Editor& e = editor();
+        const int n = e.applyTransitionToAll(type, Editor::defaultTransitionDuration());
+        if (n == 0) e.toast(QStringLiteral("切れ目がありません（ビデオにクリップを 2 つ以上並べてください）"));
+        else e.toast(QStringLiteral("%1 か所の切れ目に「%2」を付けました").arg(n).arg(transitionInfo(type).label));
+      });
+    }
+  });
+  seq->addAction(QStringLiteral("すべてのトランジションを外す"), this, [] {
+    const int n = editor().removeAllTransitions();
+    editor().toast(n > 0 ? QStringLiteral("%1 か所のトランジションを外しました").arg(n) : QStringLiteral("トランジションはありません"));
+  });
+  seq->addSeparator();
+  bindCommand(QStringLiteral("edit.splitAll"), seq->addAction(QStringLiteral("すべてのトラックを再生位置で分割"), this, [] { editor().splitAllAtPlayhead(); }));
+  bindCommand(QStringLiteral("edit.rippleTrimStart"), seq->addAction(QStringLiteral("リップルトリム: 再生位置より前を削除して詰める"), this,
+                                                                    [] { editor().rippleTrimToPlayhead(true); }));
+  bindCommand(QStringLiteral("edit.rippleTrimEnd"), seq->addAction(QStringLiteral("リップルトリム: 再生位置より後ろを削除して詰める"), this,
+                                                                  [] { editor().rippleTrimToPlayhead(false); }));
+  seq->addSeparator();
+  bindCommand(QStringLiteral("play.prevEdit"), seq->addAction(QStringLiteral("前の編集点へ移動"), this, [] { editor().seekToEdit(false); }),
+              navigationKeysFree);
+  bindCommand(QStringLiteral("play.nextEdit"), seq->addAction(QStringLiteral("次の編集点へ移動"), this, [] { editor().seekToEdit(true); }),
+              navigationKeysFree);
+  seq->addSeparator();
+  QAction* snap = seq->addAction(QStringLiteral("吸着（スナップ）"));
+  snap->setCheckable(true);
+  snap->setChecked(tv->snapEnabled());
+  connect(snap, &QAction::triggered, tv, &TimelineView::setSnapEnabled);
+  connect(tv, &TimelineView::snapChanged, snap, &QAction::setChecked);
+  connect(tv, &TimelineView::snapChanged, this, [](bool on) {
+    editor().toast(on ? QStringLiteral("吸着（スナップ）をオンにしました") : QStringLiteral("吸着（スナップ）をオフにしました"));
+  });
+  bindCommand(QStringLiteral("view.snap"), snap);
+  QAction* loop = seq->addAction(QStringLiteral("ループ再生"));
+  loop->setCheckable(true);
+  loop->setChecked(ed.loopPlayback());
+  connect(loop, &QAction::triggered, this, [](bool on) { editor().setLoopPlayback(on); });
+  connect(&ed, &Editor::loopChanged, loop, [loop] { loop->setChecked(editor().loopPlayback()); });
+  connect(&ed, &Editor::loopChanged, this, [] {
+    Editor& e = editor();
+    if (!e.loopPlayback()) {
+      e.toast(QStringLiteral("ループ再生をオフにしました"));
+      return;
+    }
+    e.toast(e.exportRange() ? QStringLiteral("ループ再生をオンにしました（書き出す範囲をくり返します）")
+                            : QStringLiteral("ループ再生をオンにしました（終わりまで行ったら、始めに戻ります）"));
+  });
+  bindCommand(QStringLiteral("play.loop"), loop);
+
+  // ---- マーカー（目盛りの上の印。Premiere の「マーカー」メニューにあたる） ----
+  auto* markers = menuBar()->addMenu(QStringLiteral("マーカー(&M)"));
+  bindCommand(QStringLiteral("marker.add"), markers->addAction(theme::icon(QStringLiteral("bookmark")), QStringLiteral("マーカーを追加"), this, [tv] {
+    // 選んでいるもの（クリップなど）はそのまま。何も選んでいなければ、置いたマーカーを選ぶ（Delete で消せる）
+    Editor& e = editor();
+    const QString id = e.addMarker(e.currentTime());
+    if (!e.selection()) tv->selectMarker(id);
+  }));
+  bindCommand(QStringLiteral("marker.next"), markers->addAction(QStringLiteral("次のマーカーへ移動"), this, [] {
+    if (!editor().seekToMarker(true)) editor().toast(QStringLiteral("この先にマーカーはありません"));
+  }));
+  bindCommand(QStringLiteral("marker.prev"), markers->addAction(QStringLiteral("前のマーカーへ移動"), this, [] {
+    if (!editor().seekToMarker(false)) editor().toast(QStringLiteral("ここより前にマーカーはありません"));
+  }));
+  QAction* editMarker = markers->addAction(QStringLiteral("マーカーを編集..."), this, [this, tv] {
+    // 選んでいるマーカー。無ければ、再生位置にあるマーカー
+    QString id = tv->selectedMarker();
+    if (id.isEmpty()) {
+      const Editor& e = editor();
+      const double eps = 0.5 / e.project().settings.fps;
+      for (const Marker& m : e.project().markers) {
+        if (std::abs(m.t - e.currentTime()) < eps) id = m.id;
+      }
+    }
+    if (id.isEmpty()) {
+      editor().toast(QStringLiteral("編集するマーカーを、目盛りの上でクリックして選んでください（ダブルクリックでも編集できます）"));
+      return;
+    }
+    if (execMarkerDialog(this, id)) tv->clearMarkerSelection();
+  });
+  editMarker->setObjectName(QStringLiteral("marker.edit"));
+  QAction* clearMarkers = markers->addAction(QStringLiteral("すべてのマーカーを削除"), this, [tv] {
+    editor().clearMarkers();
+    tv->clearMarkerSelection();
+  });
+  bindCommand(QStringLiteral("marker.clear"), clearMarkers);
+  auto refreshMarkers = [editMarker, clearMarkers] {
+    const bool any = !editor().project().markers.empty();
+    editMarker->setEnabled(any);
+    clearMarkers->setEnabled(any);
+  };
+  connect(&ed, &Editor::projectChanged, this, refreshMarkers);
+  refreshMarkers();
+}
+
 void MainWindow::bindCommand(const QString& id, QAction* action, std::function<bool()> ready) {
   commands_.insert(id, {action, std::move(ready)});
+}
+
+QAction* MainWindow::commandAction(const QString& id) const {
+  const auto it = commands_.constFind(id);
+  if (it != commands_.constEnd()) return it->action;
+  return id.isEmpty() ? nullptr : findChild<QAction*>(id);
 }
 
 void MainWindow::addHiddenCommand(const QString& id, std::function<void()> run, std::function<bool()> ready) {
@@ -489,11 +809,22 @@ void MainWindow::applyShortcuts() {
     // Ctrl・Alt を使うキーは QAction のショートカットに（メニューにも出る）。
     // 使わないキーは、文字の入力中には効かないように eventFilter で受け取る
     QList<QKeySequence> actionKeys;
+    QList<QKeySequence> plain;
     for (const QKeySequence& k : keymap::keys(c.id)) {
-      if (keymap::isPlain(k)) plainKeys_.insert(k[0].toCombined(), c.id);
-      else actionKeys << k;
+      if (keymap::isPlain(k)) {
+        plainKeys_.insert(k[0].toCombined(), c.id);
+        plain << k;
+      } else {
+        actionKeys << k;
+      }
     }
-    it->action->setShortcuts(actionKeys);
+    QAction* a = it->action;
+    a->setShortcuts(actionKeys);
+    // Ctrl・Alt を使わないキー（S・Q・M など）は QAction のショートカットにしないので、メニューの右側に出す文字として添える
+    // （タブの後ろの文字は、表示だけで、ショートカットにはならない）
+    if (!a->property("kvBaseText").isValid()) a->setProperty("kvBaseText", a->text());
+    const QString base = a->property("kvBaseText").toString();
+    if (!base.isEmpty()) a->setText(actionKeys.isEmpty() && !plain.isEmpty() ? base + QLatin1Char('\t') + keymap::text(plain) : base);
   }
   auto tip = [](const QString& label, const QString& id) {
     const QString k = keymap::text(keymap::keys(id));
@@ -503,6 +834,7 @@ void MainWindow::applyShortcuts() {
   if (redoButton_) redoButton_->setToolTip(tip(QStringLiteral("やり直し"), QStringLiteral("edit.redo")));
   if (aiButton_) aiButton_->setToolTip(tip(QStringLiteral("AI アシスタント"), QStringLiteral("view.ai")));
   refreshLeftPanelButton();  // 割り当てたキーをツールチップに出す
+  if (timeline_) timeline_->refreshButtons();
 }
 
 void MainWindow::refreshLeftPanelButton() {
@@ -630,7 +962,7 @@ void MainWindow::refreshAiAvailability() {
     // 使っている途中で .env のアドレスが消えた。返事を待つのをやめて、欄をしまう
     aiPanel_->assistant()->cancel();
     setAiVisible(false);
-    editor().toast(QStringLiteral(".env に AI サーバーのアドレス（KANTAN_AI_SERVER）が無くなったので、AI アシスタントを隠しました"), ToastKind::Info);
+    editor().toast(QStringLiteral(".env に AI サーバーのアドレス（E_EDITOR_AI_SERVER）が無くなったので、AI アシスタントを隠しました"), ToastKind::Info);
   }
 }
 

@@ -81,6 +81,14 @@ struct ChoiceSet {
   bool image = false;
 };
 
+/** show_guide の手順 1 つ（画面の上に、薄い矢印で場所を示す。編集はしない） */
+struct GuideStep {
+  /** 案内する場所（guidecatalog.h の ID） */
+  QString target;
+  /** その場所ですること（AI が書いた短い文） */
+  QString text;
+};
+
 /** 案を、今の編集場所に当てはめた結果 */
 struct ChoiceApplied {
   bool ok = false;
@@ -115,6 +123,9 @@ struct ToolResult {
   /** propose_choices・propose_audio の案 */
   bool hasChoices = false;
   ChoiceSet choiceSet;
+  /** show_guide の案内（画面で、手順を順に示す） */
+  bool hasGuide = false;
+  std::vector<GuideStep> guide;
   /** この編集で使ったワークショップのもの（ID。本当に当てはめたときに、使った人の数を増やす） */
   QStringList workshopUsed;
 };

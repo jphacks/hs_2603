@@ -1,8 +1,10 @@
 #include "ui/exportdialog.h"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDesktopServices>
 #include <QDir>
+#include <QSettings>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -24,6 +26,11 @@
 #include "ui/widgets.h"
 
 namespace kv {
+
+// AI の設定・キーの割り当てと同じ settings.ini（最後に選んだ書き出しの形式を覚える）
+static QString exportSettingsPath() {
+  return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(QStringLiteral("settings.ini"));
+}
 
 static QString formatEta(double sec) {
   if (sec < 0 || !std::isfinite(sec)) return {};
@@ -70,10 +77,35 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
   partNote_ = makeLabel(QString(), "muted", partBox_);
   pv->addWidget(partNote_);
   sv->addWidget(partBox_);
-  sv->addWidget(makeLabel(QStringLiteral("解像度"), "muted", settings));
-  resolution_ = new Segmented({{720, QStringLiteral("720p")}, {1080, QStringLiteral("1080p")}, {2160, QStringLiteral("4K")}}, 0, settings);
+  // 形式（MP4 のほか、H.265・WebM・ProRes・GIF・音声だけ）。最後に選んだものを覚える
+  sv->addWidget(makeLabel(QStringLiteral("形式"), "muted", settings));
+  format_ = new QComboBox(settings);
+  format_->setObjectName(QStringLiteral("ExportFormat"));  // 操作の案内（ai/guidecatalog.cpp）で探す名前
+  format_->setAccessibleName(QStringLiteral("書き出す形式"));
+  for (const ExportFormatInfo& f : exportFormats()) format_->addItem(f.label, int(f.format));
+  {
+    ExportFormat last = ExportFormat::Mp4H264;
+    exportFormatFromString(QSettings(exportSettingsPath(), QSettings::IniFormat).value(QStringLiteral("export/format")).toString(), &last);
+    format_->setCurrentIndex(std::max(0, format_->findData(int(last))));
+  }
+  sv->addWidget(format_);
+  formatHint_ = makeLabel(QString(), "dim", settings);
+  formatHint_->setWordWrap(true);
+  sv->addWidget(formatHint_);
+  resBox_ = new QWidget(settings);
+  auto* resv = new QVBoxLayout(resBox_);
+  resv->setContentsMargins(0, 0, 0, 0);
+  resv->setSpacing(6);
+  resv->addWidget(makeLabel(QStringLiteral("解像度"), "muted", resBox_));
+  resolution_ = new Segmented({{720, QStringLiteral("720p")}, {1080, QStringLiteral("1080p")}, {2160, QStringLiteral("4K")}}, 0, resBox_);
   resolution_->setValue(1080);
-  sv->addWidget(resolution_);
+  resolution_->setProperty("kvGuide", QStringLiteral("ExportResolution"));  // Segmented の objectName は見た目に使うので、別に持たせる
+  resv->addWidget(resolution_);
+  // GIF は大きくすると、ファイルがとても大きくなるので、小さめの大きさから選ぶ
+  gifRes_ = new Segmented({{240, QStringLiteral("240p")}, {360, QStringLiteral("360p")}, {480, QStringLiteral("480p")}}, 0, resBox_);
+  gifRes_->setValue(360);
+  resv->addWidget(gifRes_);
+  sv->addWidget(resBox_);
   sv->addWidget(makeLabel(QStringLiteral("品質"), "muted", settings));
   quality_ = new Segmented({{int(ExportQuality::Fast), QStringLiteral("高速")},
                             {int(ExportQuality::Standard), QStringLiteral("標準")},
@@ -81,10 +113,12 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
                            0, settings);
   quality_->setValue(int(ExportQuality::Standard));
   sv->addWidget(quality_);
+  connect(quality_, &Segmented::changed, this, &ExportDialog::refreshSummary);
   auto* sb = new QHBoxLayout();
   sb->addStretch(1);
   auto* cancel = new QPushButton(QStringLiteral("キャンセル"), settings);
   auto* go = new QPushButton(theme::icon(QStringLiteral("download"), Qt::white), QStringLiteral("書き出し"), settings);
+  go->setObjectName(QStringLiteral("ExportStart"));
   go->setProperty("primary", true);
   go->setDefault(true);
   sb->addWidget(cancel);
@@ -170,7 +204,12 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
 
   connect(cancel, &QPushButton::clicked, this, &QDialog::reject);
   connect(resolution_, &Segmented::changed, this, &ExportDialog::refreshSummary);
+  connect(gifRes_, &Segmented::changed, this, &ExportDialog::refreshSummary);
   connect(part_, &Segmented::changed, this, &ExportDialog::refreshSummary);
+  connect(format_, &QComboBox::currentIndexChanged, this, [this] {
+    QSettings(exportSettingsPath(), QSettings::IniFormat).setValue(QStringLiteral("export/format"), exportFormatInfo(format()).id);
+    refreshSummary();
+  });
   // 開いている間にタイムラインで範囲を変えたら、表示を合わせる（書き出し中は変えない）
   connect(&editor(), &Editor::rangeChanged, this, [this] {
     if (!exporter_->running()) refreshSummary();
@@ -183,14 +222,15 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
     if (name.isEmpty()) name = QStringLiteral("無題");
     // 保存先を選んでいる間に別のタブへ切り替わっても（別のウィンドウから開かれたときなど）、選んだときのタブを書き出す
     const int uid = editor().workspaceUid(editor().workspaceIndex());
-    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("書き出し"), dir + QLatin1Char('/') + name + QStringLiteral(".mp4"),
-                                                QStringLiteral("MP4 ビデオ (*.mp4)"));
+    const ExportFormatInfo& info = exportFormatInfo(format());
+    const QString ext = QLatin1Char('.') + info.extension;
+    QString path = QFileDialog::getSaveFileName(this, QStringLiteral("書き出し"), dir + QLatin1Char('/') + name + ext, info.fileFilter);
     if (path.isEmpty()) return;
     const int index = editor().indexOfWorkspaceUid(uid);
     if (index < 0) return;
     editor().switchWorkspace(index);
     refreshSummary();
-    if (!path.endsWith(QStringLiteral(".mp4"), Qt::CaseInsensitive)) path += QStringLiteral(".mp4");
+    if (!path.endsWith(ext, Qt::CaseInsensitive)) path += ext;
     dir = QFileInfo(path).absolutePath();
     begin(path);
   });
@@ -235,7 +275,13 @@ void ExportDialog::showEvent(QShowEvent* e) {
 void ExportDialog::refreshSummary() {
   const Editor& ed = editor();
   setWindowTitle(QStringLiteral("書き出し - %1").arg(ed.workspaceName(ed.workspaceIndex())));
-  const QSize size = exportSize(ed.project().settings.aspect, resolution_->value().toInt());
+  const ExportFormatInfo& info = exportFormatInfo(format());
+  formatHint_->setText(info.hint);
+  // 音だけの形式では解像度を選ばない。GIF は小さめの大きさから選ぶ
+  resBox_->setVisible(info.video);
+  resolution_->setVisible(info.format != ExportFormat::Gif);
+  gifRes_->setVisible(info.format == ExportFormat::Gif);
+  const QSize size = exportSize(ed.project().settings.aspect, shortSide());
   const std::optional<Editor::TimeRange> range = ed.exportRange();
   partBox_->setVisible(range.has_value());
   if (range) {
@@ -246,8 +292,23 @@ void ExportDialog::refreshSummary() {
   const double length = (rangeSelected() ? range->end - range->start : ed.layout().total) / speed;
   summary_[0]->setText(std::abs(speed - 1) > 1e-9 ? QStringLiteral("%1（%2倍速）").arg(formatDuration(length), QString::number(speed, 'g', 4))
                                                   : formatDuration(length));
-  summary_[1]->setText(QStringLiteral("%1 × %2").arg(size.width()).arg(size.height()));
-  summary_[2]->setText(QStringLiteral("MP4"));
+  if (!info.video) summary_[1]->setText(QStringLiteral("（音声だけ）"));
+  else if (info.format == ExportFormat::Gif)
+    summary_[1]->setText(QStringLiteral("%1 × %2・%3fps").arg(size.width()).arg(size.height()).arg(gifFps(quality(), ed.project().settings.fps)));
+  else summary_[1]->setText(QStringLiteral("%1 × %2").arg(size.width()).arg(size.height()));
+  summary_[2]->setText(info.extension.toUpper());
+}
+
+ExportFormat ExportDialog::format() const {
+  return ExportFormat(format_->currentData().toInt());
+}
+
+ExportQuality ExportDialog::quality() const {
+  return ExportQuality(quality_->value().toInt());
+}
+
+int ExportDialog::shortSide() const {
+  return format() == ExportFormat::Gif ? gifRes_->value().toInt() : resolution_->value().toInt();
 }
 
 bool ExportDialog::rangeSelected() const {
@@ -260,7 +321,7 @@ void ExportDialog::begin(const QString& path) {
   pct_->setText(QStringLiteral("0%"));
   eta_->clear();
   pages_->setCurrentIndex(1);
-  if (!exporter_->start(path, ExportQuality(quality_->value().toInt()), resolution_->value().toInt(), &error, rangeSelected())) {
+  if (!exporter_->start(path, quality(), shortSide(), &error, rangeSelected(), format())) {
     errorDetail_->setText(error);
     pages_->setCurrentIndex(3);
     return;

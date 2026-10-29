@@ -4,7 +4,7 @@
 
 ## 確かめたこと
 - 差分: `git diff -- native/src/ui/timelinewidget.cpp native/src/ui/timelinewidget.h`。変わったのは timelinewidget.cpp だけ（20 行追加、19 行削除）で、.h は変わっていない。計画の付録 B と、verification.md 2 章に記録された diff の両方と一致する。
-- 作業ツリー: `git status --short` は ` M native/src/ui/timelinewidget.cpp` と `?? .agents/tasks/timeline-playhead-left/` だけ。widgets.h・widgets.cpp・inspector.cpp は今回変わっていない（作業を始める前の 1f7d805 にコミット済み）。ブランチは `feat/ikumu1...origin/feat/ikumu1` で ahead なし、stash なし、`git diff --check` は終了コード 0 で出力なし、`C:\kantan-dev\tmp\kv-playhead` は存在しない。verification.md の更新時刻（11:20）が記録された作業の時刻（00:49 ごろ）より後だったので、最終状態だけを狭く確認した。ビルドとハーネスは再実行していない。
+- 作業ツリー: `git status --short` は ` M native/src/ui/timelinewidget.cpp` と `?? .agents/tasks/timeline-playhead-left/` だけ。widgets.h・widgets.cpp・inspector.cpp は今回変わっていない（作業を始める前の 1f7d805 にコミット済み）。ブランチは `feat/ikumu1...origin/feat/ikumu1` で ahead なし、stash なし、`git diff --check` は終了コード 0 で出力なし、`C:\e-editor-dev\tmp\kv-playhead` は存在しない。verification.md の更新時刻（11:20）が記録された作業の時刻（00:49 ごろ）より後だったので、最終状態だけを狭く確認した。ビルドとハーネスは再実行していない。
 
 ## 合意内容との照合
 1. 描く順番（合意 1）: 線（旧 paintEvent 607-609）とつまみ（旧 paintRuler 328-342）を、見出し（593-607）、目盛り・角・合計時間（609-615）のあと、paintEvent の最後（617-633）に移した。paintRuler の呼び出し元は paintEvent:610 だけなので、つまみがほかで消えることはない。左側の条件は画面の左端を基準にした `px >= -1` / `px >= -8` で、右側の条件は変えていない。つまみは fillPath と fillRect だけを使い、AA をオンにしてからオフに戻す（前と同じ）。合計時間の文字は、paintRuler が設定した 8pt のまま描かれる。見出しと角の塗りは変えていないので不透明のままで、その下のクリップ・目盛り・終わりの破線・挿入位置は隠れたまま。見出しの列にかからない位置（px >= 114）では重なるものがないので、見た目は同じ。

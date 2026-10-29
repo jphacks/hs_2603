@@ -70,6 +70,8 @@ class VideoDecoder {
   double framePts() const { return pts_; }
   /** 直前のフレームを画像にする（回転・SAR を反映し、maxW x maxH に収める） */
   QImage frameImage(int maxW, int maxH);
+  /** 直前のフレームを、縦横比を無視して w x h の画像にする（回転は反映する。AI に渡す入力用） */
+  QImage frameImageStretched(int w, int h);
   double frameDuration() const { return frameDur_; }
   int displayWidth() const { return dispW_; }
   int displayHeight() const { return dispH_; }
@@ -91,6 +93,8 @@ class VideoDecoder {
   int dispW_ = 0, dispH_ = 0;
   bool flushing_ = false;
   bool eof_ = false;
+  /** 直前のフレームを、回転の前の向きで tw x th にして、回転を掛けた画像 */
+  QImage convertFrame(int tw, int th);
 };
 
 /** 音声を 48kHz・ステレオ・float で読み出す（速度変更は atempo で音程を保つ） */

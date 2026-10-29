@@ -33,7 +33,7 @@ static QString sessionPath() {
 static QByteArray protect(const QByteArray& plain) {
   DATA_BLOB in{DWORD(plain.size()), reinterpret_cast<BYTE*>(const_cast<char*>(plain.constData()))};
   DATA_BLOB out{};
-  if (!CryptProtectData(&in, L"kantan-video-editor", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return {};
+  if (!CryptProtectData(&in, L"e-editor", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) return {};
   QByteArray result(reinterpret_cast<const char*>(out.pbData), int(out.cbData));
   LocalFree(out.pbData);
   return result;
@@ -138,8 +138,8 @@ static Account::Link readHealth(int status, QNetworkReply::NetworkError error, c
     return Account::Link::Offline;
   }
   // 古いサーバーは service を返さないが、bedrockConfigured は返す
-  const bool kantan = json.value(QStringLiteral("service")).toString() == u"kantan-ai-server" || json.contains(QStringLiteral("bedrockConfigured"));
-  if (status != 200 || !kantan) {
+  const bool ours = json.value(QStringLiteral("service")).toString() == u"e-editor-ai-server" || json.contains(QStringLiteral("bedrockConfigured"));
+  if (status != 200 || !ours) {
     detail = wrongServerText();
     return Account::Link::Wrong;
   }

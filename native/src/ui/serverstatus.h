@@ -1,7 +1,7 @@
 #pragma once
 // 右下の「AI サーバー」の表示（つながっているか・ログインしている人）。
 // 押すと、ログインしていなければログインの画面、ログインしていればアカウントのメニューを出す。
-// アドレス（.env の KANTAN_AI_SERVER）は出さない。決まっていなければ、.env の場所を出す。
+// アドレス（.env の E_EDITOR_AI_SERVER）は出さない。決まっていなければ、.env の場所を出す。
 
 #include <QColor>
 #include <QPixmap>

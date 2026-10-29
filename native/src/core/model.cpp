@@ -1,11 +1,35 @@
 #include "core/model.h"
 
 #include <QUuid>
+#include <algorithm>
 
 namespace kv {
 
 QString newId() {
   return QUuid::createUuid().toString(QUuid::Id128).left(12);
+}
+
+template <typename T>
+static bool contains(const std::vector<T>& v, const T& x) {
+  return std::find(v.begin(), v.end(), x) != v.end();
+}
+
+bool isTextHidden(const ProjectData& p, const TextItem& t) {
+  if (p.hiddenTextTracks.empty() || t.track < 0 || t.track >= int(p.textTrackIds.size())) return false;
+  return contains(p.hiddenTextTracks, p.textTrackIds[size_t(t.track)]);
+}
+
+bool isOverlayHidden(const ProjectData& p, const OverlayItem& o) {
+  return contains(p.hiddenOverlayTracks, o.track);
+}
+
+bool isOverlayMuted(const ProjectData& p, const OverlayItem& o) {
+  return contains(p.mutedOverlayTracks, o.track);
+}
+
+bool isAudioMuted(const ProjectData& p, const AudioItem& a) {
+  if (p.mutedAudioTracks.empty() || a.track < 0 || a.track >= int(p.audioTrackNos.size())) return false;
+  return contains(p.mutedAudioTracks, p.audioTrackNos[size_t(a.track)]);
 }
 
 QString assetKindToString(AssetKind k) {

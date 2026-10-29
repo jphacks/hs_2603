@@ -91,7 +91,7 @@ export async function buildApp(ctx: AppContext, options: { logger?: FastifyServe
     return {
       ok: db,
       db,
-      service: 'kantan-ai-server',
+      service: 'e-editor-ai-server',
       api: 3,
       registration,
       workshop,

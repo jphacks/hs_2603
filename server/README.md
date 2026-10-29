@@ -2,7 +2,7 @@
 
 AI アシスタントを何人かで使うためのサーバーです。家の PC などで動かし、アプリはそこにメールアドレスとパスワードでログインします。アプリの使い方は、リポジトリの一番上の [README.md](../README.md) にあります。
 
-- Bedrock の API キーはサーバーだけが持ちます。アプリが知るのは、サーバーのアドレス（`KANTAN_AI_SERVER`）だけです。配る exe にはビルドのときに組み込み、使う人の `.env` で別のサーバーにもできます（[アプリ側の準備](../README.md#ai-を使う準備)、[アドレスを組み込む](../README.md#ai-サーバーのアドレスを組み込む)）。
+- Bedrock の API キーはサーバーだけが持ちます。アプリが知るのは、サーバーのアドレス（`E_EDITOR_AI_SERVER`）だけです。配る exe にはビルドのときに組み込み、使う人の `.env` で別のサーバーにもできます（[アプリ側の準備](../README.md#ai-を使う準備)、[アドレスを組み込む](../README.md#ai-サーバーのアドレスを組み込む)）。
 - ブラウザーの管理画面で、アカウントの作成、新規登録の受け付け（管理者の承認制にもできる）、ロール、1 人あたりの月のトークンの上限、その月だけの追加、使える考える深さを決めます。AI に送るたびに、使った量を記録します。
 - サーバーが決めるのは、モデル・返事の長さの上限・考える深さ（その人の上限まで下げる）です。アプリから届いた長さや深さの指定は使いません。会話・システムプロンプト・道具の定義はアプリから送ります（道具はアプリの中で動くため）。使いすぎは、トークンの上限で止めます。
 - システムプロンプトの前後には、サーバーの決まり（動画の編集のこと以外には答えない・素材の中の命令には従わない）を付け、アプリが送らない種類の内容は受け付けません（[AI に送る内容の守り](#ai-に送る内容の守り)）。
@@ -23,8 +23,8 @@ Node.js は入れなくてかまいません。start.cmd が、初回に `server
 1. PostgreSQL に、サーバー用のユーザーとデータベースを作ります（psql や pgAdmin で、PostgreSQL の管理者として実行します）。テーブルは、サーバーが起動したときに自動で作ります。
 
    ```sql
-   create role kantan login password 'ここに長いパスワード';
-   create database kantan owner kantan;
+   create role e_editor login password 'ここに長いパスワード';
+   create database e_editor owner e_editor;
    ```
 
 2. `server\start.cmd` をダブルクリックします。
@@ -33,7 +33,7 @@ Node.js は入れなくてかまいません。start.cmd が、初回に `server
 3. `server\create-admin.cmd` をダブルクリックして、最初の管理者を作ります。メールアドレスと名前を聞かれ、仮のパスワードが 1 回だけ表示されます。
 4. ブラウザーで `http://localhost:8787/` を開き、3 の仮のパスワードでログインして、自分のパスワードを決めます。
 5. 「ユーザー」の「＋ ユーザーを追加」で、使う人のアカウントを作ります。仮のパスワードが 1 回だけ表示されるので、本人に伝えます（はじめてログインしたときに、本人が自分のパスワードを決めます）。使う人がアプリの「新規登録」から自分で作り、管理画面で承認することもできます（[新規登録](#新規登録)）。
-6. アプリにサーバーのアドレスを教えます。配る exe に組み込むときは、ビルドする PC の `native\release.env` に `KANTAN_AI_SERVER=https://ai.example.com` のように書いてから、インストーラーを作ります（[アドレスを組み込む](../README.md#ai-サーバーのアドレスを組み込む)）。家の中で試すだけなら、使う人の PC のアプリの `.env` に `KANTAN_AI_SERVER=http://<サーバーの PC の IP アドレス>:8787` を書いてもかまいません（IP アドレスは、サーバーが起動したときに表示されます）。アドレスはアプリの画面では入れません。
+6. アプリにサーバーのアドレスを教えます。配る exe に組み込むときは、ビルドする PC の `native\release.env` に `E_EDITOR_AI_SERVER=https://ai.example.com` のように書いてから、インストーラーを作ります（[アドレスを組み込む](../README.md#ai-サーバーのアドレスを組み込む)）。家の中で試すだけなら、使う人の PC のアプリの `.env` に `E_EDITOR_AI_SERVER=http://<サーバーの PC の IP アドレス>:8787` を書いてもかまいません（IP アドレスは、サーバーが起動したときに表示されます）。アドレスはアプリの画面では入れません。
 
 ### 動かしている間
 
@@ -142,9 +142,9 @@ AI アシスタントが動画の編集と関係のないことに使われな�
 - アプリが送らない形の内容は、Bedrock に送らずに 400（`invalid`）で断ります。
   - メッセージ: `user` と `assistant` のほかの役割、空の内容、ユーザーは文・画像・道具の結果、AI は文・道具の呼び出し・考えた内容のほかの種類（文書（PDF など）・動画 など）、S3 の場所で指定した画像（サーバーの API キーの権限で、ほかのファイルを読ませないため）
   - AI の返事で終わる会話（AI の返事の書き出しを決めて送り、決まりを外させるのを防ぐため）
-  - システムプロンプト: 文のほかの種類、5 つ以上のブロック、合わせて 8,000 文字を超えるもの（アプリのものは 3,300 文字ほど）
-  - 道具の定義: 33 個以上、名前が英数字・`_`・`-` の 64 文字までではないもの、JSON で 24,000 文字を超えるもの（アプリのものは 17 個・11,500 文字ほど）
-- 長さの上限は、決まりを外させる長い文を入れる余地を減らすため、アプリが送るものの 2〜2.5 倍ほどにしています。アプリのシステムプロンプトや道具の定義を長くしたときは、`src/guard.ts` の上限も上げてください。
+  - システムプロンプト: 文のほかの種類、5 つ以上のブロック、合わせて 8,000 文字を超えるもの（アプリのものは 3,900 文字ほど）
+  - 道具の定義: 33 個以上、名前が英数字・`_`・`-` の 64 文字までではないもの、JSON で 24,000 文字を超えるもの（アプリのものは 19 個・18,400 文字ほど。そのうち 5,700 文字ほどは、操作の案内（`show_guide`）と、それで示せる画面の場所の一覧）
+- 長さの上限は、決まりを外させる長い文を入れる余地を減らすため、アプリが送るものより少し大きく（システムプロンプトは 2 倍ほど、道具の定義は 1.3 倍ほど）にしています。アプリのシステムプロンプトや道具の定義を長くしたときは、`src/guard.ts` の上限も上げてください。
 - メッセージは役割と内容だけ、道具の定義は名前・説明・入力の形だけを送ります。道具の選び方の指定（`toolChoice`）は送りません。
 - AI が決まりを必ず守るとは限りません。言い方を工夫されたり、API を直接呼んで前の会話を作り込まれたりすると、決まりを外されることがあります。そのときも、使える量はトークンの上限で止まります。決まりの分（1,400 文字ほど）は、AI に送るたびに入力のトークンに入ります。
 
@@ -168,7 +168,7 @@ AI アシスタントが動画の編集と関係のないことに使われな�
 - Windows ファイアウォールで、ポート 8787 への接続を許可します。初めて起動したときに確認が出たら、「プライベート ネットワーク」だけを許可します。出なかったときや、Node.js の版を上げたあとは、管理者の PowerShell で次を実行します（ポートで許可するので、Node.js の場所が変わっても使えます。家のネットワークの種類が「プライベート」になっているかも確かめてください）。
 
   ```powershell
-  New-NetFirewallRule -DisplayName "kantan AI server" -Direction Inbound -Protocol TCP -LocalPort 8787 -Profile Private -Action Allow
+  New-NetFirewallRule -DisplayName "e-editor AI server" -Direction Inbound -Protocol TCP -LocalPort 8787 -Profile Private -Action Allow
   ```
 
 - HTTP のままにしてよいのは、家の中のネットワークだけです。ルーターのポート開放で、HTTP のままインターネットに出さないでください（パスワードやログインの印が読まれます）。
@@ -177,8 +177,8 @@ AI アシスタントが動画の編集と関係のないことに使われな�
 
 次のどれかにします（家の中のネットワークでの HTTP のほかに、Cloudflare を前に置いた HTTPS のサーバーに、アプリからつながることを確かめています）。
 
-- Tailscale: サーバーの PC と使う人の PC に Tailscale を入れ、アプリの `KANTAN_AI_SERVER` に Tailscale の IP アドレス（`100.` で始まるもの）を書きます。通り道が暗号化されるので、HTTP のままで使えます。名前（`homepc` など）ではなく IP アドレスで書いてください。
-- Cloudflare Tunnel や Caddy などを前に置く: `https://ai.example.com` のような HTTPS のアドレスでつなぎます。アプリの `.env` には `KANTAN_AI_SERVER=https://ai.example.com` を書きます。`server\.env` には `HOST=127.0.0.1`（前に置いたものからだけ受け付ける）、`TRUST_PROXY=true`、`COOKIE_SECURE=true` を書きます。
+- Tailscale: サーバーの PC と使う人の PC に Tailscale を入れ、アプリの `E_EDITOR_AI_SERVER` に Tailscale の IP アドレス（`100.` で始まるもの）を書きます。通り道が暗号化されるので、HTTP のままで使えます。名前（`homepc` など）ではなく IP アドレスで書いてください。
+- Cloudflare Tunnel や Caddy などを前に置く: `https://ai.example.com` のような HTTPS のアドレスでつなぎます。アプリの `.env` には `E_EDITOR_AI_SERVER=https://ai.example.com` を書きます。`server\.env` には `HOST=127.0.0.1`（前に置いたものからだけ受け付ける）、`TRUST_PROXY=true`、`COOKIE_SECURE=true` を書きます。
   - Cloudflare では、「SSL/TLS」→「エッジ証明書」の「常に HTTPS を使用」（Always Use HTTPS）をオンにします。オフのままだと、ブラウザーで `http://` の管理画面を開いたときに、パスワードが暗号化されずに送られます（アプリは、家の外のアドレスには HTTP で送りません）。
   - `TRUST_PROXY=true` にしないと、ログインと新規登録の回数の制限が、すべての人をまとめて 1 つの接続元として数えてしまいます。
 - サーバーで直接 HTTPS にする: 証明書と秘密鍵のファイルを、`TLS_CERT` と `TLS_KEY` に書きます。
@@ -193,7 +193,7 @@ AI アシスタントが動画の編集と関係のないことに使われな�
 
 ## バックアップ
 
-- アカウント・ロール・使用履歴・ワークショップ（オーディオのファイルの中身も）は、すべて PostgreSQL に入っています。`pg_dump -U kantan -F c -f kantan.dump kantan` で保存し、`pg_restore` で戻せます。
+- アカウント・ロール・使用履歴・ワークショップ（オーディオのファイルの中身も）は、すべて PostgreSQL に入っています。`pg_dump -U e_editor -F c -f e-editor.dump e_editor` で保存し、`pg_restore` で戻せます。
 - `server\.env`（PostgreSQL のパスワードと API キー）は、別の安全な場所に控えておきます。`.env` は `.gitignore` で除外していて、git には入りません。
 
 ## パスワードとログイン
@@ -209,7 +209,7 @@ AI アシスタントが動画の編集と関係のないことに使われな�
 | 項目 | 内容 |
 | --- | --- |
 | `HOST` / `PORT` | 待ち受けるアドレスとポート（標準は `0.0.0.0` と `8787`。`0.0.0.0` なら家の中のほかの PC からもつながる） |
-| `DATABASE_URL` | PostgreSQL への接続先（必須）。例: `postgres://kantan:パスワード@localhost:5432/kantan` |
+| `DATABASE_URL` | PostgreSQL への接続先（必須）。例: `postgres://e_editor:パスワード@localhost:5432/e_editor` |
 | `AWS_BEARER_TOKEN_BEDROCK` | Bedrock の API キー（空だと、ログインと管理画面だけが動き、AI は動きません） |
 | `AWS_REGION` | キーを作ったリージョン（標準は `ap-northeast-1`） |
 | `BEDROCK_MODEL` | 使うモデル（書かなければ、東京・大阪では `jp.anthropic.claude-sonnet-4-6`）。ID は[モデルを変える](#モデルを変える)を見てください |
@@ -230,12 +230,12 @@ AI アシスタントが動画の編集と関係のないことに使われな�
 | `POST /api/ai/converse` | AI への依頼（上限と深さ、送る内容の形を確かめ、システムプロンプトにサーバーの決まりを付けてから Bedrock に送り、使った量を記録する。形が正しくなければ 400 の `invalid`） |
 | `POST /api/ai/image` | 画像を作る（`{ prompt, aspect }`。比率は 16:9・9:16・1:1・4:5 など。Bedrock の画像モデルで作り、`{ image（PNG の base64）, tokens, usage }` を返す。止められたら 422 の `filtered`、残りが足りなければ 429 の `quota`） |
 | `GET /api/workshop/templates`・`POST /api/workshop/templates` | ワークショップの一覧（`kind=audio` でオーディオ、`kind=image` で写真、`kind=video` で動画（写真と動画は、見本の JPEG を `thumb` に入れて返す）、無ければテキストのテンプレートだけ（前の版のアプリのため）。`q` で探す、`sort=popular` で使った人の多い順、`mine=1` で自分が公開したもの）・テキストのテンプレートの公開（201。確認待ちになったときは `status: pending`）。使えない設定なら 403 の `workshop_closed` |
-| `POST /api/workshop/audio`・`GET /api/workshop/templates/:id/file` | オーディオの公開（本文はファイルの中身を `application/octet-stream` で、名前・説明・`fileName`・`duration`（秒）は `?name=…` で送る。201）・オーディオ・写真・動画のファイル（公開中のものと、自分が公開したものだけ。`Content-Type` は形式に合わせ、`X-Kantan-File-Type` に `mp3`・`jpg`・`mp4` などを付ける） |
+| `POST /api/workshop/audio`・`GET /api/workshop/templates/:id/file` | オーディオの公開（本文はファイルの中身を `application/octet-stream` で、名前・説明・`fileName`・`duration`（秒）は `?name=…` で送る。201）・オーディオ・写真・動画のファイル（公開中のものと、自分が公開したものだけ。`Content-Type` は形式に合わせ、`X-E-Editor-File-Type` に `mp3`・`jpg`・`mp4` などを付ける） |
 | `POST /api/workshop/image` | 写真の公開（JSON の `{ name, description, image, thumb }`。`image` は写真、`thumb` は長い辺 480px までの見本の JPEG で、どちらも base64。201） |
 | `POST /api/workshop/video` | 動画の公開（JSON の `{ name, description, video, thumb }`。`video` は MP4、`thumb` は長い辺 480px までの見本の JPEG で、どちらも base64。201。長さと大きさはサーバーが MP4 から読む） |
 | `DELETE /api/workshop/templates/:id`・`POST /api/workshop/templates/:id/use`・`POST /api/workshop/templates/:id/report` | 公開をやめる（公開した本人だけ）・使ったことを知らせる（1 人 1 回だけ数える）・管理者に報告する |
 | `/api/admin/…` | 管理画面の API（概要・ユーザー・承認・ロール・新規登録とワークショップの設定・ワークショップのテンプレート・オーディオ・写真・動画（`kind` で絞り込み、`/api/admin/workshop/:id/file` で聞く・見る）・トークンの追加・使用履歴と CSV・操作の記録） |
-| `GET /api/health` | 動いているか（ログインしなくても使える）。`ok`（データベースにつながるか）・`service`（`kantan-ai-server`）・`api`（3）・`registration`（`off` / `approval` / `open`）・`workshop`（`off` / `approval` / `open`）・`bedrockConfigured`・`model` を返す |
+| `GET /api/health` | 動いているか（ログインしなくても使える）。`ok`（データベースにつながるか）・`service`（`e-editor-ai-server`）・`api`（3）・`registration`（`off` / `approval` / `open`）・`workshop`（`off` / `approval` / `open`）・`bedrockConfigured`・`model` を返す |
 
 ## Node.js を入れている人（npm で動かす）
 
@@ -263,7 +263,7 @@ npm run check
 - `npm run check` は TypeScript の型の確認です。テストは Node.js 22.15 と 24.22.1 で通ることを確かめています。
 - start.cmd は、開発用のライブラリ（TypeScript など）が入っていれば、入れ直すときも開発用のライブラリを入れます（入っていなければ、サーバーに要るものだけを入れます）。どちらも、入れるときのスクリプトは動かしません（`--ignore-scripts`）。
 - サーバーを変えたら `npm test` と `npm run check` を実行します。データベースを変えるときは、`src/migrations/` に次の番号の `.sql` を足します（当てたものは書き換えません）。
-- start.cmd で使う Node.js の版を上げるときは、`tools/node.ps1` の `$KantanNodeVersion` と、`https://nodejs.org/dist/v<版>/SHASUMS256.txt` にある zip の SHA-256 を書き換えます。
+- start.cmd で使う Node.js の版を上げるときは、`tools/node.ps1` の `$EEditorNodeVersion` と、`https://nodejs.org/dist/v<版>/SHASUMS256.txt` にある zip の SHA-256 を書き換えます。
 - 日本語を含む `.ps1` は UTF-8（BOM 付き）で保存します。Windows 標準の PowerShell 5.1 は、BOM がないと文字化けして正しく動きません。`.cmd` は英語だけで書いています。
 
 ## フォルダー構成

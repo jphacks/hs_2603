@@ -29,6 +29,7 @@
 #include "core/textstyles.h"
 #include "core/texttemplates.h"
 #include "media/audiopreview.h"
+#include "media/ffutil.h"
 #include "media/mediamanager.h"
 #include "render/textrender.h"
 #include "ui/theme.h"
@@ -366,6 +367,82 @@ void AssetList::removeFromList(const QString& id) {
   editor().removeAsset(id);
 }
 
+/** 調べたファイルの種類（写真・動画・音声） */
+static AssetKind kindOf(const ProbeInfo& info) {
+  return info.isImage ? AssetKind::Image : info.hasVideo ? AssetKind::Video : AssetKind::Audio;
+}
+
+/** メディア id を、調べ終わったファイル path につなぎ直して、サムネイル・波形を作り直す */
+static void relinkTo(const QString& id, const QString& path, const ProbeInfo& info) {
+  const AssetKind kind = kindOf(info);
+  editor().relinkAsset(id, [&](Asset& x) {
+    x.path = QFileInfo(path).absoluteFilePath();
+    x.name = QFileInfo(path).fileName();
+    x.duration = kind == AssetKind::Image ? 0 : info.duration;
+    x.width = info.width;
+    x.height = info.height;
+    x.hasAudio = kind == AssetKind::Video ? info.hasAudio : kind == AssetKind::Audio;
+    x.imagePath.clear();
+    x.error.clear();
+    x.status = AssetStatus::Loading;
+  });
+  if (const Asset* now = editor().asset(id)) media().prepare(*now);
+}
+
+/**
+ * 見つからないメディア（ファイルを動かした・名前を変えた）の場所を指定して、つなぎ直す（リンクし直す）。
+ * 同じフォルダに、ほかの見つからないメディアと同じ名前のファイルがあれば、それもまとめてつなぎ直す
+ */
+static void relinkAssetInteractive(QWidget* parent, const QString& id) {
+  const Asset* a = editor().asset(id);
+  if (!a) return;
+  // ファイルを選ぶ画面を出している間に一覧が変わることがあるので、使う値は先に写しておく
+  const QString oldName = QFileInfo(a->path).fileName();
+  const QString assetName = a->name;
+  const double oldDuration = a->duration;
+  const AssetKind kind = a->kind;
+  QString dir = QFileInfo(a->path).absolutePath();
+  if (!QDir(dir).exists()) dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+  const QString filter = kind == AssetKind::Image   ? QStringLiteral("写真 (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.heic *.heif *.tif *.tiff);;すべてのファイル (*)")
+                         : kind == AssetKind::Audio ? QStringLiteral("音声 (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus *.wma);;すべてのファイル (*)")
+                                                    : QStringLiteral("動画 (*.mp4 *.mov *.m4v *.avi *.mkv *.webm *.wmv *.mts *.m2ts *.gif);;すべてのファイル (*)");
+  const QString path = QFileDialog::getOpenFileName(parent, QStringLiteral("「%1」の場所を指定").arg(assetName), QDir(dir).filePath(oldName), filter);
+  if (path.isEmpty() || !editor().asset(id)) return;
+  ProbeInfo info;
+  QString error;
+  if (!probeMedia(path, info, error)) {
+    editor().toast(QStringLiteral("%1: %2").arg(QFileInfo(path).fileName(), error), ToastKind::Error);
+    return;
+  }
+  if (kindOf(info) != kind) {
+    editor().toast(QStringLiteral("種類の違うファイルです（動画は動画、写真は写真、音声は音声のファイルを選んでください）"), ToastKind::Error);
+    return;
+  }
+  const bool shorter = kind != AssetKind::Image && oldDuration > 0 && info.duration + 0.05 < oldDuration;
+  relinkTo(id, path, info);
+  // 同じフォルダにある、ほかの見つからないメディア（同じ名前のファイル）も、つなぎ直す
+  const QDir folder = QFileInfo(path).absoluteDir();
+  std::vector<std::pair<QString, QString>> more;
+  for (const auto& [otherId, other] : editor().assets()) {
+    if (otherId == id || other.status != AssetStatus::Missing) continue;
+    const QString candidate = folder.filePath(QFileInfo(other.path).fileName());
+    if (QFileInfo(candidate).isFile()) more.push_back({otherId, candidate});
+  }
+  int relinked = 0;
+  for (const auto& [otherId, candidate] : more) {
+    const Asset* other = editor().asset(otherId);
+    ProbeInfo oi;
+    QString oe;
+    if (!other || !probeMedia(candidate, oi, oe) || kindOf(oi) != other->kind) continue;
+    relinkTo(otherId, candidate, oi);
+    ++relinked;
+  }
+  QString message = relinked > 0 ? QStringLiteral("つなぎ直しました（同じフォルダの、見つからなかったファイル %1 個も）").arg(relinked)
+                                 : QStringLiteral("つなぎ直しました");
+  if (shorter) message += QStringLiteral("。元のファイルより短いので、足りない所は映りません");
+  editor().toast(message, ToastKind::Success);
+}
+
 void AssetList::contextMenuEvent(QContextMenuEvent* e) {
   QListWidgetItem* item = itemAt(e->pos());
   if (!item) return;
@@ -387,6 +464,10 @@ void AssetList::contextMenuEvent(QContextMenuEvent* e) {
     overlay->setEnabled(usable);
   }
   QAction* remove = menu.addAction(QStringLiteral("一覧から削除"));
+  // ファイルを動かした・名前を変えたとき: 場所を指定して、つなぎ直す（見つからないときは、目立つように先頭の言い方にする）
+  QAction* relink = menu.addAction(a && a->status == AssetStatus::Missing ? QStringLiteral("ファイルの場所を指定（リンクし直す）…")
+                                                                          : QStringLiteral("別のファイルにリンクし直す…"));
+  relink->setEnabled(a != nullptr);
   // オーディオ・写真・動画（動く GIF も）は、ワークショップに公開できる（AI サーバーで使えるときだけ。ワークショップから追加したものは、作った人のものなので出さない）
   QAction* publish = nullptr;
   const bool image = a && a->kind == AssetKind::Image;
@@ -409,6 +490,7 @@ void AssetList::contextMenuEvent(QContextMenuEvent* e) {
   else if (chosen == add) editor().addToTimeline({id});
   else if (overlay && chosen == overlay) editor().addOverlays({id});
   else if (chosen == remove) removeFromList(id);
+  else if (chosen == relink) relinkAssetInteractive(this, id);
   else if (publish && chosen == publish) {
     if (image) publishImageAsset(this, id);
     else if (video) publishVideoAsset(this, id);
@@ -489,8 +571,8 @@ class FitButton : public QPushButton {
   int overhead_ = 0;
 };
 
-/** 「ファイルを選択」「フォルダを選択」のボタンを横に並べた行 */
-static QWidget* makeAddRow(QWidget* parent, const QString& fileTip, const QString& folderTip, std::function<void()> pickFiles,
+/** 「ファイルを選択」「フォルダを選択」のボタンを横に並べた行。name は操作の案内で探す名前の始まり（Media・Audio） */
+static QWidget* makeAddRow(QWidget* parent, const QString& name, const QString& fileTip, const QString& folderTip, std::function<void()> pickFiles,
                            std::function<void()> pickFolder) {
   auto* row = new QWidget(parent);
   auto* h = new QHBoxLayout(row);
@@ -498,6 +580,8 @@ static QWidget* makeAddRow(QWidget* parent, const QString& fileTip, const QStrin
   h->setSpacing(4);
   auto* files = new FitButton(theme::icon(QStringLiteral("plus")), QStringLiteral("ファイルを選択"), QStringLiteral("ファイル"), row);
   auto* folder = new FitButton(theme::icon(QStringLiteral("folder-open")), QStringLiteral("フォルダを選択"), QStringLiteral("フォルダ"), row);
+  files->setObjectName(name + QStringLiteral("AddFiles"));
+  folder->setObjectName(name + QStringLiteral("AddFolder"));
   files->setToolTip(fileTip);
   folder->setToolTip(folderTip);
   for (QPushButton* b : {static_cast<QPushButton*>(files), static_cast<QPushButton*>(folder)}) {
@@ -578,14 +662,16 @@ QWidget* LibraryPanel::createMediaView(QWidget* parent) {
   mv->setContentsMargins(10, 10, 6, 0);
   mv->setSpacing(10);
   // ファイルを選ぶ（これまでどおり、選んだものはタイムラインにも置く）/ フォルダを選ぶ（中のものをまとめて一覧に登録する）
-  mv->addWidget(makeAddRow(mediaPage, QStringLiteral("動画・写真・音声のファイルを選んで追加します（タイムラインにも置きます）"),
+  mv->addWidget(makeAddRow(mediaPage, QStringLiteral("Media"), QStringLiteral("動画・写真・音声のファイルを選んで追加します（タイムラインにも置きます）"),
                            QStringLiteral("フォルダの中の動画・写真・音声を、まとめて一覧に登録します（動画・写真はメディア、音声はオーディオの一覧へ）"),
                            [mediaPage] { pickAndImport(mediaPage); }, [mediaPage] { pickFolderAndImport(mediaPage, false); }));
   mv->addWidget(makeWorkshopRow(mediaPage, ai::WorkshopKind::Image, QStringLiteral("MediaWorkshopButton"),
                                 QStringLiteral("みんなが公開した写真・短い動画（GIF も）を探して、メディアの一覧に追加します\n"
                                                "自分の写真・動画は、一覧で右クリックして「ワークショップに公開」で公開できます")));
   mv->addWidget(makeImportProgress(mediaPage));
-  mv->addWidget(new AssetList(AssetList::Kind::Media, mediaPage), 1);
+  auto* list = new AssetList(AssetList::Kind::Media, mediaPage);
+  list->setObjectName(QStringLiteral("MediaList"));  // 操作の案内で探す名前
+  mv->addWidget(list, 1);
   return mediaPage;
 }
 
@@ -597,14 +683,16 @@ QWidget* LibraryPanel::createAudioView(QWidget* parent) {
   av->setContentsMargins(10, 10, 6, 0);
   av->setSpacing(10);
   // 一覧に登録するだけ（タイムラインには置かない）。置くのは、一覧からドラッグするか、ダブルクリック
-  av->addWidget(makeAddRow(audioPage, QStringLiteral("音楽・効果音・ナレーションのファイルを選んで、一覧に登録します"),
+  av->addWidget(makeAddRow(audioPage, QStringLiteral("Audio"), QStringLiteral("音楽・効果音・ナレーションのファイルを選んで、一覧に登録します"),
                            QStringLiteral("フォルダの中の音声ファイルを、まとめて一覧に登録します"),
                            [audioPage] { pickAndImport(audioPage, true, false); }, [audioPage] { pickFolderAndImport(audioPage, true); }));
   av->addWidget(makeWorkshopRow(audioPage, ai::WorkshopKind::Audio, QStringLiteral("AudioWorkshopButton"),
                                 QStringLiteral("みんなが公開したオーディオ（BGM・効果音など）を試聴して、オーディオの一覧に追加します\n"
                                                "自分のものは、一覧で右クリックして「ワークショップに公開」で公開できます")));
   av->addWidget(makeImportProgress(audioPage));
-  av->addWidget(new AssetList(AssetList::Kind::Audio, audioPage), 1);
+  auto* list = new AssetList(AssetList::Kind::Audio, audioPage);
+  list->setObjectName(QStringLiteral("AudioList"));  // 操作の案内で探す名前
+  av->addWidget(list, 1);
   return audioPage;
 }
 
@@ -657,7 +745,9 @@ QWidget* LibraryPanel::createTextView(QWidget* parent) {
   grid->setSpacing(6);
   int i = 0;
   for (const auto& preset : textPresets()) {
-    grid->addWidget(makeTextCard(preset, textPage, group), i / 2, i % 2);
+    QToolButton* card = makeTextCard(preset, textPage, group);
+    card->setObjectName(QStringLiteral("TextPresetCard"));  // 操作の案内で探す名前（最初のカードを指す）
+    grid->addWidget(card, i / 2, i % 2);
     ++i;
   }
   v->addLayout(grid);

@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -12,9 +13,11 @@
 #include <set>
 
 #include "core/editor.h"
+#include "core/effects.h"
 #include "core/filters.h"
 #include "core/textstyles.h"
 #include "core/timeline.h"
+#include "core/transitions.h"
 
 namespace kv {
 
@@ -25,6 +28,47 @@ static QString colorHex(const QColor& c) {
 static QColor colorFrom(const QJsonValue& v, const QColor& fallback) {
   const QColor c(v.toString());
   return c.isValid() ? c : fallback;
+}
+
+QJsonArray effectsToJson(const std::vector<Effect>& effects) {
+  QJsonArray list;
+  for (const Effect& e : effects) {
+    QJsonObject o{{QStringLiteral("id"), e.id},
+                  {QStringLiteral("type"), effectTypeToString(e.type)},
+                  {QStringLiteral("enabled"), e.enabled},
+                  {QStringLiteral("amount"), e.amount}};
+    const EffectInfo& info = effectInfo(e.type);
+    if (!info.size.label.isEmpty()) o[QStringLiteral("size")] = e.size;
+    if (!info.softness.label.isEmpty()) o[QStringLiteral("softness")] = e.softness;
+    if (info.usesColor) o[QStringLiteral("color")] = colorHex(e.color);
+    list.append(o);
+  }
+  return list;
+}
+
+std::vector<Effect> effectsFromJson(const QJsonArray& list) {
+  std::vector<Effect> out;
+  for (const auto& v : list) {
+    const QJsonObject o = v.toObject();
+    EffectType type;
+    // 知らない種類（新しい版で作ったもの）は読み飛ばす
+    if (!effectTypeFromString(o.value(QStringLiteral("type")).toString(), &type)) continue;
+    Effect e = makeEffect(type);
+    const QString id = o.value(QStringLiteral("id")).toString();
+    if (!id.isEmpty()) e.id = id;
+    e.enabled = o.value(QStringLiteral("enabled")).toBool(true);
+    if (o.value(QStringLiteral("amount")).isDouble()) e.amount = o.value(QStringLiteral("amount")).toDouble();
+    if (o.value(QStringLiteral("size")).isDouble()) e.size = o.value(QStringLiteral("size")).toDouble();
+    if (o.value(QStringLiteral("softness")).isDouble()) e.softness = o.value(QStringLiteral("softness")).toDouble();
+    e.color = colorFrom(o.value(QStringLiteral("color")), e.color);
+    clampEffect(e);
+    // 同じ ID が重なっていたら付け直す（設定欄で見分けられるように）
+    for (const Effect& x : out) {
+      if (x.id == e.id) e.id = newId();
+    }
+    out.push_back(e);
+  }
+  return out;
 }
 
 static QJsonArray volumePointsToJson(const std::vector<VolumePoint>& pts) {
@@ -115,6 +159,39 @@ static QJsonObject clipToJson(const VideoClip& c) {
                                                   {QStringLiteral("blend"), c.chroma.blend},
                                                   {QStringLiteral("despill"), c.chroma.despill}};
   }
+  // 反転とエフェクト（使っているときだけ書く。以前の版で開くと、反転もエフェクトも無いクリップになる）
+  if (c.flipX || c.flipY) co[QStringLiteral("flip")] = QJsonObject{{QStringLiteral("x"), c.flipX}, {QStringLiteral("y"), c.flipY}};
+  if (!c.effects.empty()) co[QStringLiteral("effects")] = effectsToJson(c.effects);
+  // 前のクリップからのトランジション（使っているときだけ書く。以前の版で開くと、ふつうの切れ目になる）
+  if (c.transIn.type != TransitionType::None) {
+    QJsonObject tr{{QStringLiteral("type"), transitionToString(c.transIn.type)}, {QStringLiteral("duration"), c.transIn.duration}};
+    if (c.transIn.audioCrossfade) tr[QStringLiteral("audioCrossfade")] = true;  // 無ければ、音は切れ目でそのまま切り替わる
+    co[QStringLiteral("transition")] = tr;
+  }
+  // パン・逆再生（使っているときだけ書く。以前の版で開くと、真ん中の音・逆向きに作り直した動画をふつうに再生する）
+  if (std::abs(c.pan) > 1e-9) co[QStringLiteral("pan")] = c.pan;
+  if (!c.reversedFrom.isEmpty()) co[QStringLiteral("reversedFrom")] = c.reversedFrom;
+  // オブジェクトマスク（使っているときだけ書く。以前の版で開くと、マスクの無い映像になる）
+  if (c.mask.has()) {
+    const ObjectMask& m = c.mask;
+    QJsonArray prompts;
+    for (const MaskPrompt& p : m.prompts) {
+      QJsonArray points;
+      for (const MaskPoint& q : p.points) {
+        points.append(QJsonObject{{QStringLiteral("x"), q.x}, {QStringLiteral("y"), q.y}, {QStringLiteral("label"), q.positive ? 1 : 0}});
+      }
+      prompts.append(QJsonObject{{QStringLiteral("t"), p.t}, {QStringLiteral("points"), points}});
+    }
+    QJsonObject mo{{QStringLiteral("id"), m.id},
+                   {QStringLiteral("prompts"), prompts},
+                   {QStringLiteral("enabled"), m.enabled},
+                   {QStringLiteral("mode"), m.mode == MaskMode::Effects ? QStringLiteral("effects") : QStringLiteral("cutout")}};
+    if (!m.file.isEmpty()) mo[QStringLiteral("file")] = m.file;
+    if (m.invert) mo[QStringLiteral("invert")] = true;
+    if (std::abs(m.expand) > 1e-9) mo[QStringLiteral("expand")] = m.expand;
+    if (m.feather > 1e-9) mo[QStringLiteral("feather")] = m.feather;
+    co[QStringLiteral("objectMask")] = mo;
+  }
   return co;
 }
 
@@ -173,6 +250,15 @@ QJsonObject projectToJson(const ProjectData& p) {
     oo[QStringLiteral("start")] = o.start;
     oo[QStringLiteral("track")] = o.track;
     if (!o.group.isEmpty()) oo[QStringLiteral("group")] = o.group;
+    // エフェクトレイヤー（素材なし。範囲の形・境目のぼかし・反転）
+    if (o.isEffectLayer()) {
+      oo[QStringLiteral("layer")] = QStringLiteral("effect");
+      const QString shape = o.region.shape == RegionShape::Full   ? QStringLiteral("full")
+                            : o.region.shape == RegionShape::Rect ? QStringLiteral("rect")
+                                                                  : QStringLiteral("ellipse");
+      oo[QStringLiteral("region")] =
+          QJsonObject{{QStringLiteral("shape"), shape}, {QStringLiteral("feather"), o.region.feather}, {QStringLiteral("invert"), o.region.invert}};
+    }
     overlays.append(oo);
   }
   QJsonArray texts;
@@ -192,6 +278,7 @@ QJsonObject projectToJson(const ProjectData& p) {
         {QStringLiteral("fadeOut"), a.fadeOut},
     };
     if (!a.group.isEmpty()) ao[QStringLiteral("group")] = a.group;
+    if (std::abs(a.pan) > 1e-9) ao[QStringLiteral("pan")] = a.pan;  // 使っているときだけ（以前の版では真ん中の音）
     audios.append(ao);
   }
   proj[QStringLiteral("clips")] = clips;
@@ -213,6 +300,30 @@ QJsonObject projectToJson(const ProjectData& p) {
   if (p.textTrackNos.size() > 1) proj[QStringLiteral("textTrackNos")] = nosToJson(p.textTrackNos);
   proj[QStringLiteral("audios")] = audios;
   if (p.audioTrackNos.size() > 1) proj[QStringLiteral("audioTrackNos")] = nosToJson(p.audioTrackNos);
+  // マーカー（使っているときだけ書く。以前の版は読み飛ばす）
+  if (!p.markers.empty()) {
+    QJsonArray markers;
+    for (const Marker& m : p.markers) {
+      QJsonObject mo{{QStringLiteral("id"), m.id}, {QStringLiteral("t"), m.t}, {QStringLiteral("color"), colorHex(m.color)}};
+      if (!m.name.isEmpty()) mo[QStringLiteral("name")] = m.name;
+      if (!m.comment.isEmpty()) mo[QStringLiteral("comment")] = m.comment;
+      markers.append(mo);
+    }
+    proj[QStringLiteral("markers")] = markers;
+  }
+  // トラックの非表示・ミュート（使っているときだけ書く。以前の版で開くと、すべて出す）
+  QJsonObject tracks;
+  if (p.mainVideoHidden) tracks[QStringLiteral("mainVideoHidden")] = true;
+  if (p.mainAudioMuted) tracks[QStringLiteral("mainAudioMuted")] = true;
+  if (!p.hiddenTextTracks.empty()) {
+    QJsonArray a;
+    for (const QString& id : p.hiddenTextTracks) a.append(id);
+    tracks[QStringLiteral("hiddenText")] = a;
+  }
+  if (!p.hiddenOverlayTracks.empty()) tracks[QStringLiteral("hiddenOverlay")] = nosToJson(p.hiddenOverlayTracks);
+  if (!p.mutedOverlayTracks.empty()) tracks[QStringLiteral("mutedOverlay")] = nosToJson(p.mutedOverlayTracks);
+  if (!p.mutedAudioTracks.empty()) tracks[QStringLiteral("mutedAudio")] = nosToJson(p.mutedAudioTracks);
+  if (!tracks.isEmpty()) proj[QStringLiteral("trackStates")] = tracks;
   return proj;
 }
 
@@ -237,7 +348,7 @@ QByteArray serializeProject() {
   // 今の編集場所 1 つ分。プロジェクトの中身と、メディア一覧（タイムラインで使っているものを含む）
   const WorkspaceData ws = editor().snapshotOf(editor().workspaceIndex());
   QJsonObject root{
-      {QStringLiteral("app"), QStringLiteral("kantan-video-editor")},
+      {QStringLiteral("app"), QStringLiteral("e-editor")},
       {QStringLiteral("version"), 1},
       {QStringLiteral("savedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
       {QStringLiteral("project"), projectToJson(ws.project)},
@@ -261,7 +372,7 @@ QByteArray serializeSession() {
     });
   }
   QJsonObject root{
-      {QStringLiteral("app"), QStringLiteral("kantan-video-editor")},
+      {QStringLiteral("app"), QStringLiteral("e-editor")},
       {QStringLiteral("version"), 2},
       {QStringLiteral("savedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
       {QStringLiteral("activeWorkspace"), file.active},
@@ -322,6 +433,52 @@ static VideoClip clipFromJson(const QJsonObject& o) {
     c.chroma.despill = ck.value(QStringLiteral("despill")).toBool(true);
   }
   clampCropStretch(c);
+  // 反転とエフェクト（以前のプロジェクトには無い。その場合は使わない）
+  const QJsonObject flip = o.value(QStringLiteral("flip")).toObject();
+  c.flipX = flip.value(QStringLiteral("x")).toBool(false);
+  c.flipY = flip.value(QStringLiteral("y")).toBool(false);
+  c.effects = effectsFromJson(o.value(QStringLiteral("effects")).toArray());
+  // トランジション（以前のプロジェクトには無い。知らない種類は読み飛ばす）
+  const QJsonObject tr = o.value(QStringLiteral("transition")).toObject();
+  TransitionType tt = TransitionType::None;
+  if (transitionFromString(tr.value(QStringLiteral("type")).toString(), &tt)) {
+    c.transIn.type = tt;
+    c.transIn.duration = std::clamp(numOr(tr, "duration", kDefaultTransitionDuration), kMinTransitionDuration, kMaxTransitionDuration);
+    // 音のクロスフェード（以前のプロジェクトには無い。その場合は、これまでどおり音は切れ目でそのまま切り替える）
+    c.transIn.audioCrossfade = tr.value(QStringLiteral("audioCrossfade")).toBool(false);
+  }
+  // パン・逆再生（以前のプロジェクトには無い。その場合は真ん中・ふつうの向き）
+  c.pan = std::clamp(numOr(o, "pan", 0), -kMaxPan, kMaxPan);
+  c.reversedFrom = o.value(QStringLiteral("reversedFrom")).toString();
+  // オブジェクトマスク（以前のプロジェクトには無い。その場合は使わない）
+  const QJsonObject mo = o.value(QStringLiteral("objectMask")).toObject();
+  if (!mo.isEmpty()) {
+    ObjectMask m;
+    m.id = mo.value(QStringLiteral("id")).toString().left(64);
+    // マスクのファイルは、generated フォルダーの中の名前だけ（ほかの場所のファイルは読まない）
+    const QString file = mo.value(QStringLiteral("file")).toString();
+    if (!file.isEmpty() && QFileInfo(file).fileName() == file && file.endsWith(QStringLiteral(".kvmask"))) m.file = file;
+    for (const auto& pv : mo.value(QStringLiteral("prompts")).toArray()) {
+      const QJsonObject po = pv.toObject();
+      MaskPrompt p;
+      p.t = std::max(0.0, numOr(po, "t", 0));
+      for (const auto& qv : po.value(QStringLiteral("points")).toArray()) {
+        const QJsonObject qo = qv.toObject();
+        MaskPoint q;
+        q.x = std::clamp(numOr(qo, "x", 0.5), 0.0, 1.0);
+        q.y = std::clamp(numOr(qo, "y", 0.5), 0.0, 1.0);
+        q.positive = qo.value(QStringLiteral("label")).toInt(1) != 0;
+        if (p.points.size() < 32) p.points.push_back(q);
+      }
+      if (!p.points.empty() && m.prompts.size() < 32) m.prompts.push_back(p);
+    }
+    m.enabled = mo.value(QStringLiteral("enabled")).toBool(true);
+    m.mode = mo.value(QStringLiteral("mode")).toString() == u"effects" ? MaskMode::Effects : MaskMode::Cutout;
+    m.invert = mo.value(QStringLiteral("invert")).toBool(false);
+    m.expand = std::clamp(numOr(mo, "expand", 0), -kMaxMaskExpand, kMaxMaskExpand);
+    m.feather = std::clamp(numOr(mo, "feather", 0), 0.0, kMaxMaskFeather);
+    if (m.has()) c.mask = m;
+  }
   return c;
 }
 
@@ -380,6 +537,21 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
   file.project.settings.fps = (fps == 24 || fps == 30 || fps == 60) ? fps : 30;
   // 動画全体の再生速度（以前のプロジェクトには無い。その場合は元の速さ）
   file.project.settings.speed = std::clamp(settings.value(QStringLiteral("speed")).toDouble(1), kMinProjectSpeed, kMaxProjectSpeed);
+  // マーカー（以前のプロジェクトには無い）。時間の順にそろえる
+  for (const auto& v : p.value(QStringLiteral("markers")).toArray()) {
+    const QJsonObject o = v.toObject();
+    Marker m;
+    m.id = o.value(QStringLiteral("id")).toString();
+    // ID が無い・ほかのマーカーと同じ（手で書き換えたファイルなど）なら、新しく付ける（ID で選ぶ・動かすので）
+    const bool dup = std::any_of(file.project.markers.begin(), file.project.markers.end(), [&](const Marker& x) { return x.id == m.id; });
+    if (m.id.isEmpty() || dup) m.id = newId();
+    m.t = frameRound(std::max(0.0, numOr(o, "t", 0)), file.project.settings.fps);  // フレームにそろえる
+    m.name = o.value(QStringLiteral("name")).toString();
+    m.comment = o.value(QStringLiteral("comment")).toString();
+    m.color = colorFrom(o.value(QStringLiteral("color")), Marker{}.color);
+    file.project.markers.push_back(m);
+  }
+  std::stable_sort(file.project.markers.begin(), file.project.markers.end(), [](const Marker& a, const Marker& b) { return a.t < b.t; });
 
   for (const auto& v : p.value(QStringLiteral("clips")).toArray()) file.project.clips.push_back(clipFromJson(v.toObject()));
   // 重ねるトラック（以前のプロジェクトには無い）
@@ -391,6 +563,17 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
     item.start = std::max(0.0, numOr(o, "start", 0));
     item.track = std::max(0, o.value(QStringLiteral("track")).toInt(0));
     item.group = o.value(QStringLiteral("group")).toString();
+    // エフェクトレイヤー（以前のプロジェクトには無い）。素材は使わず、長さは写真と同じ数え方
+    if (o.value(QStringLiteral("layer")).toString() == u"effect") {
+      item.kind = LayerKind::Effect;
+      item.assetId.clear();
+      item.isImage = true;
+      const QJsonObject r = o.value(QStringLiteral("region")).toObject();
+      const QString shape = r.value(QStringLiteral("shape")).toString();
+      item.region.shape = shape == u"full" ? RegionShape::Full : shape == u"rect" ? RegionShape::Rect : RegionShape::Ellipse;
+      item.region.feather = std::clamp(numOr(r, "feather", EffectRegion{}.feather), 0.0, kMaxRegionFeather);
+      item.region.invert = r.value(QStringLiteral("invert")).toBool(false);
+    }
     file.project.overlays.push_back(item);
   }
   bool hasAllTracks = true;
@@ -428,6 +611,7 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
     a.fadeIn = std::max(0.0, numOr(o, "fadeIn", 0));
     a.fadeOut = std::max(0.0, numOr(o, "fadeOut", 0));
     a.group = o.value(QStringLiteral("group")).toString();
+    a.pan = std::clamp(numOr(o, "pan", 0), -kMaxPan, kMaxPan);  // 以前のプロジェクトには無い（真ん中）
     file.project.audios.push_back(a);
   }
   if (!audioTracked) autoAssignAudioTracks(file.project.audios);
@@ -435,7 +619,16 @@ static WorkspaceData workspaceFromJson(const QJsonObject& p, const QJsonArray& a
   if (audioTracked) {
     for (const auto& v : p.value(QStringLiteral("audioTrackNos")).toArray()) file.project.audioTrackNos.push_back(v.toInt(0));
   }
+  // トラックの非表示・ミュート（以前のプロジェクトには無い。その場合はすべて出す）
+  const QJsonObject tracks = p.value(QStringLiteral("trackStates")).toObject();
+  file.project.mainVideoHidden = tracks.value(QStringLiteral("mainVideoHidden")).toBool(false);
+  file.project.mainAudioMuted = tracks.value(QStringLiteral("mainAudioMuted")).toBool(false);
+  for (const auto& v : tracks.value(QStringLiteral("hiddenText")).toArray()) file.project.hiddenTextTracks.push_back(v.toString());
+  for (const auto& v : tracks.value(QStringLiteral("hiddenOverlay")).toArray()) file.project.hiddenOverlayTracks.push_back(v.toInt(-1));
+  for (const auto& v : tracks.value(QStringLiteral("mutedOverlay")).toArray()) file.project.mutedOverlayTracks.push_back(v.toInt(-1));
+  for (const auto& v : tracks.value(QStringLiteral("mutedAudio")).toArray()) file.project.mutedAudioTracks.push_back(v.toInt(-1));
   syncAudioTrackNos(file.project);
+  normalizeTrackFlags(file.project);
   for (const auto& v : assetList) {
     const QJsonObject o = v.toObject();
     Asset a;
@@ -456,7 +649,7 @@ std::optional<ProjectFile> parseProject(const QByteArray& json, QString* error) 
   QJsonParseError pe;
   const QJsonDocument doc = QJsonDocument::fromJson(json, &pe);
   const QJsonObject root = doc.object();
-  const bool isOurs = pe.error == QJsonParseError::NoError && root.value(QStringLiteral("app")).toString() == u"kantan-video-editor";
+  const bool isOurs = pe.error == QJsonParseError::NoError && root.value(QStringLiteral("app")).toString() == u"e-editor";
   const bool isMulti = root.value(QStringLiteral("workspaces")).isArray();
   const bool isLegacy = root.value(QStringLiteral("project")).isObject() && root.value(QStringLiteral("assets")).isArray();
   if (!isOurs || (!isMulti && !isLegacy)) {
